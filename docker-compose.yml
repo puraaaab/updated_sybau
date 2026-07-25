@@ -1,0 +1,88 @@
+services:
+  # MediaMTX Streaming Server
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: vms_mediamtx
+    ports:
+      - "9997:9997"  # MediaMTX API
+      - "8554:8554"  # RTSP
+      - "1935:1935"  # RTMP
+      - "8888:8888"  # HLS
+      - "8889:8889"  # WebRTC (WHEP)
+      - "8189:8189/udp" # WebRTC ICE
+    environment:
+      - MTX_PROTOCOLS=tcp
+      - MTX_HLS=yes
+      - MTX_WEBRTC=yes
+      - MTX_API=yes
+      - MTX_APIADDRESS=:9997
+    restart: unless-stopped
+
+  # PostgreSQL for metadata and event history
+  postgres:
+    image: postgres:15-alpine
+    container_name: vms_postgres
+    environment:
+      POSTGRES_DB: vms_db
+      POSTGRES_USER: vms_user
+      POSTGRES_PASSWORD: vms_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # Qdrant for vector embeddings (semantic & face search)
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: vms_qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  # MinIO Object Storage for video files & images
+  minio:
+    image: minio/minio:latest
+    container_name: vms_minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"  # API
+      - "9001:9001"  # Web Console
+    environment:
+      MINIO_ROOT_USER: minio_admin
+      MINIO_ROOT_PASSWORD: minio_password
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  # Kafka + Zookeeper for event communication
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: vms_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: vms_kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  minio_data:

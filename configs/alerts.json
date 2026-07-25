@@ -1,0 +1,11 @@
+{
+  "loitering": {
+    "time_threshold_seconds": 10.0
+  },
+  "crowd": {
+    "density_threshold": 5
+  },
+  "running": {
+    "speed_threshold_pixels_per_second": 150.0
+  }
+}

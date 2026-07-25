@@ -1,0 +1,29 @@
+{
+  "demo_mode": false,
+  "yolo": {
+    "model_path": "yolo26m.pt",
+    "device": "cuda",
+    "confidence": 0.25
+  },
+  "face": {
+    "enabled": true,
+    "detector_path": "scrfd_500m.onnx",
+    "recognizer_model": "buffalo_l",
+    "device": "cpu"
+  },
+  "vehicle": {
+    "enabled": true,
+    "reid_model": "market1501",
+    "ocr_engine": "easyocr"
+  },
+  "florence": {
+    "enabled": true,
+    "model_id": "microsoft/Florence-2-large",
+    "device": "cuda",
+    "invoke_every_n_frames": 30
+  },
+  "embeddings": {
+    "model_name": "all-MiniLM-L6-v2",
+    "device": "cpu"
+  }
+}
