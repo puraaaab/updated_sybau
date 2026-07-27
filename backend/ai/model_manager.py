@@ -75,8 +75,8 @@ class MockYOLO:
 
 
 class MockOCR:
-    def readtext(self, img_crop):
-        return [([[0, 0], [100, 0], [100, 20], [0, 20]], "ABC1234", 0.95)]
+    def readtext(self, img_crop, *args, **kwargs):
+        return [([[0, 0], [100, 0], [100, 20], [0, 20]], "KA51MB8811", 0.95)]
 
 
 class MockFlorence:
@@ -136,11 +136,16 @@ class ModelManager:
                 except Exception as e:
                     print(f"PaddleOCR note ({e}), falling back to EasyOCR...")
 
-            import easyocr
-            print("Loading EasyOCR reader...")
-            reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
-            self._models["ocr"] = ("easyocr", reader)
-            return self._models["ocr"]
+            try:
+                import easyocr
+                print("Loading EasyOCR reader...")
+                reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+                self._models["ocr"] = ("easyocr", reader)
+                return self._models["ocr"]
+            except Exception as e:
+                print(f"EasyOCR note ({e}), falling back to MockOCR...")
+                self._models["ocr"] = ("mock", MockOCR())
+                return self._models["ocr"]
 
     def get_florence(self):
         with self._lock:
