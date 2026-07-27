@@ -101,9 +101,9 @@ async def lifespan(app: FastAPI):
         if db.query(User).count() == 0:
             print("Seeding default users...")
             from .auth.helpers import get_password_hash
-            db.add(User(username="admin", password_hash=get_password_hash("admin123"), role="admin"))
-            db.add(User(username="operator", password_hash=get_password_hash("operator123"), role="operator"))
-            db.add(User(username="viewer", password_hash=get_password_hash("viewer123"), role="viewer"))
+            db.add(User(username="admin", password_hash=get_password_hash("Admin@123456"), role="admin"))
+            db.add(User(username="operator", password_hash=get_password_hash("Operator@123456"), role="operator"))
+            db.add(User(username="viewer", password_hash=get_password_hash("Viewer@123456"), role="viewer"))
             db.commit()
     finally:
         db.close()
