@@ -1,4 +1,5 @@
 import logging
+from typing import List, Dict, Any
 
 import numpy as np
 
@@ -133,3 +134,79 @@ def detect_and_track(frame: np.ndarray):
         })
 
     return detections
+
+
+def detect_and_track_batch(
+    frames: List[np.ndarray],
+    stream_ids: List[str],
+    frame_counters: List[int],
+    skip_interval: int = 3
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Executes batched YOLO tracking across multiple camera streams with selective frame skipping.
+    """
+    batch_detections = {stream_id: [] for stream_id in stream_ids}
+    frames_to_process = []
+    active_stream_indices = []
+
+    # 1. Apply Frame-Skipping cadence filter
+    for idx, (frame, stream_id, count) in enumerate(zip(frames, stream_ids, frame_counters)):
+        if count % skip_interval == 0:
+            frames_to_process.append(frame)
+            active_stream_indices.append(idx)
+
+    if not frames_to_process:
+        return batch_detections
+
+    # 2. Run batched tracker inference
+    try:
+        yolo_model = model_manager.get_yolo()
+        results = yolo_model.track(
+            frames_to_process,
+            persist=True,
+            tracker="bytetrack.yaml",
+            classes=COCO_CLASS_IDS,
+            conf=CONF_THRESHOLD,
+            verbose=False,
+        )
+    except Exception:
+        logger.exception("Batched YOLO track() failed due to runtime/CUDA surge; skipping batch.")
+        return batch_detections
+
+    # 3. Parse batched tensor outputs safely
+    for batch_idx, result in enumerate(results):
+        orig_stream_idx = active_stream_indices[batch_idx]
+        stream_id = stream_ids[orig_stream_idx]
+
+        boxes = getattr(result, "boxes", None)
+        if boxes is None or len(boxes) == 0 or not hasattr(boxes, "id") or boxes.id is None:
+            continue
+
+        try:
+            xyxy_list = boxes.xyxy.cpu().numpy()
+            cls_list = boxes.cls.cpu().numpy()
+            conf_list = boxes.conf.cpu().numpy()
+            id_list = boxes.id.cpu().numpy()
+        except Exception:
+            logger.warning(f"Failed to copy tensor to CPU for stream: {stream_id}")
+            continue
+
+        for i, track_id in enumerate(id_list):
+            if np.isnan(track_id) or track_id < 0:
+                continue
+            if i >= len(cls_list) or i >= len(conf_list) or i >= len(xyxy_list):
+                break
+
+            cls_id = int(cls_list[i])
+            class_name = COCO_CLASSES.get(cls_id)
+            if class_name is None:
+                continue
+
+            batch_detections[stream_id].append({
+                "track_id": int(round(track_id)),
+                "class_name": class_name,
+                "confidence": float(conf_list[i]),
+                "bbox": [float(val) for val in xyxy_list[i]]
+            })
+
+    return batch_detections
