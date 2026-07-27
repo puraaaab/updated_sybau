@@ -177,6 +177,8 @@ class ModelManager:
             self._models["florence"] = (model, processor)
             return self._models["florence"]
 
+    get_paddle_ocr = get_ocr
+
 
 # Global Instance
 model_manager = ModelManager()
