@@ -97,6 +97,45 @@ def get_reid_model():
         ])
     return _reid_model, _preprocess
 
+
+def detect_vehicle_color(crop: np.ndarray) -> str:
+    """Extracts dominant vehicle body color for natural language search queries (e.g. 'black TATA car')."""
+    try:
+        h, w = crop.shape[:2]
+        if h < 15 or w < 15:
+            return "unknown"
+        body_crop = crop[:int(h * 0.7), int(w * 0.1):int(w * 0.9)]
+        if body_crop.size == 0:
+            return "unknown"
+
+        hsv = cv2.cvtColor(body_crop, cv2.COLOR_BGR2HSV)
+        v_val = float(np.mean(hsv[:, :, 2]))
+        s_val = float(np.mean(hsv[:, :, 1]))
+        h_val = float(np.mean(hsv[:, :, 0]))
+
+        if v_val < 55:
+            return "black"
+        elif v_val > 195 and s_val < 35:
+            return "white"
+        elif s_val < 45 and 55 <= v_val <= 195:
+            return "silver"
+
+        if h_val < 10 or h_val > 170:
+            return "red"
+        elif 15 <= h_val <= 35:
+            return "yellow"
+        elif 35 < h_val <= 85:
+            return "green"
+        elif 85 < h_val <= 130:
+            return "blue"
+        elif 130 < h_val <= 170:
+            return "purple"
+
+        return "dark" if v_val < 125 else "light"
+    except Exception:
+        return "unknown"
+
+
 def process_vehicles(frame: np.ndarray, detections: list):
     """
     Identifies vehicles, extracts license plate crops, runs OCR, 
@@ -119,6 +158,7 @@ def process_vehicles(frame: np.ndarray, detections: list):
                     "license_plate": plate_text,
                     "ocr_confidence": 0.96,
                     "vehicle_type": veh["class_name"],
+                    "vehicle_color": "black" if idx % 2 == 0 else "white",
                     "reid_vector": np.random.normal(0, 1, 576).tolist()
                 })
         return vehicles_detected
@@ -140,10 +180,11 @@ def process_vehicles(frame: np.ndarray, detections: list):
         ymin, ymax = int(max(0, bbox[1])), int(min(h, bbox[3]))
         xmin, xmax = int(max(0, bbox[0])), int(min(w, bbox[2]))
         
-        if ymax - ymin < 10 or xmax - xmin < 10:
+        if ymax - ymin < 25 or xmax - xmin < 25:
             continue
             
         crop = frame[ymin:ymax, xmin:xmax]
+        vehicle_color = detect_vehicle_color(crop)
         
         # Compute visual Re-ID vector embedding
         try:
@@ -233,6 +274,7 @@ def process_vehicles(frame: np.ndarray, detections: list):
             "license_plate": plate_text,
             "ocr_confidence": ocr_conf,
             "vehicle_type": veh["class_name"],
+            "vehicle_color": vehicle_color,
             "reid_vector": reid_vector
         })
             

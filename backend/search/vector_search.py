@@ -111,6 +111,7 @@ def _local_text_matches(query_text: str, limit: int) -> list:
         text_to_compare = " ".join(filter(None, [
             str(item["payload"].get("caption") or ""),
             str(item["payload"].get("vehicle_type") or ""),
+            str(item["payload"].get("vehicle_color") or ""),
             str(item["payload"].get("license_plate") or "")
         ])).strip()
 
@@ -165,6 +166,7 @@ def perform_semantic_search(query_text: str, limit: int = 10) -> list:
                 text_to_compare = " ".join(filter(None, [
                     str(r.payload.get("caption") or ""),
                     str(r.payload.get("vehicle_type") or ""),
+                    str(r.payload.get("vehicle_color") or ""),
                     str(r.payload.get("license_plate") or "")
                 ])).strip()
                 score += _keyword_boost(query_text, text_to_compare)
