@@ -118,8 +118,10 @@ def create_forensic_export(
     }
 
 @router.get("/download/{filename}")
-def download_forensic_file(filename: str):
-    file_path = os.path.abspath(os.path.join(EXPORT_DIR, filename))
+def download_forensic_file(filename: str, user=Depends(verify_viewer)):
+    from ..utils.security import safe_join_path
+    file_path = safe_join_path(EXPORT_DIR, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Export file not found.")
     return FileResponse(file_path, media_type="application/zip", filename=filename)
+

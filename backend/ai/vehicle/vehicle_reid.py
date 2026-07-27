@@ -123,8 +123,13 @@ def process_vehicles(frame: np.ndarray, detections: list):
                 })
         return vehicles_detected
 
-    # Real Inference Mode using EasyOCR and torchvision MobileNetV3 Re-ID
-    reader = model_manager.get_ocr()
+    # Real Inference Mode using PaddleOCR/EasyOCR and torchvision MobileNetV3 Re-ID
+    ocr_obj = model_manager.get_ocr()
+    if isinstance(ocr_obj, tuple):
+        ocr_type, reader = ocr_obj
+    else:
+        ocr_type, reader = "mock", ocr_obj
+
     reid_model, preprocess = get_reid_model()
     
     for veh in vehicles:
@@ -175,16 +180,27 @@ def process_vehicles(frame: np.ndarray, detections: list):
                         # Multi-pass OCR: try binarized, inverted, and grayscale
                         for img_variant in [binarized, binarized_inv, gray_enhanced]:
                             try:
-                                res = reader.readtext(
-                                    img_variant,
-                                    allowlist=ALLOWLIST,
-                                    min_size=10,
-                                    text_threshold=0.5,
-                                    link_threshold=0.4,
-                                    low_text=0.3,
-                                )
+                                if ocr_type == "paddleocr":
+                                    pd_res = reader.ocr(img_variant, cls=False)
+                                    res = []
+                                    if pd_res and pd_res[0]:
+                                        for item in pd_res[0]:
+                                            bbox_coords, (txt, conf) = item
+                                            res.append((bbox_coords, txt, float(conf)))
+                                else:
+                                    res = reader.readtext(
+                                        img_variant,
+                                        allowlist=ALLOWLIST,
+                                        min_size=10,
+                                        text_threshold=0.5,
+                                        link_threshold=0.4,
+                                        low_text=0.3,
+                                    )
                             except Exception:
-                                res = reader.readtext(img_variant, allowlist=ALLOWLIST)
+                                if hasattr(reader, 'readtext'):
+                                    res = reader.readtext(img_variant, allowlist=ALLOWLIST)
+                                else:
+                                    res = []
 
                             if not res:
                                 continue

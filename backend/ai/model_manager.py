@@ -123,11 +123,24 @@ class ModelManager:
                 self._models["ocr"] = MockOCR()
                 return self._models["ocr"]
 
+            cfg = get_models().get("vehicle", {})
+            engine_choice = cfg.get("ocr_engine", "paddleocr").lower()
+
+            if engine_choice == "paddleocr":
+                try:
+                    from paddleocr import PaddleOCR
+                    print("Loading PaddleOCR ultra-fast license plate engine...")
+                    reader = PaddleOCR(use_angle_cls=False, lang='en', show_log=False)
+                    self._models["ocr"] = ("paddleocr", reader)
+                    return self._models["ocr"]
+                except Exception as e:
+                    print(f"PaddleOCR note ({e}), falling back to EasyOCR...")
+
             import easyocr
             print("Loading EasyOCR reader...")
             reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
-            self._models["ocr"] = reader
-            return reader
+            self._models["ocr"] = ("easyocr", reader)
+            return self._models["ocr"]
 
     def get_florence(self):
         with self._lock:

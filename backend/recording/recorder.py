@@ -60,23 +60,24 @@ class CameraRecorder:
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 out = cv2.VideoWriter(filepath, fourcc, record_fps, (width, height))
 
-                segment_start = time.time()
-                frames_written = 0
-                last_frame_ts = 0.0
+                try:
+                    segment_start = time.time()
+                    frames_written = 0
+                    last_frame_ts = 0.0
 
-                while self.running and (time.time() - segment_start) < self.segment_duration:
-                    success, frame, ts = stream.get_frame()
-                    if not success or frame is None or ts <= last_frame_ts:
-                        time.sleep(1.0 / record_fps)
-                        continue
+                    while self.running and (time.time() - segment_start) < self.segment_duration:
+                        success, frame, ts = stream.get_frame()
+                        if not success or frame is None or ts <= last_frame_ts:
+                            time.sleep(1.0 / record_fps)
+                            continue
 
-                    last_frame_ts = ts
-                    out.write(frame)
-                    frames_written += 1
-                    # Pacing to match stream FPS
-                    time.sleep(max(0.005, (1.0 / record_fps) * 0.5))
-
-                out.release()
+                        last_frame_ts = ts
+                        out.write(frame)
+                        frames_written += 1
+                        # Pacing to match stream FPS
+                        time.sleep(max(0.005, (1.0 / record_fps) * 0.5))
+                finally:
+                    out.release()
 
                 # Delete empty segment files
                 if frames_written == 0:

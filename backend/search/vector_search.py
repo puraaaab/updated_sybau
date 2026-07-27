@@ -73,7 +73,10 @@ def _keyword_boost(query_text: str, candidate_text: str) -> float:
 
 
 def _seed_demo_vector_db():
-    """Populate model_manager.vector_db with demo records if it is still empty."""
+    """Populate model_manager.vector_db with demo records if demo_mode is enabled and DB is empty."""
+    cfg = get_models()
+    if not cfg.get("demo_mode", False):
+        return
     if model_manager.vector_db:
         return  # already seeded (e.g. real frames arrived)
     for rec in _DEMO_RECORDS:

@@ -8,7 +8,6 @@ import CloseIcon from '@mui/icons-material/Close';
 import MovieIcon from '@mui/icons-material/Movie';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import DownloadIcon from '@mui/icons-material/Download';
-import AddIcon from '@mui/icons-material/Add';
 
 function toStreamName(name) {
   return name.toLowerCase().replace(/[^a-z0-9]/g, '_');

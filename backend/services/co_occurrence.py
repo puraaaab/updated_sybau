@@ -71,26 +71,29 @@ def get_suspect_co_occurrence(
                 "analytical_summary": f"Spatial-Temporal Link: {len(group_members)} entities detected co-occurring at {cam.name if cam else t1.camera_id} within {time_window_minutes} min window."
             })
             
-    # Mock default groups if database is clean/empty for demonstration
+    # Mock default groups if database is clean/empty and demo_mode is enabled
     if not groups:
-        now = datetime.datetime.now(datetime.timezone.utc)
-        groups = [
-            {
-                "group_id": "GRP_DEMO_001",
-                "camera_id": "cam_1",
-                "camera_name": "Central Bus Depo",
-                "location": "Platform Area",
-                "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
-                "confidence_score": 0.92,
-                "member_count": 3,
-                "members": [
-                    {"track_uuid": "track_101", "label": "person", "role_hypothesis": "Primary Suspect (Jewellery Entry)", "speed": 1.2},
-                    {"track_uuid": "track_102", "label": "motorcycle", "role_hypothesis": "Getaway Vehicle (Waiting Outside)", "speed": 0.0},
-                    {"track_uuid": "track_103", "label": "person", "role_hypothesis": "Lookout (Street Corner)", "speed": 0.5}
-                ],
-                "analytical_summary": "Spatial-Temporal Link: 3 entities detected co-occurring at Central Bus Depo within 3 min window."
-            }
-        ]
+        from ..config.service import get_models
+        cfg = get_models()
+        if cfg.get("demo_mode", False):
+            now = datetime.datetime.now(datetime.timezone.utc)
+            groups = [
+                {
+                    "group_id": "GRP_DEMO_001",
+                    "camera_id": "cam_1",
+                    "camera_name": "Central Bus Depo",
+                    "location": "Platform Area",
+                    "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    "confidence_score": 0.92,
+                    "member_count": 3,
+                    "members": [
+                        {"track_uuid": "track_101", "label": "person", "role_hypothesis": "Primary Suspect (Jewellery Entry)", "speed": 1.2},
+                        {"track_uuid": "track_102", "label": "motorcycle", "role_hypothesis": "Getaway Vehicle (Waiting Outside)", "speed": 0.0},
+                        {"track_uuid": "track_103", "label": "person", "role_hypothesis": "Lookout (Street Corner)", "speed": 0.5}
+                    ],
+                    "analytical_summary": "Spatial-Temporal Link: 3 entities detected co-occurring at Central Bus Depo within 3 min window."
+                }
+            ]
 
     return {
         "time_window_minutes": time_window_minutes,
