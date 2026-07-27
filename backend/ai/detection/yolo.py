@@ -6,18 +6,56 @@ from ..model_manager import model_manager
 
 logger = logging.getLogger(__name__)
 
-# COCO Class mapping for labels of interest
+# COCO Class mapping for labels of interest (Tailored for Indian Street CCTV Surveillance)
 COCO_CLASSES = {
+    # People & Vehicles (0-8)
     0: "person",
     1: "bicycle",
     2: "car",
     3: "motorcycle",
+    4: "airplane",
     5: "bus",
+    6: "train",
     7: "truck",
+    8: "boat",
+    # Outdoor & Traffic (9-13)
+    9: "traffic light",
+    10: "fire hydrant",
+    11: "stop sign",
+    12: "parking meter",
+    13: "bench",
+    # Street Animals & Cattle (14-20)
+    14: "bird",
+    15: "cat",
+    16: "dog",
+    17: "horse",
+    18: "sheep",
+    19: "cow",
+    20: "elephant",
+    # Luggage, Carried Items & Sports/Weapons (24-38)
     24: "backpack",
+    25: "umbrella",
     26: "handbag",
     28: "suitcase",
-    32: "umbrella"
+    34: "baseball bat",
+    38: "tennis racket",
+    # Food, Drinks & Tableware
+    39: "bottle",
+    43: "knife",
+    46: "banana",
+    47: "apple",
+    48: "sandwich",
+    49: "orange",
+    51: "carrot",
+    53: "pizza",
+    55: "cake",
+    # Furniture, Electronics & Personal Items
+    56: "chair",
+    59: "bed",
+    61: "toilet",
+    67: "cell phone",
+    73: "book",
+    77: "teddy bear"
 }
 
 COCO_CLASS_IDS = list(COCO_CLASSES.keys())
