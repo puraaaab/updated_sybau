@@ -14,7 +14,6 @@ import SearchIcon from '@mui/icons-material/Search';
 import CloseIcon from '@mui/icons-material/Close';
 import PictureInPictureAltIcon from '@mui/icons-material/PictureInPictureAlt';
 import MicIcon from '@mui/icons-material/Mic';
-import LayersIcon from '@mui/icons-material/Layers';
 import DeleteIcon from '@mui/icons-material/Delete';
 
 // ---- Tunables for tile size (change these two numbers to resize the whole grid) ----
@@ -32,7 +31,7 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
 
   const getYouTubeId = (str) => {
     if (!str) return null;
-    const regExp = /^.*(youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=|live\/)([^#\&\?]*).*/;
+    const regExp = /^.*(youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=|live\/)([^#&?]*).*/;
     const match = str.match(regExp);
     if (match && match[2].length === 11) return match[2];
     return null;
@@ -242,37 +241,8 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
     }
   };
 
-  if (isOffline) {
-    return (
-      <Box sx={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', backgroundColor: '#000', border: '1px dashed #444', color: 'error.main', minHeight: 140 }} onDoubleClick={handleDoubleClick}>
-        <WarningAmberIcon sx={{ fontSize: 32, mb: 1 }} />
-        <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>FEED_OFFLINE // CONNECT_LOST</Typography>
-      </Box>
-    );
-  }
-
-  const wrapperStyle = {
-    width: '100%',
-    minWidth: 0,
-    minHeight: 0,
-    position: 'relative',
-    backgroundColor: '#000',
-    overflow: 'hidden',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    aspectRatio: settings.frameMode === 'dynamic'
-      ? videoRatio
-      : settings.frameMode === 'fixed-16-9'
-        ? '16/9'
-        : settings.frameMode === 'fixed-4-3'
-          ? '4/3'
-          : 'auto',
-    height: settings.frameMode === 'stretch' ? '100%' : 'auto',
-  };
 
   const [heatmapPoints, setHeatmapPoints] = useState([]);
-  const [isPttActive, setIsPttActive] = useState(false);
   const canvasRef = useRef(null);
 
   useEffect(() => {
@@ -309,18 +279,35 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
     });
   }, [heatmapPoints, settings.showHeatmap]);
 
-  const togglePttIntercom = async () => {
-    if (isPttActive) {
-      setIsPttActive(false);
-      return;
-    }
-    try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-      setIsPttActive(true);
-    } catch (e) {
-      alert("Microphone permission required for Push-To-Talk Intercom.");
-    }
+  if (isOffline) {
+    return (
+      <Box sx={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', backgroundColor: '#000', border: '1px dashed #444', color: 'error.main', minHeight: 140 }} onDoubleClick={handleDoubleClick}>
+        <WarningAmberIcon sx={{ fontSize: 32, mb: 1 }} />
+        <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>FEED_OFFLINE // CONNECT_LOST</Typography>
+      </Box>
+    );
+  }
+
+  const wrapperStyle = {
+    width: '100%',
+    minWidth: 0,
+    minHeight: 0,
+    position: 'relative',
+    backgroundColor: '#000',
+    overflow: 'hidden',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    aspectRatio: settings.frameMode === 'dynamic'
+      ? videoRatio
+      : settings.frameMode === 'fixed-16-9'
+        ? '16/9'
+        : settings.frameMode === 'fixed-4-3'
+          ? '4/3'
+          : 'auto',
+    height: settings.frameMode === 'stretch' ? '100%' : 'auto',
   };
+
 
   return (
     <Box sx={wrapperStyle} onDoubleClick={handleDoubleClick}>
@@ -389,7 +376,7 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
 export default function LiveGrid({ role, token, alerts, searchQuery = '', settings = {} }) {
   const [cameras, setCameras] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [frameCounts, setFrameCounts] = useState({});
+  const [frameCounts] = useState({});
   const [bufferLogs, setBufferLogs] = useState([]);
   const [focusedCamera, setFocusedCamera] = useState(null);
 

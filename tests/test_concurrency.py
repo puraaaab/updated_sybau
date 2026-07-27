@@ -1,10 +1,21 @@
+import importlib
 import pytest
 import numpy as np
 import threading
-from backend.ai.face.face_pipeline import process_faces
+
+
+def _load_process_faces():
+    try:
+        importlib.import_module("cv2")
+    except ImportError as exc:
+        pytest.skip(f"OpenCV runtime dependencies are unavailable: {exc}")
+    from backend.ai.face.face_pipeline import process_faces
+    return process_faces
 
 def test_concurrent_face_processing():
     """Verify that multiple threads can process faces concurrently without C++ crashes."""
+    process_faces = _load_process_faces()
+
     # Create mock frame (black image)
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     
