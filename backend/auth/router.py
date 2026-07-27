@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..database.connection import get_db
 from ..database.models import User
-from .helpers import verify_password, get_password_hash, create_access_token
+from .helpers import verify_password, get_password_hash, create_access_token, verify_admin
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -18,7 +18,8 @@ def register(
     username: str,
     password: str,
     role: str = "viewer",
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(verify_admin)
 ):
     if role not in ["admin", "operator", "viewer"]:
         raise HTTPException(status_code=400, detail="Invalid role. Must be 'admin', 'operator', or 'viewer'.")
@@ -33,7 +34,7 @@ def register(
     db.commit()
     db.refresh(new_user)
     return {
-        "message": "User registered successfully",
+        "message": f"User registered successfully by {current_user.username}",
         "username": new_user.username,
         "role": new_user.role
     }

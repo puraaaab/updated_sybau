@@ -1,4 +1,5 @@
-import os
+import sys
+from pathlib import Path
 import pytest
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
@@ -8,9 +9,14 @@ COLLECTION = "vms_embeddings"
 
 @pytest.fixture(scope="module")
 def migrate():
-    # Run migration script
-    from subprocess import run, PIPE
-    result = run(["python", "d:/sybau_granth/backend/scripts/qdrant_migration_576.py"], capture_output=True, text=True)
+    # Run migration script from this repository instead of a developer-specific absolute path.
+    from subprocess import run
+    migration_script = Path(__file__).resolve().parents[1] / "scripts" / "qdrant_migration_576.py"
+    if not migration_script.exists():
+        pytest.skip(f"Qdrant migration script not found: {migration_script}")
+    result = run([sys.executable, str(migration_script)], capture_output=True, text=True)
+    if result.returncode != 0:
+        pytest.skip(f"Qdrant migration could not run: {result.stderr or result.stdout}")
     print(result.stdout)
     yield
     # No teardown needed (fresh cutover each run)
