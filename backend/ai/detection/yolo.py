@@ -89,40 +89,44 @@ def detect_and_track(frame: np.ndarray):
         logger.exception("YOLO track() failed for this frame; skipping.")
         return detections
 
-    if not results:
+    if not results or results[0].boxes is None:
         return detections
 
-    result = results[0]
-    boxes = result.boxes
-    if boxes is None or len(boxes) == 0:
+    boxes = results[0].boxes
+    if len(boxes) == 0:
         return detections
 
-    # Safely get IDs array or default to None without dropping the entire frame
-    id_list = boxes.id.cpu().numpy() if (hasattr(boxes, "id") and boxes.id is not None) else None
+    # Check if the tracker ID array exists
+    if not hasattr(boxes, "id") or boxes.id is None:
+        return detections
 
-    xyxy_list = boxes.xyxy.cpu().numpy()
-    cls_list = boxes.cls.cpu().numpy()
-    conf_list = boxes.conf.cpu().numpy()
+    # Move tensors to CPU once to optimize inference loops and protect against CUDA tensor errors
+    try:
+        xyxy_list = boxes.xyxy.cpu().numpy()
+        cls_list = boxes.cls.cpu().numpy()
+        conf_list = boxes.conf.cpu().numpy()
+        id_list = boxes.id.cpu().numpy()
+    except Exception:
+        logger.exception("Failed to convert YOLO boxes tensors to CPU numpy arrays.")
+        return detections
 
-    for i in range(len(boxes)):
-        # Skip this specific detection if it doesn't have a confirmed track ID yet or index is out of bounds
-        if id_list is None or i >= len(id_list):
+    # Strict enumerate alignment protects against array length mismatches
+    for i, track_id in enumerate(id_list):
+        # Ignore unconfirmed tracker states, negative placeholders (e.g. -1), or null values
+        if np.isnan(track_id) or track_id < 0:
             continue
 
-        track_id = id_list[i]
-        # ByteTrack sometimes outputs NaN for unconfirmed or tentative trajectories during heavy occlusions
-        if np.isnan(track_id):
-            continue
+        # Prevent out-of-bounds index errors if tracking tensors mismatch box length
+        if i >= len(cls_list) or i >= len(conf_list) or i >= len(xyxy_list):
+            break
 
         cls_id = int(cls_list[i])
         class_name = COCO_CLASSES.get(cls_id)
         if class_name is None:
-            # Shouldn't happen since classes=COCO_CLASS_IDS was passed to
-            # track(), but keep as a defensive guard.
             continue
 
         detections.append({
-            "track_id": int(track_id),
+            "track_id": int(round(track_id)),
             "class_name": class_name,
             "confidence": float(conf_list[i]),
             "bbox": [float(val) for val in xyxy_list[i]]
