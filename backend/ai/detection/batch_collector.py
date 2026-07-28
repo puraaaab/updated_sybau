@@ -4,10 +4,19 @@ import asyncio
 from typing import List, Dict, Any
 import numpy as np
 
-try:
-    from ...services.stream_manager import stream_manager
-except (ImportError, ValueError):
-    from backend.services.stream_manager import stream_manager
+stream_manager = None
+
+
+def _get_stream_manager():
+    global stream_manager
+    if stream_manager is not None:
+        return stream_manager
+    try:
+        from ...services.stream_manager import stream_manager as manager
+    except (ImportError, ValueError):
+        from backend.services.stream_manager import stream_manager as manager
+    stream_manager = manager
+    return stream_manager
 
 from .yolo import detect_and_track_batch
 
@@ -76,8 +85,11 @@ class DeadlinedBatchCollector:
         streams_in_batch: List[str] = []
         counters_in_batch: List[int] = []
 
-        # Track which streams we still need to wait for in this cycle
-        pending_streams = list(active_stream_ids[:self.max_batch_size])
+        # Track which streams we still need to wait for in this cycle. Do not
+        # truncate here: deployments may have more live cameras than a single
+        # CUDA batch. We collect all fresh frames before chunking inference into
+        # max_batch_size groups below.
+        pending_streams = list(active_stream_ids)
 
         while pending_streams:
             current_time = time.perf_counter()
@@ -95,7 +107,7 @@ class DeadlinedBatchCollector:
 
             # Iterate through remaining pending streams to pull from shared memory
             for stream_id in list(pending_streams):
-                stream_obj = stream_manager.get_stream(stream_id)
+                stream_obj = _get_stream_manager().get_stream(stream_id)
                 if stream_obj is None:
                     pending_streams.remove(stream_id)
                     continue
@@ -132,13 +144,17 @@ class DeadlinedBatchCollector:
         # Measure explicit execution overhead of the batch inference block
         inference_start = time.perf_counter()
 
-        # Dispatch the synchronized batch array into the CUDA pipeline
-        results = detect_and_track_batch(
-            frames=frames_collected,
-            stream_ids=streams_in_batch,
-            frame_counters=counters_in_batch,
-            skip_interval=self.current_skip_interval  # Use the dynamically adjusted interval
-        )
+        # Dispatch frames in bounded chunks so all active cameras get a chance
+        # to be processed while respecting max_batch_size VRAM limits.
+        results = {stream_id: [] for stream_id in active_stream_ids}
+        for offset in range(0, len(frames_collected), self.max_batch_size):
+            chunk_results = detect_and_track_batch(
+                frames=frames_collected[offset:offset + self.max_batch_size],
+                stream_ids=streams_in_batch[offset:offset + self.max_batch_size],
+                frame_counters=counters_in_batch[offset:offset + self.max_batch_size],
+                skip_interval=self.current_skip_interval,
+            )
+            results.update(chunk_results)
 
         inference_duration = time.perf_counter() - inference_start
 
