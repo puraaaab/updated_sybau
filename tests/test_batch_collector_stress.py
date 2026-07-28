@@ -97,3 +97,27 @@ def test_adaptive_ema_recovery_downshift():
     # ASSERT: The system recovered perfectly to its baseline tracking cadence
     assert collector.batch_latency_ema < 0.020
     assert collector.current_skip_interval == collector.base_skip_interval  # Restored to 3
+
+
+@patch("backend.ai.detection.batch_collector.detect_and_track_batch")
+def test_all_active_streams_are_chunked_not_dropped(mock_yolo_batch, mock_stream_manager):
+    """Cameras beyond max_batch_size must still be processed in later chunks."""
+    mock_mgr, streams = mock_stream_manager
+    streams["cam_extra_5"] = MockStream()
+    mock_yolo_batch.side_effect = lambda frames, stream_ids, frame_counters, skip_interval: {
+        stream_id: [{"track_id": idx + 1}] for idx, stream_id in enumerate(stream_ids)
+    }
+
+    collector = DeadlinedBatchCollector(max_batch_size=2, max_wait_ms=40.0, base_skip_interval=1)
+    results = collector.collect_and_process_batch([
+        "cam_fast_1",
+        "cam_fast_2",
+        "cam_fast_3",
+        "cam_lagging_4",
+        "cam_extra_5",
+    ])
+
+    assert mock_yolo_batch.call_count == 3
+    called_streams = [stream_id for call in mock_yolo_batch.call_args_list for stream_id in call.kwargs["stream_ids"]]
+    assert called_streams == ["cam_fast_1", "cam_fast_2", "cam_fast_3", "cam_lagging_4", "cam_extra_5"]
+    assert set(results) == set(called_streams)

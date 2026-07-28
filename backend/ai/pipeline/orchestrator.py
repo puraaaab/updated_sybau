@@ -64,7 +64,10 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     #    Configurable via models.json → florence.invoke_every_n_frames
     caption = None
     embedding = None
-    florence_interval = cfg.get("florence", {}).get("invoke_every_n_frames", 30)
+    try:
+        florence_interval = max(1, int(cfg.get("florence", {}).get("invoke_every_n_frames", 30)))
+    except (TypeError, ValueError):
+        florence_interval = 30
     florence_enabled = cfg.get("florence", {}).get("enabled", True)
     
     if florence_enabled and frame_idx % florence_interval == 0:

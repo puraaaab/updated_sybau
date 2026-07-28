@@ -119,16 +119,18 @@ async def lifespan(app: FastAPI):
         model_manager.get_yolo()
         model_manager.get_ocr()
 
-        # Start continuous recording and AI threads
+        from .ai.scheduler import inference_scheduler
+        inference_scheduler.start()
+
+        # Start continuous recording and AI threads only after the inference
+        # scheduler is live; otherwise camera workers can block on their first
+        # GPU task during startup.
         print("Starting background Stream Recorders and AI Workers...")
         recorder.start_all_recorders()
         ai_worker.start_all_ai_workers()
 
         from .recording.retention import retention_manager
         retention_manager.start()
-
-        from .ai.scheduler import inference_scheduler
-        inference_scheduler.start()
 
     # Start the AI subsystem in a background thread so the FastAPI server
     # can bind to port 8000 immediately without blocking `manage.ps1`
