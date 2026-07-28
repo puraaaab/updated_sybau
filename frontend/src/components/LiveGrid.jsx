@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Hls from 'hls.js';
 import {
   Box, Card, Typography, TextField, Dialog, DialogTitle, DialogContent,
-  DialogActions, Button, IconButton, Paper, InputAdornment, Alert
+  DialogActions, Button, IconButton, Paper, InputAdornment, Alert, Chip
 } from '@mui/material';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import RadioButtonCheckedIcon from '@mui/icons-material/RadioButtonChecked';
@@ -20,7 +20,7 @@ import DeleteIcon from '@mui/icons-material/Delete';
 const TILE_MIN_WIDTH = 240;   // px - smallest a tile can shrink to before wrapping
 const TILE_MAX_WIDTH = 320;   // px - largest a tile can grow to (keeps frames small on wide screens)
 
-const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline, token, onBuffer, settings, onDoubleClick, cameraId, isHls }) {
+const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline, token, onBuffer, settings, onDoubleClick, cameraId, isHls, isPttActive = false }) {
   const videoRef = useRef(null);
   const pcRef = useRef(null);
   
@@ -72,7 +72,21 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
     const video = videoRef.current;
     if (!video) return;
 
-    let pc = new RTCPeerConnection({ iceServers: [] });
+    const PeerConnectionClass = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
+    if (!PeerConnectionClass) {
+      console.warn("[WHEP Player] WebRTC is not supported in this browser environment. Falling back to HLS...");
+      setPlayMode('hls');
+      return;
+    }
+
+    let pc;
+    try {
+      pc = new PeerConnectionClass({ iceServers: [] });
+    } catch (err) {
+      console.warn("[WHEP Player] Failed to instantiate RTCPeerConnection. Falling back to HLS...", err);
+      setPlayMode('hls');
+      return;
+    }
     pcRef.current = pc;
 
     pc.ontrack = (event) => {
@@ -417,12 +431,12 @@ export default function LiveGrid({ role, token, alerts, searchQuery = '', settin
 
   const fetchCameras = useCallback(() => {
     if (!token) return;
-    fetch('/api/cameras', {
+    fetch('/api/v1/cameras', {
       headers: { 'Authorization': `Bearer ${token}` }
     })
       .then(res => {
         if (!res.ok) {
-          console.warn(`[LiveGrid] GET /api/cameras failed with ${res.status}`);
+          console.warn(`[LiveGrid] GET /api/v1/cameras failed with ${res.status}`);
           return [];
         }
         return res.json();
@@ -557,9 +571,10 @@ export default function LiveGrid({ role, token, alerts, searchQuery = '', settin
       .catch(err => alert(err.message));
   };
 
-  const finalSearchQuery = searchQuery.trim() || localSearchQuery.trim();
+  const finalSearchQuery = (searchQuery || localSearchQuery).trim();
 
   const filteredCameras = (Array.isArray(cameras) ? cameras : []).filter(cam =>
+    !finalSearchQuery ||
     (cam.name || '').toLowerCase().includes(finalSearchQuery.toLowerCase()) ||
     (cam.location || '').toLowerCase().includes(finalSearchQuery.toLowerCase())
   );
@@ -704,11 +719,27 @@ export default function LiveGrid({ role, token, alerts, searchQuery = '', settin
 
                   {/* Telemetry info */}
                   <Box sx={{ p: 0.75, borderTop: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: 'background.paper' }}>
-                    <Box sx={{ display: 'flex', gap: 1.5 }}>
+                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
                       <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>RES: {cam.resolution || 'N/A'}</Typography>
-                      <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>FPS: {cam.fps !== undefined ? Number(cam.fps).toFixed(1) : '15.0'}</Typography>
+                      <Chip
+                        label={
+                          cam.motion_status === 'TRACKING' ? `🎯 TRACKING (${cam.fps ? Number(cam.fps).toFixed(1) : '2.0'} FPS)` :
+                          cam.motion_status === 'MOTION' ? `🔴 MOTION (${cam.fps ? Number(cam.fps).toFixed(1) : '2.0'} FPS)` :
+                          cam.motion_status === 'ALERT' ? `⚠️ ALERT (${cam.fps ? Number(cam.fps).toFixed(1) : '2.0'} FPS)` :
+                          `🟢 STREAMING (2.0 FPS)`
+                        }
+                        size="small"
+                        color={
+                          cam.motion_status === 'TRACKING' ? 'info' :
+                          cam.motion_status === 'MOTION' ? 'error' :
+                          cam.motion_status === 'ALERT' ? 'warning' :
+                          'success'
+                        }
+                        variant={cam.motion_status === 'STREAMING' || !cam.motion_status ? 'outlined' : 'filled'}
+                        sx={{ height: 18, fontSize: '0.55rem', fontWeight: 'bold', fontFamily: 'monospace' }}
+                      />
                     </Box>
-                    {cleared && cam.status === 'online' && (
+                    {cleared && (
                       <Box sx={{ display: 'flex', gap: 1.5 }}>
                         <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>F: {frameCounts[cam.id] || 0}</Typography>
                         <Typography variant="caption" color={hasAlert ? "error.main" : "text.secondary"} fontWeight={hasAlert ? "bold" : "normal"} sx={{ fontSize: '0.65rem' }}>

@@ -33,7 +33,7 @@ def get_face_models(width=640, height=480):
         key = (width, height)
         if key not in _detectors:
             print(f"[FacePipeline] Creating FaceDetectorYN instance for resolution: {width}x{height}")
-            _detectors[key] = cv2.FaceDetectorYN.create(
+            det = cv2.FaceDetectorYN.create(
                 YUNET_PATH,
                 "",
                 (width, height),
@@ -41,13 +41,27 @@ def get_face_models(width=640, height=480):
                 0.3,
                 100
             )
+            if hasattr(cv2, 'cuda') and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+                try:
+                    det.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+                    det.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+                except Exception:
+                    pass
+            _detectors[key] = det
         detector = _detectors[key]
             
         if _recognizer is None:
-            _recognizer = cv2.FaceRecognizerSF.create(
+            rec = cv2.FaceRecognizerSF.create(
                 SFACE_PATH,
                 ""
             )
+            if hasattr(cv2, 'cuda') and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+                try:
+                    rec.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+                    rec.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+                except Exception:
+                    pass
+            _recognizer = rec
         return detector, _recognizer
 
 def process_faces(frame: np.ndarray, detections: list):

@@ -24,6 +24,9 @@ def get_watchlist(user=Depends(verify_viewer), db: Session = Depends(get_db)):
         # Auto-purge expired entries per DPDP Act retention rules if first_seen is older than retention
         # Default retention: 30 days unless specified
         created_at = i.first_seen if i.first_seen else now
+        # Ensure timezone-aware comparison (legacy DB rows may be naive UTC)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=datetime.timezone.utc)
         if (now - created_at).days > 90: # Hard DPDP max retention window
             db.delete(i)
             continue
@@ -89,6 +92,8 @@ async def create_watchlist_poi(
         embedding_id=short_uuid
     )
     db.add(new_poi)
+    from ..utils.audit import log_audit_event
+    log_audit_event(db, action="WATCHLIST_CREATE", detail=f"Added POI target profile '{name}' ({identity_uuid})", username=user.username)
     db.commit()
 
     # Index into vector storage
@@ -118,6 +123,8 @@ def delete_watchlist_poi(poi_id: int, user=Depends(verify_admin), db: Session = 
     if not poi:
         raise HTTPException(status_code=404, detail="POI profile not found.")
 
+    from ..utils.audit import log_audit_event
+    log_audit_event(db, action="WATCHLIST_DELETE", detail=f"Deleted POI profile '{poi.name}' ({poi.identity_uuid})", username=user.username)
     db.delete(poi)
     db.commit()
     return {"message": "POI profile removed successfully."}

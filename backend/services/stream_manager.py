@@ -119,8 +119,21 @@ class CameraStream:
             consecutive_failures = 0
             MAX_CONSECUTIVE_FAILURES = 50
 
+            is_file_capture = not (self.stream_url.startswith("rtsp://") or self.stream_url.startswith("http://") or self.stream_url.startswith("https://"))
+            frame_interval = 1.0 / max(1.0, self.fps)
+
             while self.running:
+                loop_start = time.time()
                 ret, frame = cap.read()
+                if not ret or frame is None:
+                    # If reading from a local video clip file, loop back to frame 0
+                    try:
+                        if cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0:
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            ret, frame = cap.read()
+                    except Exception:
+                        pass
+                
                 if not ret or frame is None:
                     consecutive_failures += 1
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
@@ -135,6 +148,12 @@ class CameraStream:
                 with self._lock:
                     self.latest_frame = frame
                     self.latest_frame_time = now
+
+                # Pace local file reading to real-time stream playback speed (1/fps)
+                if is_file_capture:
+                    elapsed = time.time() - loop_start
+                    if elapsed < frame_interval:
+                        time.sleep(frame_interval - elapsed)
 
             if cap and cap.isOpened():
                 cap.release()

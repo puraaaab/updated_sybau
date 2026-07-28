@@ -24,8 +24,9 @@ class InferenceScheduler:
     PRIORITY_FACE_REID = 3
     PRIORITY_FLORENCE = 4
 
-    # Timeout (seconds) for a scheduled task to complete before raising
-    TASK_TIMEOUT_SECONDS = 120
+    # Timeout (seconds) for a scheduled task to complete before raising.
+    # Florence-2 can take up to 30s to run on large frames, so we give plenty of margin.
+    TASK_TIMEOUT_SECONDS = 60.0
 
     def __init__(self):
         self.request_queue = queue.PriorityQueue()

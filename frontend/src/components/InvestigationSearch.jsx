@@ -27,14 +27,14 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
 
   const loadCameras = useCallback(() => {
     if (!token) return;
-    fetch('/api/cameras', {
+    fetch('/api/v1/cameras', {
       headers: { Authorization: `Bearer ${token}` }
     })
-      .then(res => res.json())
+      .then(res => res.ok ? res.json() : [])
       .then(data => {
-        setCameras(data);
+        setCameras(Array.isArray(data) ? data : []);
       })
-      .catch(() => { });
+      .catch(() => { setCameras([]); });
   }, [token]);
 
   useEffect(() => {
@@ -303,6 +303,8 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
     const params = new URLSearchParams();
     params.set('q', query.trim() || 'person');
     params.set('limit', String(limit));
+    if (start) params.set('start_time', start);
+    if (end) params.set('end_time', end);
 
     fetch(`/api/search/semantic?${params.toString()}`, {
       headers: { Authorization: `Bearer ${token}` }
@@ -475,7 +477,7 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
                 onChange={(e) => setSelectedCamera(e.target.value)}
               >
                 <MenuItem value="">ALL CHANNELS</MenuItem>
-                {cameras.map(cam => (
+                {(Array.isArray(cameras) ? cameras : []).map(cam => (
                   <MenuItem key={cam.id} value={cam.name}>{cam.name.toUpperCase()}</MenuItem>
                 ))}
               </Select>
@@ -566,7 +568,7 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
               size="small"
               value={limit}
               onChange={(e) => setLimit(Math.max(1, Math.min(100, parseInt(e.target.value || '25', 10))))}
-              inputProps={{ min: 1, max: 100 }}
+              slotProps={{ htmlInput: { min: 1, max: 100 } }}
             />
           </Box>
 

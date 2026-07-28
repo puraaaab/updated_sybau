@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+﻿import React, { useEffect, useState, useCallback } from 'react';
 import {
   Box, Typography, Grid, Paper, Tabs, Tab, TextField, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Select, MenuItem, InputLabel, FormControl, IconButton, Alert, Chip, Dialog, DialogTitle, DialogContent, DialogActions
 } from '@mui/material';
@@ -42,7 +42,7 @@ export default function AdminConsole({ token }) {
 
   const loadUsers = useCallback(() => {
     setUserError('');
-    fetch('/api/admin/users?include_deleted=true', {
+    fetch('/api/v1/admin/users?include_deleted=true', {
       headers: { Authorization: `Bearer ${token}` }
     })
       .then(res => {
@@ -55,7 +55,7 @@ export default function AdminConsole({ token }) {
 
   const loadRequests = useCallback(() => {
     setReqError('');
-    fetch('/api/admin/elevation-requests', {
+    fetch('/api/v1/admin/elevation-requests', {
       headers: { Authorization: `Bearer ${token}` }
     })
       .then(res => {
@@ -68,7 +68,7 @@ export default function AdminConsole({ token }) {
 
   const loadLogs = useCallback(() => {
     setLogsError('');
-    let url = '/api/admin/audit-logs';
+    let url = '/api/v1/admin/audit-logs';
     const params = [];
     if (filterUser) params.push(`username=${encodeURIComponent(filterUser)}`);
     if (filterAction) params.push(`action=${encodeURIComponent(filterAction)}`);
@@ -99,7 +99,7 @@ export default function AdminConsole({ token }) {
     setUserError('');
     setUserSuccess('');
 
-    fetch('/api/admin/users', {
+    fetch('/api/v1/admin/users', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -124,7 +124,7 @@ export default function AdminConsole({ token }) {
 
   const handleUpdateStatus = (userId, newStatus) => {
     setUserError('');
-    fetch(`/api/admin/users/${userId}`, {
+    fetch(`/api/v1/admin/users/${userId}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -144,7 +144,7 @@ export default function AdminConsole({ token }) {
 
   const handleUpdateRole = (userId, newRole) => {
     setUserError('');
-    fetch(`/api/admin/users/${userId}`, {
+    fetch(`/api/v1/admin/users/${userId}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -170,7 +170,7 @@ export default function AdminConsole({ token }) {
       return;
     }
 
-    fetch(`/api/admin/users/${userId}`, {
+    fetch(`/api/v1/admin/users/${userId}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -193,7 +193,7 @@ export default function AdminConsole({ token }) {
 
   const handleSoftDelete = (userId) => {
     setUserError('');
-    fetch(`/api/admin/users/${userId}`, {
+    fetch(`/api/v1/admin/users/${userId}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` }
     })
@@ -214,7 +214,7 @@ export default function AdminConsole({ token }) {
       return;
     }
 
-    fetch(`/api/admin/users/${userId}/hard-delete`, {
+    fetch(`/api/v1/admin/users/${userId}/hard-delete`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -240,7 +240,7 @@ export default function AdminConsole({ token }) {
     setReqError('');
     setActiveResetToken(null);
 
-    fetch(`/api/admin/elevation-requests/${reqId}/resolve`, {
+    fetch(`/api/v1/admin/elevation-requests/${reqId}/resolve`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -276,7 +276,7 @@ export default function AdminConsole({ token }) {
       {/* Directory Accounts workspace */}
       {activeSubTab === 0 && (
         <Grid container spacing={3} sx={{ flexGrow: 1, minHeight: 0 }}>
-          <Grid item xs={12} md={4}>
+          <Grid size={{ xs: 12, md: 4 }}>
             <Paper variant="outlined" sx={{ p: 2, height: '100%' }}>
               <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
                 <PeopleIcon fontSize="small" /> CREATE SYSTEM ACCOUNT
@@ -284,7 +284,7 @@ export default function AdminConsole({ token }) {
 
               <Box component="form" onSubmit={handleCreateUser} sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                 <TextField label="User Classification" size="small" required value={usernameInput} onChange={(e) => setUsernameInput(e.target.value)} placeholder="e.g. j_miller" />
-                <TextField label="Initial Password" type="password" size="small" required value={passwordInput} onChange={(e) => setPasswordInput(e.target.value)} placeholder="••••••••" />
+                <TextField label="Initial Password" type="password" size="small" required value={passwordInput} onChange={(e) => setPasswordInput(e.target.value)} placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢" />
                 <FormControl size="small">
                   <InputLabel id="role-select-label">Assigned RBAC Role</InputLabel>
                   <Select labelId="role-select-label" value={roleInput} label="Assigned RBAC Role" onChange={(e) => setRoleInput(e.target.value)}>
@@ -305,7 +305,7 @@ export default function AdminConsole({ token }) {
             </Paper>
           </Grid>
 
-          <Grid item xs={12} md={8}>
+          <Grid size={{ xs: 12, md: 8 }}>
             <Paper variant="outlined" sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
               <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
                 DIRECTORY ACCOUNT DIRECTORY
@@ -446,7 +446,7 @@ export default function AdminConsole({ token }) {
                 <Typography variant="h6" sx={{ fontFamily: 'monospace', letterSpacing: 2 }}>{activeResetToken}</Typography>
               </Box>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                ⚠️ Relay this token securely to the user verbally or out-of-band. They will need it to establish a new password link.
+                âš ï¸ Relay this token securely to the user verbally or out-of-band. They will need it to establish a new password link.
               </Typography>
             </Alert>
           )}
@@ -587,3 +587,5 @@ export default function AdminConsole({ token }) {
     </Box>
   );
 }
+
+

@@ -54,3 +54,12 @@ Thumbs.db
 .env
 .env.local
 .env.production
+
+# Database & Dataset Storage
+*.db
+*.db-shm
+*.db-wal
+vms.db*
+plates.txt
+Cyber Crime*
+Videos/

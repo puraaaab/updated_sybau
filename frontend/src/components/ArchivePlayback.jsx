@@ -174,26 +174,28 @@ export default function ArchivePlayback({ token }) {
 
   useEffect(() => {
     if (!token) return;
-    fetch('/api/cameras', { headers: { 'Authorization': `Bearer ${token}` } })
+    fetch('/api/v1/cameras', { headers: { 'Authorization': `Bearer ${token}` } })
       .then(r => r.json())
       .then(data => {
-        setCameras(data || []);
-        if (data && data.length > 0) setActiveCameras([data[0]]);
+        const camList = Array.isArray(data) ? data : [];
+        setCameras(camList);
+        if (camList.length > 0) setActiveCameras([camList[0]]);
       })
-      .catch(() => {});
+      .catch(() => setCameras([]));
   }, [token]);
 
   const fetchExports = useCallback(() => {
     if (!token) return;
-    fetch('/api/forensics/exports', { headers: { 'Authorization': `Bearer ${token}` } })
+    fetch('/api/v1/forensics/exports', { headers: { 'Authorization': `Bearer ${token}` } })
       .then(r => r.json())
-      .then(data => setExportsList(data || []))
-      .catch(() => {});
+      .then(data => setExportsList(Array.isArray(data) ? data : []))
+      .catch(() => setExportsList([]));
   }, [token]);
 
   useEffect(() => { fetchExports(); }, [fetchExports]);
 
   const addCamera = (camId) => {
+    if (!Array.isArray(cameras)) return;
     const cam = cameras.find(c => String(c.id) === String(camId));
     if (!cam || activeCameras.find(c => String(c.id) === String(cam.id))) return;
     setActiveCameras(prev => [...prev, cam]);
@@ -215,33 +217,41 @@ export default function ArchivePlayback({ token }) {
     setExportStatus({ state: 'loading', msg: `Exporting & redacting ${clip.filename}...` });
     try {
       const res = await fetch(
-        `/api/forensics/export?camera_id=${camera.id}&archive_clip_url=${encodeURIComponent(clip.url)}`,
+        `/api/v1/forensics/export?camera_id=${camera.id}&archive_clip_url=${encodeURIComponent(clip.url)}`,
         {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}` }
         }
       );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Export failed');
-      setExportStatus({ state: 'success', msg: `Export complete. SHA-256: ${data.sha256_hash.substring(0, 16)}...`, data });
+      setExportStatus({ state: 'success', msg: `Clip exported successfully: ${data.export_id || 'Completed'}` });
       fetchExports();
     } catch (err) {
-      setExportStatus({ state: 'error', msg: err.message });
+      setExportStatus({ state: 'error', msg: `Export failed: ${err.message}` });
     }
   };
 
   return (
-    <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid', borderColor: 'divider', pb: 2, mb: 2 }}>
-        <Typography variant="h6" fontWeight="bold">Archive Playback System</Typography>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          {syncTimestamp && (
-            <Chip 
-              icon={<AccessTimeIcon />} 
-              label={`SYNC: ${syncTimestamp.substring(0, 19).replace('T', ' ')}`} 
-              size="small" 
+    <Box sx={{ p: 3, height: '100%', display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Typography variant="h5" sx={{ fontWeight: 800, color: 'primary.main' }}>
+          MULTI-CAMERA ARCHIVE PLAYBACK
+        </Typography>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          {activeCameras.length > 1 && (
+            <Button 
               variant="outlined" 
-            />
+              color="secondary" 
+              startIcon={<SyncIcon />}
+              onClick={() => {
+                if (activeCameras.length > 0) {
+                  setSyncTimestamp(new Date().toISOString());
+                }
+              }}
+            >
+              SYNC ALL CAMERAS
+            </Button>
           )}
           <FormControl size="small" sx={{ minWidth: 150 }}>
             <Select
@@ -250,8 +260,8 @@ export default function ArchivePlayback({ token }) {
               onChange={e => addCamera(e.target.value)}
               renderValue={() => <Typography variant="body2">+ ADD CAMERA</Typography>}
             >
-              {cameras.filter(c => !activeCameras.find(a => a.id === c.id)).map(c => (
-                <MenuItem key={c.id} value={c.id}>{c.name.toUpperCase()}</MenuItem>
+              {(Array.isArray(cameras) ? cameras : []).filter(c => !activeCameras.find(a => a.id === c.id)).map(c => (
+                <MenuItem key={c.id} value={c.id}>{(c.name || c.id).toUpperCase()}</MenuItem>
               ))}
             </Select>
           </FormControl>
@@ -275,7 +285,7 @@ export default function ArchivePlayback({ token }) {
       <Box sx={{ flexGrow: 1, overflowY: 'auto' }}>
         <Grid container spacing={2}>
           {activeCameras.length === 0 ? (
-            <Grid item xs={12}>
+            <Grid size={{ xs: 12 }}>
               <Paper variant="outlined" sx={{ py: 10, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, borderStyle: 'dashed', backgroundColor: 'transparent' }}>
                 <MovieIcon sx={{ fontSize: 60, opacity: 0.2 }} />
                 <Typography color="text.secondary">SELECT A CAMERA TO BEGIN ARCHIVE PLAYBACK</Typography>
@@ -284,7 +294,7 @@ export default function ArchivePlayback({ token }) {
             </Grid>
           ) : (
             activeCameras.map(cam => (
-              <Grid item xs={12} md={activeCameras.length === 1 ? 12 : 6} key={cam.id}>
+              <Grid size={{ xs: 12, md: activeCameras.length === 1 ? 12 : 6 }} key={cam.id}>
                 <CameraArchivePanel
                   camera={cam}
                   token={token}
@@ -322,10 +332,10 @@ export default function ArchivePlayback({ token }) {
                     <TableCell>{item.timestamp.substring(0, 19).replace('T', ' ')}</TableCell>
                     <TableCell>
                       <Typography variant="caption" fontWeight="bold" color={item.timestamp_authority === 'DigiCert Public TSA' ? 'success.main' : 'warning.main'}>
-                        {item.timestamp_authority === 'DigiCert Public TSA' ? 'TSA✓' : 'LOCAL'}
+                        {item.timestamp_authority === 'DigiCert Public TSA' ? 'TSAâœ“' : 'LOCAL'}
                       </Typography>
                     </TableCell>
-                    <TableCell sx={{ fontFamily: 'monospace', color: 'text.secondary' }}>{item.sha256_hash.substring(0, 12)}…</TableCell>
+                    <TableCell sx={{ fontFamily: 'monospace', color: 'text.secondary' }}>{item.sha256_hash.substring(0, 12)}â€¦</TableCell>
                     <TableCell align="center">
                       <Box sx={{ display: 'flex', justifyContent: 'center', gap: 1 }}>
                         <Button component="a" href={item.mp4_download_url} target="_blank" rel="noreferrer" size="small" variant="text" sx={{ minWidth: 'auto', p: 0.5, fontSize: '0.7rem' }}>MP4</Button>

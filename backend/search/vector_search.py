@@ -102,12 +102,21 @@ def cosine_similarity(v1, v2):
     return float(dot / (n1 * n2))
 
 
-def _local_text_matches(query_text: str, limit: int) -> list:
+def _local_text_matches(query_text: str, limit: int, start_time: str = None, end_time: str = None) -> list:
     """In-memory keyword-overlap fallback search over seeded/local records."""
     matches = []
     for item in model_manager.vector_db:
         if item["payload"].get("type") not in ("scene", "vehicle"):
             continue
+        
+        # Time-range filtering
+        item_ts = item["payload"].get("timestamp")
+        if item_ts:
+            if start_time and item_ts < start_time:
+                continue
+            if end_time and item_ts > end_time:
+                continue
+
         text_to_compare = " ".join(filter(None, [
             str(item["payload"].get("caption") or ""),
             str(item["payload"].get("vehicle_type") or ""),
@@ -134,34 +143,67 @@ def _local_text_matches(query_text: str, limit: int) -> list:
     return matches[:limit]
 
 
-def perform_semantic_search(query_text: str, limit: int = 10) -> list:
+def _build_qdrant_time_filter(start_time: str = None, end_time: str = None):
+    """Constructs a Qdrant Filter with FieldCondition for timestamp range if start_time/end_time are provided."""
+    if not start_time and not end_time:
+        return None
+    try:
+        from qdrant_client.http import models as qmodels
+        range_kwargs = {}
+        if start_time:
+            range_kwargs["gte"] = start_time
+        if end_time:
+            range_kwargs["lte"] = end_time
+        return qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key="timestamp",
+                    range=qmodels.Range(**range_kwargs)
+                )
+            ]
+        )
+    except Exception as e:
+        logger.warning("Could not construct Qdrant time filter: %s", e)
+        return None
+
+
+def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = None, end_time: str = None) -> list:
     """
     Translates search query to a real semantic embedding via SentenceTransformer,
-    then queries Qdrant for cosine-similar results.
+    then queries Qdrant for cosine-similar results, optionally filtered by time range.
 
     Falls back to in-memory keyword overlap only if Qdrant is unreachable.
-    Seeded demo records are always available as ultimate fallback.
     """
     _seed_demo_vector_db()
 
     query_vector = get_text_embedding(query_text)
     is_production = os.getenv("APP_ENV") == "production"
+    query_filter = _build_qdrant_time_filter(start_time, end_time)
 
     try:
         from .qdrant_utils import qdrant_client_with_timeout
-        with qdrant_client_with_timeout(2.0) as client:
-            # Search without a score threshold so we always return top-N results
+        with qdrant_client_with_timeout(5.0) as client:
             qd_results = client.query_points(
                 collection_name="vms_embeddings",
                 query=query_vector,
                 using="scene",
+                query_filter=query_filter,
                 limit=limit,
                 with_payload=True
             ).points
 
         if qd_results:
             results = []
+            snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
             for r in qd_results:
+                snap_url = r.payload.get("snapshot_url") or ""
+                if snap_url:
+                    snap_id = snap_url.split("/")[-1]
+                    snap_path = os.path.join(snap_dir, f"{snap_id}.jpg")
+                    raw_path = os.path.join(snap_dir, snap_id)
+                    if not (os.path.exists(snap_path) or os.path.exists(raw_path)):
+                        continue  # Skip records whose snapshot image files no longer exist on disk
+
                 score = r.score
                 text_to_compare = " ".join(filter(None, [
                     str(r.payload.get("caption") or ""),
@@ -180,14 +222,16 @@ def perform_semantic_search(query_text: str, limit: int = 10) -> list:
         logger.warning("Qdrant unavailable, falling back to in-memory: %s", e)
 
     # Fallback: local in-memory word-overlap search on seeded demo records
-    return _local_text_matches(query_text, limit)
+    return _local_text_matches(query_text, limit, start_time, end_time)
 
 
-def perform_face_search(face_embedding: list, limit: int = 10) -> list:
+def perform_face_search(face_embedding: list, limit: int = 10, start_time: str = None, end_time: str = None) -> list:
     """
-    Performs vector similarity search matching query face embedding against indexed faces.
+    Performs vector similarity search matching query face embedding against indexed faces,
+    optionally filtered by time range.
     """
     is_production = os.getenv("APP_ENV") == "production"
+    query_filter = _build_qdrant_time_filter(start_time, end_time)
 
     try:
         from .qdrant_utils import qdrant_client_with_timeout
@@ -196,6 +240,7 @@ def perform_face_search(face_embedding: list, limit: int = 10) -> list:
                 collection_name="vms_embeddings",
                 query=face_embedding,
                 using="face",
+                query_filter=query_filter,
                 limit=limit,
                 with_payload=True
             ).points
@@ -211,6 +256,12 @@ def perform_face_search(face_embedding: list, limit: int = 10) -> list:
     matches = []
     for item in model_manager.vector_db:
         if item["payload"].get("type") == "face":
+            item_ts = item["payload"].get("timestamp")
+            if item_ts:
+                if start_time and item_ts < start_time:
+                    continue
+                if end_time and item_ts > end_time:
+                    continue
             sim = cosine_similarity(face_embedding, item["vector"])
             matches.append({"score": sim, "payload": item["payload"]})
 

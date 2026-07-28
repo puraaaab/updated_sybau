@@ -27,9 +27,13 @@ def get_target_trajectory(target_id: str, user=Depends(verify_viewer), db: Sessi
         if track_uuids:
             matched_tracks = db.query(Track).filter(Track.track_uuid.in_(track_uuids)).order_by(Track.first_seen.asc()).all()
             
-    # 2. If vehicle / license plate query
+    # 2. If vehicle / license plate / color query
     if not matched_tracks:
-        vehicles = db.query(Vehicle).filter(Vehicle.license_plate.ilike(f"%{target_id}%")).all()
+        vehicles = db.query(Vehicle).filter(
+            (Vehicle.license_plate.ilike(f"%{target_id}%")) |
+            (Vehicle.vehicle_type.ilike(f"%{target_id}%")) |
+            (Vehicle.vehicle_color.ilike(f"%{target_id}%"))
+        ).all()
         track_uuids = [v.track_uuid for v in vehicles if v.track_uuid]
         if track_uuids:
             matched_tracks = db.query(Track).filter(Track.track_uuid.in_(track_uuids)).order_by(Track.first_seen.asc()).all()

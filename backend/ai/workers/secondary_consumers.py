@@ -24,7 +24,10 @@ class SecondaryAIConsumers:
         self.ocr_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="paddle_ocr")
         
         # Structural classes to route to specific secondary pipelines
-        self.VEHICLE_CLASSES = {"car", "motorcycle", "bus", "truck"}
+        self.VEHICLE_CLASSES = {
+            "car", "truck", "motorcycle", "bus", "bicycle", "auto_rickshaw",
+            "rickshaw", "tuktuk", "scooter", "moped", "van", "suv", "vehicle", "three_wheeler"
+        }
         self.SEMANTIC_CLASSES = {"person", "cow"}
 
     def start(self):

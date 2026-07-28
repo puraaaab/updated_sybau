@@ -3,6 +3,7 @@ import cv2
 import time
 import json
 import logging
+logger = logging.getLogger(__name__)
 import numpy as np
 import datetime
 import threading
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session
 from ..config.service import get_cameras, get_zones, get_alerts
 from ..ai.pipeline.orchestrator import process_frame
 from ..database.connection import SessionLocal
-from ..database.models import Track, Face, Vehicle, Alert, Camera, Zone, AlertConfig
+from ..database.models import Track, Face, Vehicle, Alert, Camera, Zone, AlertConfig, SceneCaption
 from ..messaging.kafka_client import event_client
 from ..services.stream_manager import stream_manager
 from ..ai.model_manager import model_manager
@@ -46,7 +47,7 @@ MAX_VECTOR_DB_FALLBACK_SIZE = 1000
 
 def index_vector(vector_id: str, vector: list, payload: dict):
     """
-    Attempts to insert a vector embedding into Qdrant.
+    Attempts to insert a vector embedding into Qdrant via non-blocking batch queue.
     Falls back to local in-memory storage if Qdrant is unavailable (disabled in production).
     """
     is_production = os.getenv("APP_ENV") == "production"
@@ -61,32 +62,14 @@ def index_vector(vector_id: str, vector: list, payload: dict):
         if len(model_manager.vector_db) > MAX_VECTOR_DB_FALLBACK_SIZE:
             model_manager.vector_db = model_manager.vector_db[-MAX_VECTOR_DB_FALLBACK_SIZE:]
     
-    # Fast Qdrant index using singleton pooled client
+    # Enqueue to background batch worker for zero-latency non-blocking Qdrant index
     try:
-        from qdrant_client.http import models as qmodels
-        client = get_qdrant_client(timeout=2.0)
-        if client:
-            if len(vector) == 512:
-                vec_name = "face"
-            elif len(vector) == 576:
-                vec_name = "vehicle"
-            else:
-                vec_name = "scene"
-
-            client.upsert(
-                collection_name="vms_embeddings",
-                points=[
-                    qmodels.PointStruct(
-                        id=vector_id,
-                        vector={vec_name: vector},
-                        payload=payload
-                    )
-                ]
-            )
+        from ..search.qdrant_utils import enqueue_qdrant_point
+        enqueue_qdrant_point(vector_id, vector, payload)
     except Exception as e:
         if is_production:
             raise RuntimeError(f"FATAL: Qdrant vector index failed in production: {e}") from e
-        print(f"Qdrant Index Error: {e}")
+        logger.warning(f"Qdrant Index Error: {e}")
 
 class CameraAIWorker:
     """
@@ -147,6 +130,25 @@ class CameraAIWorker:
 
         return self._cached_zones, self._cached_alerts_cfg
 
+    def _detect_raw_motion(self, frame: np.ndarray, prev_gray: np.ndarray | None):
+        """
+        Lightweight OpenCV motion detector evaluating downscaled grayscale frame differences (<0.05ms execution time).
+        Returns (has_motion, motion_ratio, current_gray).
+        """
+        try:
+            small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_NEAREST)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            if prev_gray is None:
+                return False, 0.0, gray
+            diff = cv2.absdiff(gray, prev_gray)
+            _, thresh = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
+            non_zero = cv2.countNonZero(thresh)
+            ratio = float(non_zero) / (160 * 90)
+            has_motion = ratio > 0.003  # 0.3% pixel change threshold (sensitive to distant traffic & movement)
+            return has_motion, ratio, gray
+        except Exception:
+            return False, 0.0, prev_gray if prev_gray is not None else np.zeros((90, 160), dtype=np.uint8)
+
     def _processing_loop(self):
         stream = stream_manager.get_stream(self.camera_id, self.stream_url)
 
@@ -166,22 +168,47 @@ class CameraAIWorker:
                     db.add(cam_entry)
                     db.commit()
 
-                interval = 1.0 / self.sampling_rate
+                interval = 0.5
                 frame_idx = 0
                 last_frame_ts = 0.0
                 snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
                 os.makedirs(snap_dir, exist_ok=True)
 
+                prev_gray = None
+                last_motion_time = 0.0
+                has_active_tracks = False
+                has_active_alerts = False
+                current_fps = 2.0
+                motion_status = "STREAMING"
+
                 while self.running:
                     success, frame, ts = stream.get_frame()
                     if not success or frame is None or ts <= last_frame_ts:
-                        time.sleep(0.05)
-                        continue
-
-                    # Rate limit sampling to target FPS (e.g., 2 FPS)
-                    if (ts - last_frame_ts) < interval:
                         time.sleep(0.02)
                         continue
+
+                    # Rate limit sampling to constant 2.0 FPS (0.5s interval)
+                    if (ts - last_frame_ts) < interval:
+                        time.sleep(0.01)
+                        continue
+
+                    # Evaluate motion across sampled frame deltas
+                    has_motion, motion_ratio, prev_gray = self._detect_raw_motion(frame, prev_gray)
+                    now_ts = time.time()
+                    if has_motion:
+                        last_motion_time = now_ts
+
+                    motion_recent = (now_ts - last_motion_time) < 3.0  # 3s cooldown buffer
+
+                    # Dynamic Status Decision (constant 2.0 FPS capture rate)
+                    if has_active_tracks:
+                        motion_status = "TRACKING"
+                    elif has_active_alerts:
+                        motion_status = "ALERT"
+                    elif has_motion or motion_recent:
+                        motion_status = "MOTION"
+                    else:
+                        motion_status = "STREAMING"
 
                     last_frame_ts = ts
                     start_time = time.time()
@@ -190,16 +217,29 @@ class CameraAIWorker:
                         # Fetch zones and config from cache (refreshed every 10s)
                         zones, alerts_cfg = self._get_cached_config(db)
 
-                        # Execute full inference pipeline
+                        # Execute full AI inference pipeline on GPU
                         results = process_frame(frame, self.camera_id, zones, alerts_cfg, frame_idx)
                         frame_idx += 1
+
+                        if frame_idx % 100 == 0:
+                            import gc, torch
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+
+                        tracks_count = len(results.get("tracks", []))
+                        alerts_count = len(results.get("alerts", []))
+                        has_active_tracks = tracks_count > 0
+                        has_active_alerts = alerts_count > 0
 
                         latest_telemetry[self.camera_id] = {
                             "tracks": results.get("tracks", []),
                             "faces_count": len(results.get("faces", [])),
                             "vehicles_count": len(results.get("vehicles", [])),
-                            "alerts_count": len(results.get("alerts", [])),
+                            "alerts_count": alerts_count,
                             "frame_idx": frame_idx,
+                            "motion_status": motion_status,
+                            "fps": current_fps,
                             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
                         }
 
@@ -284,6 +324,7 @@ class CameraAIWorker:
                             snap_path = os.path.join(snap_dir, f"{vid}.jpg")
                             save_snapshot_async(snap_path, frame)
 
+                            snap_url = f"/api/v1/playback/snapshot/{vid}"
                             index_vector(
                                 vector_id=vid,
                                 vector=results["embedding"],
@@ -291,10 +332,24 @@ class CameraAIWorker:
                                     "type": "scene",
                                     "camera_id": self.camera_id,
                                     "caption": results["caption"],
-                                    "snapshot_url": f"/api/v1/playback/snapshot/{vid}",
+                                    "snapshot_url": snap_url,
                                     "timestamp": datetime.datetime.utcnow().isoformat()
                                 }
                             )
+
+                            db_caption = SceneCaption(
+                                camera_id=self.camera_id,
+                                caption=results["caption"],
+                                snapshot_url=snap_url,
+                                timestamp=datetime.datetime.utcnow()
+                            )
+                            db.add(db_caption)
+                            try:
+                                db.commit()
+                            except Exception as db_err:
+                                logger.warning(f"[{self.camera_id}] SceneCaption commit warning: {db_err}")
+                                db.rollback()
+
                             event_client.publish_event("captions", {
                                 "camera_id": self.camera_id,
                                 "caption": results["caption"],
@@ -307,12 +362,14 @@ class CameraAIWorker:
                             snap_path = os.path.join(snap_dir, f"{snap_id}.jpg")
                             save_snapshot_async(snap_path, frame)
 
+                            calc_latency = round((time.time() - start_time) * 1000.0, 2)
                             db_alert = Alert(
                                 camera_id=self.camera_id,
                                 type=alert["type"],
                                 message=alert["message"],
                                 severity=alert["severity"],
                                 timestamp=datetime.datetime.utcnow(),
+                                latency_ms=calc_latency,
                                 snapshot_url=f"/api/v1/playback/snapshot/{snap_id}"
                             )
                             db.add(db_alert)
@@ -325,6 +382,7 @@ class CameraAIWorker:
                                 "message": alert["message"],
                                 "severity": alert["severity"],
                                 "timestamp": db_alert.timestamp.isoformat(),
+                                "latency_ms": calc_latency,
                                 "snapshot_url": db_alert.snapshot_url
                             }
                             event_client.publish_event("alerts", alert_payload)

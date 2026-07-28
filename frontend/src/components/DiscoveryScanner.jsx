@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import {
   Box, Typography, Grid, Paper, TextField, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Alert, CircularProgress
 } from '@mui/material';
@@ -138,7 +138,7 @@ export default function DiscoveryScanner({ token }) {
       </Box>
 
       <Grid container spacing={3} sx={{ flexGrow: 1, minHeight: 0 }}>
-        <Grid item xs={12} md={4} sx={{ height: '100%' }}>
+        <Grid size={{ xs: 12, md: 4 }} sx={{ height: '100%' }}>
           <Paper variant="outlined" sx={{ p: 2, height: '100%', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
             <Typography variant="subtitle2" fontWeight="bold" sx={{ borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
               SCAN TRIGGER PANEL
@@ -179,7 +179,7 @@ export default function DiscoveryScanner({ token }) {
                 size="small"
                 value={onvifPass}
                 onChange={e => setOnvifPass(e.target.value)}
-                placeholder="••••••••"
+                placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
               />
               <Typography variant="caption" color="text.secondary">
                 Required to resolve actual RTSP stream URI from discovered devices.
@@ -194,7 +194,7 @@ export default function DiscoveryScanner({ token }) {
           </Paper>
         </Grid>
 
-        <Grid item xs={12} md={8} sx={{ height: '100%' }}>
+        <Grid size={{ xs: 12, md: 8 }} sx={{ height: '100%' }}>
           <Paper variant="outlined" sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
             <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
               DISCOVERED IP DEVICES

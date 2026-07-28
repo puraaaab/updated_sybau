@@ -2,6 +2,7 @@ import logging
 from typing import List, Dict, Any
 
 import numpy as np
+import torch
 
 from ...config.service import get_models
 from ..model_manager import model_manager
@@ -70,12 +71,14 @@ def detect_and_track(frame: np.ndarray):
     """Executes YOLO tracking on one camera frame."""
     try:
         yolo_model = model_manager.get_yolo()
+        device_target = "cuda" if torch.cuda.is_available() else "cpu"
         results = yolo_model.track(
             frame,
             persist=True,
             tracker="bytetrack.yaml",
             classes=COCO_CLASS_IDS,
             conf=_confidence_threshold(),
+            device=device_target,
             verbose=False,
         )
     except Exception:

@@ -68,14 +68,7 @@ def resolve_stream_url(camera_id: str, raw_url: str) -> str | None:
     if not raw_url:
         return None
 
-    # ── RTSP / direct HTTP(S) / HLS ──────────────────────────────────────
-    if raw_url.lower().startswith("rtsp://"):
-        return raw_url
-
-    if raw_url.lower().endswith(".m3u8"):
-        return raw_url
-
-    # Non-YouTube http(s) URLs — assume direct stream
+    # ── RTSP / direct HTTP(S) / HLS / local video files ──────────────────
     if not is_youtube_url(raw_url):
         return raw_url
 

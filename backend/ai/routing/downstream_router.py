@@ -21,7 +21,10 @@ class DownstreamRouter:
         self.max_queue_size = max_queue_size
         
         # High-value targets for deep structural processing on Indian streets
-        self.DEEP_PROCESSING_CLASSES = {"person", "car", "motorcycle", "bus", "truck", "cow"}
+        self.DEEP_PROCESSING_CLASSES = {
+            "person", "car", "truck", "motorcycle", "bus", "bicycle", "auto_rickshaw",
+            "rickshaw", "tuktuk", "scooter", "moped", "van", "suv", "vehicle", "three_wheeler", "cow"
+        }
 
     async def route_batch_results(self, batch_detections: Dict[str, List[Dict[str, Any]]], original_frames: Dict[str, np.ndarray]):
         """

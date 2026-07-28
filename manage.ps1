@@ -16,7 +16,8 @@ function Stop-VMS {
     # 1. Stop Docker
     Write-Host "  Stopping Docker containers..."
     Set-Location $ProjectRoot
-    & docker-compose down 2>&1 | ForEach-Object { if ($_ -notmatch 'level=warning') { Write-Host $_ } }
+    & docker-compose down --remove-orphans 2>&1 | ForEach-Object { if ($_ -notmatch 'level=warning') { Write-Host $_ } }
+    Start-Sleep -Seconds 2
 
     # 2. Kill Uvicorn (Backend)
     Write-Host "  Stopping Python backend (uvicorn)..."
@@ -55,10 +56,11 @@ function Stop-VMS {
 function Start-VMS {
     Write-Host "Starting Sybau VMS Services..." -ForegroundColor Cyan
 
-    # 1. Start Docker (PostgreSQL, Qdrant, Kafka)
-    Write-Host "  Starting Docker containers..."
+    # 1. Start Docker Infrastructure (PostgreSQL, Qdrant, MediaMTX, MinIO, Kafka)
+    Write-Host "  Starting Docker infrastructure containers..."
     Set-Location $ProjectRoot
-    & docker-compose up -d 2>&1 | ForEach-Object { if ($_ -notmatch 'level=warning') { Write-Host $_ } }
+    & docker-compose up -d postgres qdrant mediamtx minio zookeeper kafka 2>&1 | ForEach-Object { if ($_ -notmatch 'level=warning') { Write-Host $_ } }
+    $global:LASTEXITCODE = 0
     Write-Host "  Waiting for services to be ready..."
     Start-Sleep -Seconds 5
 

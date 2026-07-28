@@ -104,8 +104,13 @@ class ModelManager:
                 return self._models["yolo"]
 
             from ultralytics import YOLO
+            import os as _os
             cfg = get_models().get("yolo", {})
             model_path = cfg.get("model_path", "yolo26m.pt")
+            # Resolve relative paths from the project root (two levels up from this file)
+            if not _os.path.isabs(model_path):
+                project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "..", ".."))
+                model_path = _os.path.join(project_root, model_path)
             device_cfg = cfg.get("device", "cuda")
             device = device_cfg if device_cfg != "cuda" or torch.cuda.is_available() else "cpu"
             print(f"Loading YOLO model {model_path} on {device}...")
@@ -167,19 +172,49 @@ class ModelManager:
                 sys.modules["flash_attn.flash_attn_interface"] = mock
                 sys.modules["flash_attn.flash_attn_triton"] = mock
 
+            # Bypass HuggingFace check_imports validation for missing flash_attn package on Windows
+            try:
+                import transformers.dynamic_module_utils as _dmu
+                if not getattr(_dmu, "_flash_attn_patched", False):
+                    _orig_ci = _dmu.check_imports
+                    def _patched_ci(filename):
+                        try:
+                            return _orig_ci(filename)
+                        except ImportError as _ie:
+                            if "flash_attn" in str(_ie):
+                                return []
+                            raise
+                    _dmu.check_imports = _patched_ci
+                    _dmu._flash_attn_patched = True
+            except Exception:
+                pass
+
             cfg = get_models().get("florence", {})
-            model_id = cfg.get("model_id", "microsoft/Florence-2-large")
+            model_id = cfg.get("model_id", "microsoft/Florence-2-base")
             device = cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
-            print(f"Loading Florence-2 model {model_id} on {device}...")
-            processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
             dtype = torch.float16 if device == "cuda" else torch.float32
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                trust_remote_code=True,
-                torch_dtype=dtype
-            ).to(device)
+
+            print(f"Loading Florence-2 model {model_id} on {device}...")
+
+            def _load_florence_target(target_id):
+                try:
+                    p = AutoProcessor.from_pretrained(target_id, trust_remote_code=True, local_files_only=True)
+                    m = AutoModelForCausalLM.from_pretrained(target_id, trust_remote_code=True, torch_dtype=dtype, local_files_only=True).to(device)
+                    return p, m
+                except Exception:
+                    p = AutoProcessor.from_pretrained(target_id, trust_remote_code=True)
+                    m = AutoModelForCausalLM.from_pretrained(target_id, trust_remote_code=True, torch_dtype=dtype).to(device)
+                    return p, m
+
+            try:
+                processor, model = _load_florence_target(model_id)
+            except Exception as _primary_err:
+                print(f"Primary Florence load ({model_id}) failed: {_primary_err}. Falling back to microsoft/Florence-2-base...")
+                processor, model = _load_florence_target("microsoft/Florence-2-base")
+
             model.eval()
             self._models["florence"] = (model, processor)
+            print(f"Florence-2 vision model ready on {device}!")
             return self._models["florence"]
 
     get_paddle_ocr = get_ocr

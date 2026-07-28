@@ -38,32 +38,46 @@ def _mock_embedding(text: str) -> list:
     return vec.tolist()
 
 
+_embedding_cache = {}
+_cache_lock_dict = threading.Lock()
+
 def get_text_embedding(text: str):
     """
     Generates a 384-dimensional vector embedding for the input text.
     """
+    if not text:
+        return [0.0] * EMBEDDING_DIM
+
+    with _cache_lock_dict:
+        if text in _embedding_cache:
+            return _embedding_cache[text]
+
     global _sentence_transformer_model
     cfg = get_models()
     demo_mode = cfg.get("demo_mode", False)
 
     if demo_mode:
-        # Stable mock embedding seeded by a deterministic hash of the text,
-        # so that matching search queries yield closer vector similarities
-        # — including across separate process runs.
-        return _mock_embedding(text)
+        vec = _mock_embedding(text)
+    else:
+        try:
+            if _sentence_transformer_model is None:
+                with _model_lock:
+                    if _sentence_transformer_model is None:
+                        import torch
+                        from sentence_transformers import SentenceTransformer
+                        device = "cuda" if torch.cuda.is_available() else "cpu"
+                        logger.info(f"Loading SentenceTransformer model (all-MiniLM-L6-v2) on {device}...")
+                        _sentence_transformer_model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
 
-    try:
-        if _sentence_transformer_model is None:
-            with _model_lock:
-                # Re-check inside the lock in case another thread loaded
-                # it while we were waiting.
-                if _sentence_transformer_model is None:
-                    from sentence_transformers import SentenceTransformer
-                    logger.info("Loading SentenceTransformer model (all-MiniLM-L6-v2)...")
-                    _sentence_transformer_model = SentenceTransformer("all-MiniLM-L6-v2")
+            embedding = _sentence_transformer_model.encode(text)
+            vec = embedding.tolist()
+        except Exception:
+            logger.exception("Error loading SentenceTransformer. Falling back to hash seed simulation.")
+            vec = _mock_embedding(text)
 
-        embedding = _sentence_transformer_model.encode(text)
-        return embedding.tolist()
-    except Exception:
-        logger.exception("Error loading SentenceTransformer. Falling back to hash seed simulation.")
-        return _mock_embedding(text)
+    with _cache_lock_dict:
+        if len(_embedding_cache) > 2000:
+            _embedding_cache.clear()
+        _embedding_cache[text] = vec
+
+    return vec

@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from .database.connection import engine, get_db, SessionLocal, Base
-from .database.models import Alert, Camera, Zone, AlertConfig, GlobalIdentity, Vehicle, Track
+from .database.models import Alert, Camera, Zone, AlertConfig, GlobalIdentity, Vehicle, Track, Face, SceneCaption
 from .auth.router import router as auth_router
 from .admin.router import router as admin_router
 from .services.watchlist import router as watchlist_router
@@ -22,7 +22,7 @@ from .services.trajectory import router as trajectory_router
 from .services.co_occurrence import router as co_occurrence_router
 from .services.fir_report import router as fir_report_router
 from .services.challan import router as challan_router
-from .auth.helpers import verify_admin, verify_operator, verify_viewer
+from .auth.helpers import verify_admin, verify_operator, verify_viewer, verify_media_access
 from .config import service as config_service
 from .config.service import get_models
 from .recording import recorder
@@ -106,31 +106,40 @@ async def lifespan(app: FastAPI):
         db.close()
 
     def _startup_ai():
-        # Pre-warm models sequentially in a single background thread
-        # to prevent thread-safety issues with lazy imports when multiple
-        # worker threads hit them simultaneously.
-        from .ai.captioning.captioner import pre_warm as pre_warm_captioner
-        from .ai.model_manager import model_manager
+        try:
+            # Pre-warm Florence-2 in its own sub-thread so it doesn't block worker startup
+            from .ai.captioning.captioner import pre_warm as pre_warm_captioner
+            import threading as _threading
+            _threading.Thread(target=pre_warm_captioner, daemon=True, name="Florence_Prewarm").start()
 
-        pre_warm_captioner()
-        
-        # Also pre-warm other heavy models to ensure smooth worker startup
-        print("Pre-warming YOLO and EasyOCR models...")
-        model_manager.get_yolo()
-        model_manager.get_ocr()
+            from .ai.model_manager import model_manager
+            # Also pre-warm other heavy models to ensure smooth worker startup
+            print("Pre-warming YOLO, EasyOCR, and SentenceTransformer embedder...")
+            model_manager.get_yolo()
+            model_manager.get_ocr()
+            try:
+                from .ai.embeddings.embedder import get_text_embedding
+                get_text_embedding("prewarm vector search engine")
+                print("SentenceTransformer text embedder pre-warmed for ultra-fast forensic query response.")
+            except Exception as e:
+                print(f"Note on SentenceTransformer pre-warm: {e}")
 
-        from .ai.scheduler import inference_scheduler
-        inference_scheduler.start()
+            from .ai.scheduler import inference_scheduler
+            inference_scheduler.start()
 
-        # Start continuous recording and AI threads only after the inference
-        # scheduler is live; otherwise camera workers can block on their first
-        # GPU task during startup.
-        print("Starting background Stream Recorders and AI Workers...")
-        recorder.start_all_recorders()
-        ai_worker.start_all_ai_workers()
+            # Start continuous recording and AI threads only after the inference
+            # scheduler is live; otherwise camera workers can block on their first
+            # GPU task during startup.
+            print("Starting background Stream Recorders and AI Workers...")
+            recorder.start_all_recorders()
+            ai_worker.start_all_ai_workers()
 
-        from .recording.retention import retention_manager
-        retention_manager.start()
+            from .recording.retention import retention_manager
+            retention_manager.start()
+        except Exception as _startup_exc:
+            import traceback
+            print(f"[FATAL] AI startup thread crashed: {_startup_exc}")
+            traceback.print_exc()
 
     # Start the AI subsystem in a background thread so the FastAPI server
     # can bind to port 8000 immediately without blocking `manage.ps1`
@@ -222,6 +231,7 @@ def get_cameras(user=Depends(verify_viewer), db: Session = Depends(get_db)):
     result = []
     from .services.stream_resolver import resolve_stream_url
     for c in cams:
+        telem = ai_worker.latest_telemetry.get(c.id, {})
         cam_dict = {
             "id": c.id,
             "name": c.name,
@@ -229,13 +239,22 @@ def get_cameras(user=Depends(verify_viewer), db: Session = Depends(get_db)):
             "stream_url": c.stream_url,
             "status": c.status,
             "width": c.width,
-            "height": c.height
+            "height": c.height,
+            "motion_status": telem.get("motion_status", "STREAMING"),
+            "fps": telem.get("fps", 2.0)
         }
-        if "rtsp://127.0.0.1:8554" in c.stream_url or "rtsp://localhost:8554" in c.stream_url:
-            stream_name = c.stream_url.rstrip("/").split("/")[-1]
-            cam_dict["hls_url"] = f"/hls/{stream_name}/index.m3u8"
+        # Always serve /hls/{cam_id}/index.m3u8 to the browser.
+        # The backend workers (OpenCV / stream_manager) consume the raw source
+        # (local file, RTSP, YouTube) internally. MediaMTX then publishes the
+        # transcoded stream as HLS. Returning raw file:// paths crashes HLS.js.
+        raw = c.stream_url or ""
+        is_youtube = "youtube.com" in raw or "youtu.be" in raw
+        if is_youtube:
+            cam_dict["hls_url"] = raw  # YouTube streams are rendered via iframe
+            cam_dict["is_youtube"] = True
         else:
-            cam_dict["hls_url"] = c.stream_url
+            cam_dict["hls_url"] = f"http://localhost:8888/{c.id}/index.m3u8"
+            cam_dict["is_youtube"] = False
         result.append(cam_dict)
     return result
 
@@ -304,6 +323,7 @@ def scan_onvif_cameras(user=Depends(verify_viewer)):
 def resolve_onvif_stream_uri(payload: dict, user=Depends(verify_viewer)):
     """
     Resolves ONVIF media profile RTSP URI using provided device credentials.
+    Attempts real ONVIF SOAP Media Service GetStreamUri probe first, falling back to standard RTSP pattern.
     """
     ip = payload.get("onvif_ip", "127.0.0.1")
     port = payload.get("onvif_port", 80)
@@ -311,10 +331,31 @@ def resolve_onvif_stream_uri(payload: dict, user=Depends(verify_viewer)):
     pwd = payload.get("onvif_password", "")
     
     rtsp_url = f"rtsp://{uname}:{pwd}@{ip}:554/live/ch0" if pwd else f"rtsp://{ip}:554/live/ch0"
+    is_real = False
+
+    try:
+        from onvif import ONVIFCamera
+        mycam = ONVIFCamera(ip, port, uname, pwd)
+        media_service = mycam.create_media_service()
+        profiles = media_service.GetProfiles()
+        if profiles:
+            token = profiles[0].token
+            obj = media_service.create_type('GetStreamUri')
+            obj.StreamSetup = {'Stream': 'RTP-Unicast', 'Transport': {'Protocol': 'RTSP'}}
+            obj.ProfileToken = token
+            res = media_service.GetStreamUri(obj)
+            if res and hasattr(res, 'Uri'):
+                rtsp_url = res.Uri
+                is_real = True
+    except Exception as e:
+        # Fallback to direct RTSP URI string construction
+        pass
+
     return {
         "status": "success",
         "onvif_ip": ip,
-        "stream_url": rtsp_url
+        "stream_url": rtsp_url,
+        "is_real_soap": is_real
     }
 
 
@@ -495,12 +536,22 @@ def download_forensic_export(alert_id: int, db: Session = Depends(get_db), user=
 # ---------------------------------------------------------------------------
 
 @app.get("/api/v1/playback/snapshot/{snap_id}")
-def serve_snapshot(snap_id: str, user=Depends(verify_viewer)):
+def serve_snapshot(snap_id: str, user=Depends(verify_media_access)):
     snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "snapshots"))
-    snap_path = safe_join_path(snap_dir, f"{snap_id}.jpg")
-    if not os.path.exists(snap_path):
-        raise HTTPException(status_code=404, detail="Snapshot not found")
-    return FileResponse(snap_path)
+    
+    # Try exact match, with .jpg extension, or without extension
+    candidates = [
+        safe_join_path(snap_dir, f"{snap_id}.jpg"),
+        safe_join_path(snap_dir, snap_id),
+    ]
+    if not snap_id.endswith(".jpg"):
+        candidates.append(safe_join_path(snap_dir, f"{snap_id}.png"))
+        
+    for p in candidates:
+        if os.path.exists(p):
+            return FileResponse(p, media_type="image/jpeg")
+            
+    raise HTTPException(status_code=404, detail="Snapshot not found")
 
 
 @app.get("/api/v1/playback/timeline/{camera_id}")
@@ -514,7 +565,7 @@ def get_timeline_clips(camera_id: str, user=Depends(verify_viewer)):
 
 
 @app.get("/api/v1/playback/video/{camera_id}/{clip_name}")
-def serve_video_clip(camera_id: str, clip_name: str, user=Depends(verify_viewer)):
+def serve_video_clip(camera_id: str, clip_name: str, user=Depends(verify_media_access)):
     rec_base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "recordings"))
     video_path = safe_join_path(rec_base_dir, camera_id, clip_name)
     if not os.path.exists(video_path):
@@ -532,13 +583,47 @@ def get_health(user=Depends(verify_viewer)):
     return monitoring_health.get_full_health_report()
 
 
+@app.get("/api/v1/ai/status")
+def get_ai_status(user=Depends(verify_viewer)):
+    """
+    Returns real-time initialization status of all AI models.
+    """
+    from .ai.model_manager import model_manager
+    from .ai.embeddings.embedder import _sentence_transformer_model
+
+    models = model_manager._models
+    yolo_loaded = "yolo" in models
+    ocr_loaded = "ocr" in models
+    florence_loaded = "florence" in models
+    embedder_loaded = _sentence_transformer_model is not None
+
+    all_ready = yolo_loaded and embedder_loaded
+
+    return {
+        "status": "READY" if all_ready else "PREWARMING",
+        "all_ready": all_ready,
+        "models": {
+            "YOLO26m": "LOADED" if yolo_loaded else "LOADING",
+            "OCR": "LOADED" if ocr_loaded else "LOADING",
+            "Embedder": "LOADED" if embedder_loaded else "LOADING",
+            "Florence": "LOADED" if florence_loaded else "LOADING"
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # Search API (Semantic + Face Vector Similarity)
 # ---------------------------------------------------------------------------
 
 @app.get("/api/v1/search/semantic")
-def search_semantic(q: str = Query(..., min_length=1), limit: int = Query(default=10), user=Depends(verify_viewer)):
-    results = vector_search.perform_semantic_search(q, limit=limit)
+def search_semantic(
+    q: str = Query(..., min_length=1), 
+    limit: int = Query(default=10),
+    start_time: str = Query(default=None),
+    end_time: str = Query(default=None),
+    user=Depends(verify_viewer)
+):
+    results = vector_search.perform_semantic_search(q, limit=limit, start_time=start_time, end_time=end_time)
     return results
 
 
@@ -586,7 +671,12 @@ def debug_search(user=Depends(verify_viewer)):
 
 
 @app.post("/api/v1/search/face")
-async def search_face(file: UploadFile = File(...), user=Depends(verify_viewer)):
+async def search_face(
+    file: UploadFile = File(...), 
+    start_time: str = Query(default=None),
+    end_time: str = Query(default=None),
+    user=Depends(verify_viewer)
+):
     import numpy as np
     import cv2
     from .ai.face import face_pipeline
@@ -609,7 +699,7 @@ async def search_face(file: UploadFile = File(...), user=Depends(verify_viewer))
         if faces is not None and len(faces) > 0:
             aligned_face = recognizer.alignCrop(img, faces[0])
             embedding = recognizer.feature(aligned_face).flatten().tolist()
-            results = vector_search.perform_face_search(embedding)
+            results = vector_search.perform_face_search(embedding, start_time=start_time, end_time=end_time)
             return results
         else:
             raise HTTPException(status_code=422, detail="No face detected in uploaded image. Please provide a clear face snapshot.")
@@ -632,14 +722,18 @@ def get_settings(user=Depends(verify_viewer)):
 
 
 @app.post("/api/v1/settings/alerts")
-def save_alerts_settings(settings: dict, user=Depends(verify_admin)):
+def save_alerts_settings(settings: dict, user=Depends(verify_admin), db: Session = Depends(get_db)):
+    from .utils.audit import log_audit_event
     config_service.save_alerts(settings)
+    log_audit_event(db, action="SETTINGS_UPDATE", detail="Updated alert thresholds", username=user.username)
     return {"message": "Alert thresholds updated"}
 
 
 @app.post("/api/v1/settings/models")
-def save_models_settings(settings: dict, user=Depends(verify_admin)):
+def save_models_settings(settings: dict, user=Depends(verify_admin), db: Session = Depends(get_db)):
+    from .utils.audit import log_audit_event
     config_service.save_models(settings)
+    log_audit_event(db, action="SETTINGS_UPDATE", detail="Updated model configurations", username=user.username)
     return {"message": "Model settings updated"}
 
 
@@ -658,6 +752,13 @@ def get_camera_resolved_stream(camera_id: str, request: Request, user=Depends(ve
         raise HTTPException(status_code=404, detail="Camera not found")
 
     original_url = cam.stream_url
+
+    # For local video clip files (.avi, .mp4, etc.), route through MJPEG live stream generator
+    if os.path.exists(original_url) or original_url.lower().endswith((".avi", ".mp4", ".mkv", ".mov")):
+        base_url = str(request.base_url).rstrip("/")
+        mjpeg_url = f"{base_url}/api/v1/cameras/{camera_id}/mjpeg"
+        return {"stream_url": mjpeg_url, "is_hls": False}
+
     resolved = resolve_stream_url(camera_id, original_url)
 
     if not resolved:
@@ -671,14 +772,33 @@ def get_camera_resolved_stream(camera_id: str, request: Request, user=Depends(ve
         return {"stream_url": proxied_url, "is_hls": True}
 
     # Intercept internal RTSP streams and route them to MediaMTX's HLS endpoint.
-    # This intentionally causes the frontend's WebRTC to fail fast (port 8888 doesn't serve WHEP),
-    # triggering an instant fallback to HLS which works perfectly over TCP without Docker UDP ICE issues!
     if resolved.startswith("rtsp://127.0.0.1:8554/") or resolved.startswith("rtsp://localhost:8554/"):
         cam_id = resolved.split("/")[-1]
         hls_url = f"http://localhost:8888/{cam_id}/index.m3u8"
         return {"stream_url": hls_url, "is_hls": True}
 
     return {"stream_url": resolved, "is_hls": False}
+
+
+@app.get("/api/v1/cameras/{camera_id}/mjpeg")
+def stream_camera_mjpeg(camera_id: str, db: Session = Depends(get_db)):
+    cam = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    stream = stream_manager.get_stream(camera_id, cam.stream_url)
+
+    def generate():
+        while True:
+            success, frame, _ = stream.get_frame()
+            if success and frame is not None:
+                ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                if ret:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(0.04)
+
+    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 # ---------------------------------------------------------------------------
@@ -756,12 +876,12 @@ def get_spatial_heatmap_data(camera_id: str = Query(default="cam_1"), user=Depen
     if recent_tracks:
         for t in recent_tracks:
             # Map tracks to normalized 0-1 x, y center coordinates with intensity weight
-            px = getattr(t, 'bbox_x', random.uniform(0.1, 0.9))
-            py = getattr(t, 'bbox_y', random.uniform(0.2, 0.8))
+            px = getattr(t, 'bbox_x', 0.5)
+            py = getattr(t, 'bbox_y', 0.5)
             points.append({
                 "x": round(px if px <= 1.0 else px / 1920.0, 3),
                 "y": round(py if py <= 1.0 else py / 1080.0, 3),
-                "value": round(random.uniform(0.4, 0.95), 2)
+                "value": round(getattr(t, 'speed', 10.0) / 100.0 if getattr(t, 'speed', 10.0) > 0 else 0.5, 2)
             })
     else:
         cfg = get_models()
@@ -869,6 +989,156 @@ def natural_language_video_qa(question: str = Query(...), camera_id: str = Query
 
     res = answer_video_question(question, camera_id=camera_id)
     return res
+
+
+# ---------------------------------------------------------------------------
+# Captured Records Ledger API (Faces, Vehicles, License Plates, Scene Captions)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/records/stats")
+def get_records_stats(user=Depends(verify_viewer), db: Session = Depends(get_db)):
+    """Summary counts for all captured faces, vehicles, number plates, and scene captions."""
+    faces_count = db.query(Face).count()
+    vehicles_count = db.query(Vehicle).count()
+    plates_count = db.query(Vehicle).filter(Vehicle.license_plate.isnot(None)).count()
+    captions_count = db.query(SceneCaption).count()
+    identities_count = db.query(GlobalIdentity).count()
+    return {
+        "faces_count": faces_count,
+        "vehicles_count": vehicles_count,
+        "plates_count": plates_count,
+        "captions_count": captions_count,
+        "identities_count": identities_count
+    }
+
+
+@app.get("/api/v1/records/faces")
+def get_records_faces(
+    limit: int = Query(default=50, le=200),
+    offset: int = Query(default=0),
+    search: str = Query(default=None),
+    sort: str = Query(default="desc"),
+    user=Depends(verify_viewer),
+    db: Session = Depends(get_db)
+):
+    """Retrieve captured faces log with snapshot and identity details."""
+    q = db.query(Face)
+    if search:
+        q = q.filter(Face.label.ilike(f"%{search}%") | Face.track_uuid.ilike(f"%{search}%"))
+    total = q.count()
+    order_clause = Face.id.desc() if sort.lower() == "desc" else Face.id.asc()
+    items = q.order_by(order_clause).offset(offset).limit(limit).all()
+    results = []
+    for f in items:
+        results.append({
+            "id": f.id,
+            "track_uuid": f.track_uuid,
+            "label": f.label or "Unidentified Subject",
+            "confidence": round(f.confidence, 2) if f.confidence else 0.85,
+            "timestamp": f.timestamp.strftime("%Y-%m-%d %H:%M:%S") if f.timestamp else None,
+            "snapshot_url": f"/api/v1/playback/snapshot/{f.embedding_id}" if f.embedding_id else None
+        })
+    return {"total": total, "items": results}
+
+
+@app.get("/api/v1/records/vehicles")
+def get_records_vehicles(
+    limit: int = Query(default=50, le=200),
+    offset: int = Query(default=0),
+    camera_id: str = Query(default=None),
+    search: str = Query(default=None),
+    sort: str = Query(default="desc"),
+    user=Depends(verify_viewer),
+    db: Session = Depends(get_db)
+):
+    """Retrieve captured vehicles log with color, type, track, and camera source."""
+    q = db.query(Vehicle)
+    if camera_id:
+        q = q.filter(Vehicle.camera_id == camera_id)
+    if search:
+        q = q.filter(
+            (Vehicle.vehicle_type.ilike(f"%{search}%")) |
+            (Vehicle.vehicle_color.ilike(f"%{search}%")) |
+            (Vehicle.license_plate.ilike(f"%{search}%")) |
+            (Vehicle.track_uuid.ilike(f"%{search}%"))
+        )
+    total = q.count()
+    order_clause = Vehicle.id.desc() if sort.lower() == "desc" else Vehicle.id.asc()
+    items = q.order_by(order_clause).offset(offset).limit(limit).all()
+    results = []
+    for v in items:
+        results.append({
+            "id": v.id,
+            "camera_id": v.camera_id,
+            "track_uuid": v.track_uuid,
+            "license_plate": v.license_plate,
+            "vehicle_type": v.vehicle_type or "car",
+            "vehicle_color": v.vehicle_color or "unknown",
+            "ocr_confidence": round(v.ocr_confidence, 2) if v.ocr_confidence else 0.0,
+            "timestamp": v.timestamp.strftime("%Y-%m-%d %H:%M:%S") if v.timestamp else None
+        })
+    return {"total": total, "items": results}
+
+
+@app.get("/api/v1/records/plates")
+def get_records_plates(
+    limit: int = Query(default=50, le=200),
+    offset: int = Query(default=0),
+    search: str = Query(default=None),
+    sort: str = Query(default="desc"),
+    user=Depends(verify_viewer),
+    db: Session = Depends(get_db)
+):
+    """Retrieve captured license plate OCR log."""
+    q = db.query(Vehicle).filter(Vehicle.license_plate.isnot(None))
+    if search:
+        q = q.filter(Vehicle.license_plate.ilike(f"%{search}%"))
+    total = q.count()
+    order_clause = Vehicle.id.desc() if sort.lower() == "desc" else Vehicle.id.asc()
+    items = q.order_by(order_clause).offset(offset).limit(limit).all()
+    results = []
+    for v in items:
+        results.append({
+            "id": v.id,
+            "camera_id": v.camera_id,
+            "track_uuid": v.track_uuid,
+            "license_plate": v.license_plate,
+            "vehicle_type": v.vehicle_type,
+            "ocr_confidence": round(v.ocr_confidence, 2) if v.ocr_confidence else 0.90,
+            "timestamp": v.timestamp.strftime("%Y-%m-%d %H:%M:%S") if v.timestamp else None
+        })
+    return {"total": total, "items": results}
+
+
+@app.get("/api/v1/records/captions")
+def get_records_captions(
+    limit: int = Query(default=50, le=200),
+    offset: int = Query(default=0),
+    camera_id: str = Query(default=None),
+    search: str = Query(default=None),
+    sort: str = Query(default="desc"),
+    user=Depends(verify_viewer),
+    db: Session = Depends(get_db)
+):
+    """Retrieve all generated AI scene captions log across cameras."""
+    q = db.query(SceneCaption)
+    if camera_id:
+        q = q.filter(SceneCaption.camera_id == camera_id)
+    if search:
+        q = q.filter(SceneCaption.caption.ilike(f"%{search}%"))
+    total = q.count()
+    order_clause = SceneCaption.id.desc() if sort.lower() == "desc" else SceneCaption.id.asc()
+    items = q.order_by(order_clause).offset(offset).limit(limit).all()
+    results = []
+    for c in items:
+        results.append({
+            "id": c.id,
+            "camera_id": c.camera_id,
+            "caption": c.caption,
+            "snapshot_url": c.snapshot_url,
+            "timestamp": c.timestamp.strftime("%Y-%m-%d %H:%M:%S") if c.timestamp else None
+        })
+    return {"total": total, "items": results}
 
 
 

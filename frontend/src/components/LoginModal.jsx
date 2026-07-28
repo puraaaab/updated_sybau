@@ -65,6 +65,13 @@ export default function LoginModal({ open, onLogin, error, loading }) {
         <Typography variant="body2" sx={{ color: '#8a8a8a', mt: 0.5 }}>
           Secure Video Analytics & Forensic Intelligence
         </Typography>
+        {isDemoMode && (
+          <Box sx={{ display: 'flex', gap: 1, justifyContent: 'center', mt: 1.5 }}>
+            <Chip label="Admin" size="small" onClick={() => handleQuickSelect('admin', 'Admin@123456')} sx={{ bgcolor: '#222', color: '#00e676', cursor: 'pointer' }} />
+            <Chip label="Operator" size="small" onClick={() => handleQuickSelect('operator', 'Operator@123456')} sx={{ bgcolor: '#222', color: '#29b6f6', cursor: 'pointer' }} />
+            <Chip label="Viewer" size="small" onClick={() => handleQuickSelect('viewer', 'Viewer@123456')} sx={{ bgcolor: '#222', color: '#ab47bc', cursor: 'pointer' }} />
+          </Box>
+        )}
       </Box>
 
       <form onSubmit={handleSubmit}>
@@ -98,7 +105,8 @@ export default function LoginModal({ open, onLogin, error, loading }) {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             disabled={loading}
-            InputProps={{
+            slotProps={{
+            input: {
               endAdornment: (
                 <InputAdornment position="end">
                   <IconButton
@@ -110,41 +118,16 @@ export default function LoginModal({ open, onLogin, error, loading }) {
                   </IconButton>
                 </InputAdornment>
               )
-            }}
-            sx={{
-              mb: 2,
-              '& .MuiOutlinedInput-root': { color: '#fff', '& fieldset': { borderColor: '#333' } },
-              '& .MuiInputLabel-root': { color: '#888' }
-            }}
+            }
+          }}
+          sx={{
+            mb: 2,
+            '& .MuiOutlinedInput-root': { color: '#fff', '& fieldset': { borderColor: '#333' } },
+            '& .MuiInputLabel-root': { color: '#888' }
+          }}
           />
 
-          {isDemoMode && (
-            <Box sx={{ mt: 2, pt: 2, borderTop: '1px dashed #333' }}>
-              <Typography variant="caption" sx={{ color: '#00e676', display: 'block', mb: 1, fontWeight: 600 }}>
-                DEMO MODE — Quick Login Presets
-              </Typography>
-              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                <Chip
-                  label="Admin"
-                  size="small"
-                  onClick={() => handleQuickSelect('admin', 'Admin@123456')}
-                  sx={{ bgcolor: '#1e293b', color: '#38bdf8', cursor: 'pointer', '&:hover': { bgcolor: '#334155' } }}
-                />
-                <Chip
-                  label="Operator"
-                  size="small"
-                  onClick={() => handleQuickSelect('operator', 'Operator@123456')}
-                  sx={{ bgcolor: '#1e293b', color: '#4ade80', cursor: 'pointer', '&:hover': { bgcolor: '#334155' } }}
-                />
-                <Chip
-                  label="Viewer"
-                  size="small"
-                  onClick={() => handleQuickSelect('viewer', 'Viewer@123456')}
-                  sx={{ bgcolor: '#1e293b', color: '#facc15', cursor: 'pointer', '&:hover': { bgcolor: '#334155' } }}
-                />
-              </Box>
-            </Box>
-          )}
+
         </DialogContent>
 
         <DialogActions sx={{ p: 3, pt: 1 }}>

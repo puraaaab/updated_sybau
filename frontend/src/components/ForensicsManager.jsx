@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+﻿import React, { useState, useEffect, useCallback } from 'react';
 import {
   Box, Typography, Grid, Paper, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Select, MenuItem, InputLabel, FormControl, Slider, Alert
 } from '@mui/material';
@@ -80,7 +80,7 @@ export default function ForensicsManager({ role, token }) {
       </Box>
 
       <Grid container spacing={3}>
-        <Grid item xs={12} md={4}>
+        <Grid size={{ xs: 12, md: 4 }}>
           <Paper variant="outlined" sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
             <Typography variant="subtitle2" fontWeight="bold" sx={{ borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
               COMPILE NEW EVIDENCE CLIP
@@ -150,7 +150,7 @@ export default function ForensicsManager({ role, token }) {
           </Paper>
         </Grid>
 
-        <Grid item xs={12} md={8}>
+        <Grid size={{ xs: 12, md: 8 }}>
           <Paper variant="outlined" sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
             <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
               FORENSIC EXPORTS LEDGER
@@ -214,7 +214,7 @@ export default function ForensicsManager({ role, token }) {
                                 color="secondary"
                                 sx={{ textTransform: 'none', px: 1, py: 0.5, fontSize: '0.7rem' }}
                               >
-                                📜 FIR Report
+                                ðŸ“œ FIR Report
                               </Button>
                             </Box>
                           </TableCell>

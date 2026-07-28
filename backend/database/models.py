@@ -76,6 +76,7 @@ class Alert(Base):
     message = Column(String, nullable=False)
     severity = Column(String, default="medium")  # low, medium, high
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    latency_ms = Column(Float, default=0.0, nullable=True)
     snapshot_url = Column(String, nullable=True)
     video_url = Column(String, nullable=True)
     is_acknowledged = Column(Boolean, default=False)
@@ -135,4 +136,15 @@ class SearchHistory(Base):
     query_text = Column(String, nullable=True)     # For semantic/text search
     query_type = Column(String, default="semantic")  # "semantic" | "face" | "license_plate"
     result_count = Column(Integer, default=0)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+
+
+class SceneCaption(Base):
+    """Records every AI-generated scene caption across all camera feeds."""
+    __tablename__ = "scene_captions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(String, index=True, nullable=False)
+    caption = Column(Text, nullable=False)
+    snapshot_url = Column(String, nullable=True)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)

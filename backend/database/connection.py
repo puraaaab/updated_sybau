@@ -23,7 +23,7 @@ try:
     )
     connected = False
     
-    for attempt in range(5):
+    for attempt in range(5 if is_production else 1):
         try:
             # Force connection check
             with engine.connect() as conn:
@@ -33,6 +33,8 @@ try:
         except Exception as e:
             if is_production and attempt == 4:
                 raise
+            if not is_production:
+                break
             print(f"PostgreSQL not ready yet (attempt {attempt + 1}/5). Waiting 2s...")
             time.sleep(2)
             

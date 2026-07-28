@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+﻿import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Box, Typography, Grid, Paper, TextField, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, IconButton, Alert
 } from '@mui/material';
@@ -23,7 +23,7 @@ export default function WatchlistManager({ token }) {
     fetch('/api/v1/watchlist', {
       headers: { 'Authorization': `Bearer ${token}` }
     })
-      .then(res => res.json())
+      .then(res => res.ok ? res.json() : [])
       .then(data => {
         setWatchlist(Array.isArray(data) ? data : []);
         setLoading(false);
@@ -109,7 +109,7 @@ export default function WatchlistManager({ token }) {
       <Typography variant="h6" fontWeight="bold" sx={{ mb: 2 }}>POI Watchlist Registry</Typography>
 
       <Grid container spacing={3}>
-        <Grid item xs={12} md={4}>
+        <Grid size={{ xs: 12, md: 4 }}>
           <Paper variant="outlined" sx={{ p: 2 }}>
             <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
               REGISTER TARGET PROFILE
@@ -186,7 +186,7 @@ export default function WatchlistManager({ token }) {
           </Paper>
         </Grid>
 
-        <Grid item xs={12} md={8}>
+        <Grid size={{ xs: 12, md: 8 }}>
           <Paper variant="outlined" sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
             <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span>POI WATCHLIST LEDGER</span>

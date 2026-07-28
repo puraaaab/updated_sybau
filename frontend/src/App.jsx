@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Box, Drawer, List, ListItem, ListItemButton, ListItemIcon, ListItemText,
   AppBar, Toolbar, Typography, Button, Snackbar, Alert, Chip, Menu, MenuItem,
-  Divider, TextField, InputAdornment, IconButton, useMediaQuery
+  Divider, TextField, InputAdornment, IconButton, useMediaQuery, Tooltip
 } from '@mui/material';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
@@ -16,6 +16,7 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import MonitorHeartIcon from '@mui/icons-material/MonitorHeart';
 import AccountCircleIcon from '@mui/icons-material/AccountCircle';
 import MenuIcon from '@mui/icons-material/Menu';
+import ReceiptLongIcon from '@mui/icons-material/ReceiptLong';
 
 // Components
 import LiveGrid from './components/LiveGrid';
@@ -28,6 +29,7 @@ import DiscoveryScanner from './components/DiscoveryScanner';
 import ForensicsManager from './components/ForensicsManager';
 import SettingsConsole from './components/SettingsConsole';
 import TrajectoryMap from './components/TrajectoryMap';
+import RecordsConsole from './components/RecordsConsole';
 import LoginModal from './components/LoginModal';
 
 const drawerWidth = 240;
@@ -48,12 +50,32 @@ export default function App() {
   // Global Search State
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
 
+  // AI Model Status Indicator
+  const [aiStatus, setAiStatus] = useState({ status: 'PREWARMING', all_ready: false, models: {} });
+
+  useEffect(() => {
+    if (!token) return;
+    const fetchAiStatus = () => {
+      fetch('/api/v1/ai/status', {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data) setAiStatus(data); })
+        .catch(() => {});
+    };
+    fetchAiStatus();
+    const interval = setInterval(fetchAiStatus, 4000);
+    return () => clearInterval(interval);
+  }, [token]);
+
   // Customizable Settings State
   const [settings, setSettings] = useState(() => {
     try {
       const saved = localStorage.getItem('sybau_ui_settings');
       if (saved) return JSON.parse(saved);
-    } catch (_e) {}
+    } catch (err) {
+      console.warn("Failed to load saved UI settings:", err);
+    }
     return {
       themeMode: 'stark-dark', // stark-dark | stark-light | emerald | amber
       density: 'compact', // comfortable | compact
@@ -209,8 +231,31 @@ export default function App() {
   }, [settings]);
 
   // Shared Admin States
-  const [usersList, _setUsersList] = useState([]);
-  const [requests, _setRequests] = useState([]);
+  const [usersList, setUsersList] = useState([]);
+  const [requests, setRequests] = useState([]);
+
+  const loadAdminData = useCallback(() => {
+    if (!token) return;
+    fetch('/api/v1/admin/users', {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(res => res.ok ? res.json() : [])
+      .then(data => setUsersList(Array.isArray(data) ? data : []))
+      .catch(() => {});
+
+    fetch('/api/v1/admin/elevation-requests', {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(res => res.ok ? res.json() : [])
+      .then(data => setRequests(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  }, [token]);
+
+  useEffect(() => {
+    if (token && role === 'admin') {
+      loadAdminData();
+    }
+  }, [token, role, loadAdminData]);
 
   // Shared ONVIF Scan States
   const [scanning, setScanning] = useState(false);
@@ -223,11 +268,11 @@ export default function App() {
   // Validate stored token on mount
   useEffect(() => {
     if (!token) return;
-    fetch('/api/cameras', {
+    fetch('/api/v1/cameras', {
       headers: { 'Authorization': `Bearer ${token}` }
     }).then(res => {
       if (res.status === 401) {
-        console.warn('[Auth] Stored token is invalid/expired — clearing for re-login');
+        console.warn('[Auth] Stored token is invalid/expired â€” clearing for re-login');
         localStorage.removeItem('vms_token');
         localStorage.removeItem('vms_role');
         localStorage.removeItem('vms_username');
@@ -236,12 +281,6 @@ export default function App() {
     }).catch(() => {});
   }, [token]);
 
-  // Auto login with default credentials ONLY if VITE_DEMO_MODE is true
-  useEffect(() => {
-    if (!token && import.meta.env.VITE_DEMO_MODE === 'true') {
-      handleLogin('admin', 'Admin@123456');
-    }
-  }, [token]);
 
   const handleLogin = async (uname, pwd) => {
     setLoginError('');
@@ -251,7 +290,7 @@ export default function App() {
       formData.append('username', uname);
       formData.append('password', pwd);
 
-      const res = await fetch('/api/auth/login', {
+      const res = await fetch('/api/v1/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: formData
@@ -296,7 +335,7 @@ export default function App() {
 
   // Admin Console actions mapped from Settings page
   const handleUpdateRole = (userId, newRole) => {
-    fetch(`/api/admin/users/${userId}`, {
+    fetch(`/api/v1/admin/users/${userId}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -309,7 +348,7 @@ export default function App() {
   };
 
   const handleUpdateStatus = (userId, newStatus) => {
-    fetch(`/api/admin/users/${userId}`, {
+    fetch(`/api/v1/admin/users/${userId}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -322,7 +361,7 @@ export default function App() {
   };
 
   const handleResetPassword = (userId, newPassword) => {
-    fetch(`/api/admin/users/${userId}`, {
+    fetch(`/api/v1/admin/users/${userId}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -335,7 +374,7 @@ export default function App() {
   };
 
   const handleSoftDelete = (userId) => {
-    fetch(`/api/admin/users/${userId}`, {
+    fetch(`/api/v1/admin/users/${userId}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` }
     }).then(res => {
@@ -344,7 +383,7 @@ export default function App() {
   };
 
   const handleHardDelete = (userId, adminPass) => {
-    fetch(`/api/admin/users/${userId}/hard-delete`, {
+    fetch(`/api/v1/admin/users/${userId}/hard-delete`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -362,7 +401,7 @@ export default function App() {
   };
 
   const handleResolveRequest = (reqId, requesterName, action) => {
-    fetch(`/api/admin/elevation-requests/${reqId}/resolve`, {
+    fetch(`/api/v1/admin/elevation-requests/${reqId}/resolve`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -413,7 +452,8 @@ export default function App() {
       } else {
         alert(data.detail || "RTSP Resolve failed");
       }
-    } catch (e) {
+    } catch (err) {
+      console.error("Error resolving ONVIF endpoint URL:", err);
       alert("Error resolving ONVIF endpoint URL");
     }
   };
@@ -429,6 +469,7 @@ export default function App() {
   // Navigation Ops list configuration
   const menuItems = [
     { id: 'live', label: 'Live Camera Feeds', icon: <GridViewIcon /> },
+    { id: 'records', label: 'Captured Records Ledger', icon: <ReceiptLongIcon /> },
     { id: 'alerts', label: 'Surveillance Alerts', icon: <NotificationsActiveIcon /> },
     { id: 'search', label: 'AI Forensic Search', icon: <SearchIcon /> },
     { id: 'trajectory', label: 'Route Suspect Tracking', icon: <GridViewIcon /> },
@@ -502,6 +543,40 @@ export default function App() {
               <Typography variant="h6" noWrap component="div" sx={{ fontWeight: 'bold', letterSpacing: '0.5px' }}>
                 SYBAU <span style={{ color: activeTheme.palette.text.secondary }}>VMS</span>
               </Typography>
+
+              {/* AI Model Status Indicator Light */}
+              <Tooltip 
+                title={
+                  <Box sx={{ p: 0.5 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 0.5 }}>
+                      AI Subsystem Status: {aiStatus.status}
+                    </Typography>
+                    {Object.entries(aiStatus.models || {}).map(([modelName, status]) => (
+                      <Typography key={modelName} variant="caption" display="block" sx={{ color: status === 'LOADED' ? '#00e676' : '#ffb300' }}>
+                        ● {modelName}: {status}
+                      </Typography>
+                    ))}
+                  </Box>
+                } 
+                arrow
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, cursor: 'pointer', ml: 1, px: 1, py: 0.3, borderRadius: 1, backgroundColor: 'rgba(255,255,255,0.06)' }}>
+                  <Box
+                    sx={{
+                      width: 9,
+                      height: 9,
+                      borderRadius: '50%',
+                      backgroundColor: aiStatus.all_ready ? '#00e676' : '#ffb300',
+                      boxShadow: aiStatus.all_ready 
+                        ? '0 0 10px #00e676, 0 0 4px #00e676' 
+                        : '0 0 10px #ffb300, 0 0 4px #ffb300'
+                    }}
+                  />
+                  <Typography variant="caption" sx={{ fontSize: '0.7rem', fontWeight: 700, color: aiStatus.all_ready ? '#00e676' : '#ffb300', letterSpacing: '0.5px' }}>
+                    {aiStatus.all_ready ? 'AI ONLINE' : 'AI LOADING'}
+                  </Typography>
+                </Box>
+              </Tooltip>
             </Box>
 
             {/* Global Search Box */}
@@ -605,6 +680,9 @@ export default function App() {
               searchQuery={globalSearchQuery}
               settings={settings}
             />
+          </Box>
+          <Box sx={{ display: activeTab === 'records' ? 'block' : 'none', height: '100%' }}>
+            <RecordsConsole token={token} />
           </Box>
           <Box sx={{ display: activeTab === 'alerts' ? 'block' : 'none', height: '100%' }}>
             <AlertsPanel

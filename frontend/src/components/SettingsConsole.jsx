@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import {
   Box, Typography, Grid, Paper, FormControl, InputLabel, Select, MenuItem,
   FormControlLabel, Switch, Slider, Button, TextField, Divider, Table, TableBody,
@@ -62,7 +62,7 @@ export default function SettingsConsole({
     setUserError('');
     setUserSuccess('');
 
-    fetch('/api/admin/users', {
+    fetch('/api/v1/admin/users', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -139,7 +139,7 @@ export default function SettingsConsole({
                   }}
                 >
                   <ListItemIcon sx={{ minWidth: 36, color: isActive ? 'primary.contrastText' : 'inherit' }}>{sec.icon}</ListItemIcon>
-                  <ListItemText primary={sec.label} primaryTypographyProps={{ variant: 'body2', sx: { fontWeight: isActive ? 'bold' : 'normal', fontSize: '0.8rem' } }} />
+                  <ListItemText primary={sec.label} slotProps={{ primary: { variant: 'body2', sx: { fontWeight: isActive ? 'bold' : 'normal', fontSize: '0.8rem' } } }} />
                 </ListItemButton>
               </ListItem>
             );
@@ -158,7 +158,7 @@ export default function SettingsConsole({
             <Divider />
 
             <Grid container spacing={3}>
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel id="theme-mode-label">Interface Theme Preset</InputLabel>
                   <Select
@@ -175,7 +175,7 @@ export default function SettingsConsole({
                 </FormControl>
               </Grid>
 
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel id="density-label">Layout Padding Density</InputLabel>
                   <Select
@@ -190,7 +190,7 @@ export default function SettingsConsole({
                 </FormControl>
               </Grid>
 
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel id="font-family-label">Interface Font Family</InputLabel>
                   <Select
@@ -207,12 +207,12 @@ export default function SettingsConsole({
                 </FormControl>
               </Grid>
 
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel id="edge-roundness-label">Component Edge Roundness</InputLabel>
                   <Select
                     labelId="edge-roundness-label"
-                    value={settings.borderRadius || 2}
+                    value={settings.borderRadius === undefined ? 0 : settings.borderRadius}
                     label="Component Edge Roundness"
                     onChange={(e) => onChangeSettings({ borderRadius: e.target.value })}
                   >
@@ -235,7 +235,7 @@ export default function SettingsConsole({
             <Divider />
 
             <Grid container spacing={3}>
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel id="frame-mode-label">Stream Sizing Frame Mode</InputLabel>
                   <Select
@@ -255,7 +255,7 @@ export default function SettingsConsole({
                 </Typography>
               </Grid>
 
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel id="grid-cols-label">Default Live Grid Columns</InputLabel>
                   <Select
@@ -273,7 +273,7 @@ export default function SettingsConsole({
                 </FormControl>
               </Grid>
 
-              <Grid item xs={12}>
+              <Grid size={{ xs: 12 }}>
                 <Typography variant="body2" color="text.primary" sx={{ mb: 1, fontWeight: 'bold' }}>Diagnostics telemetry polling interval</Typography>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                   <Slider
@@ -301,7 +301,7 @@ export default function SettingsConsole({
             <Divider />
 
             <Grid container spacing={3}>
-              <Grid item xs={12} md={4}>
+              <Grid size={{ xs: 12, md: 4 }}>
                 <Paper variant="outlined" sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
                   <Typography variant="subtitle2" fontWeight="bold">CREDENTIALS GATE</Typography>
                   <TextField
@@ -317,7 +317,7 @@ export default function SettingsConsole({
                     size="small"
                     value={onvifPass}
                     onChange={e => setOnvifPass(e.target.value)}
-                    placeholder="••••••••"
+                    placeholder="Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢"
                   />
                   <Button
                     variant="contained"
@@ -330,7 +330,7 @@ export default function SettingsConsole({
                 </Paper>
               </Grid>
 
-              <Grid item xs={12} md={8}>
+              <Grid size={{ xs: 12, md: 8 }}>
                 <Paper variant="outlined" sx={{ p: 2, height: '100%', minHeight: 250, display: 'flex', flexDirection: 'column' }}>
                   <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
                     DISCOVERED SUBNET NODES
@@ -394,7 +394,7 @@ export default function SettingsConsole({
             <Divider />
 
             <Grid container spacing={3}>
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControlLabel
                   control={
                     <Switch
@@ -410,7 +410,7 @@ export default function SettingsConsole({
                 </Typography>
               </Grid>
 
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel id="alarm-severity-label">Alert Banner Autohide Delay</InputLabel>
                   <Select
@@ -439,14 +439,14 @@ export default function SettingsConsole({
             <Divider />
 
             <Grid container spacing={3}>
-              <Grid item xs={12} md={4}>
+              <Grid size={{ xs: 12, md: 4 }}>
                 <Paper variant="outlined" sx={{ p: 2 }}>
                   <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
                     <PersonAddIcon fontSize="small" /> ADD OPERATIONAL USER
                   </Typography>
                   <Box component="form" onSubmit={handleCreateUser} sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                     <TextField label="User Account ID" size="small" required value={newUsername} onChange={(e) => setNewUsername(e.target.value)} placeholder="e.g. m_ross" />
-                    <TextField label="Password" type="password" size="small" required value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="••••••••" />
+                    <TextField label="Password" type="password" size="small" required value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢" />
                     <FormControl size="small" fullWidth>
                       <InputLabel id="add-role-select-label">Access Level Role</InputLabel>
                       <Select labelId="add-role-select-label" value={newRole} label="Access Level Role" onChange={(e) => setNewRole(e.target.value)}>
@@ -466,7 +466,7 @@ export default function SettingsConsole({
                 </Paper>
               </Grid>
 
-              <Grid item xs={12} md={8}>
+              <Grid size={{ xs: 12, md: 8 }}>
                 <Paper variant="outlined" sx={{ p: 2, display: 'flex', flexDirection: 'column' }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
                     <Typography variant="subtitle2" fontWeight="bold">DIRECTORY REGISTRY</Typography>
@@ -544,13 +544,13 @@ export default function SettingsConsole({
 
               {/* Password Reset Section */}
               {resetPwdUserId && (
-                <Grid item xs={12}>
+                <Grid size={{ xs: 12 }}>
                   <Paper variant="outlined" sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 2 }}>
                     <Typography variant="body2" sx={{ fontWeight: 'bold' }}>New Password for Target User:</Typography>
                     <TextField
                       type="password"
                       size="small"
-                      placeholder="••••••••"
+                      placeholder="Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢"
                       value={resetPwdText}
                       onChange={(e) => setResetPwdText(e.target.value)}
                     />
@@ -562,7 +562,7 @@ export default function SettingsConsole({
 
               {/* Hard Delete Purge Section */}
               {hardDeleteUserId && (
-                <Grid item xs={12}>
+                <Grid size={{ xs: 12 }}>
                   <Alert severity="warning" sx={{ p: 2 }}>
                     <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 'bold' }}>ERASE DATA ROW PERMANENTLY?</Typography>
                     <Typography variant="body2" sx={{ mb: 2 }}>This will remove user metadata permanently from SQL databases. Re-enter your current Admin Password to execute.</Typography>
@@ -582,7 +582,7 @@ export default function SettingsConsole({
               )}
 
               {/* Elevation Queue */}
-              <Grid item xs={12}>
+              <Grid size={{ xs: 12 }}>
                 <Paper variant="outlined" sx={{ p: 2 }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
                     <Typography variant="subtitle2" fontWeight="bold">OPERATIONAL ELEVATION REQUESTS</Typography>
@@ -643,3 +643,5 @@ export default function SettingsConsole({
     </Box>
   );
 }
+
+

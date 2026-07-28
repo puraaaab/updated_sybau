@@ -44,11 +44,13 @@ def get_reid_model():
 def find_plate_region(vehicle_crop: np.ndarray) -> np.ndarray:
     """Fallback HSV-based license plate localization when YOLO license_plate box is absent."""
     h, w = vehicle_crop.shape[:2]
-    lower_half = vehicle_crop[int(h * 0.4):, :]
+    if h < 10 or w < 10:
+        return vehicle_crop
 
-    hsv = cv2.cvtColor(lower_half, cv2.COLOR_BGR2HSV)
-    yellow_mask = cv2.inRange(hsv, (15, 80, 80), (35, 255, 255))
-    white_mask = cv2.inRange(hsv, (0, 0, 170), (180, 60, 255))
+    # Search full vehicle crop so plates on motorcycles, auto-rickshaws & tuktuks are detected
+    hsv = cv2.cvtColor(vehicle_crop, cv2.COLOR_BGR2HSV)
+    yellow_mask = cv2.inRange(hsv, (15, 60, 60), (35, 255, 255))
+    white_mask = cv2.inRange(hsv, (0, 0, 160), (180, 60, 255))
     mask = cv2.bitwise_or(yellow_mask, white_mask)
 
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
@@ -60,24 +62,23 @@ def find_plate_region(vehicle_crop: np.ndarray) -> np.ndarray:
     best_score = 0
     for c in contours:
         x, y, cw, ch = cv2.boundingRect(c)
-        if cw < 15 or ch < 6:
+        if cw < 12 or ch < 5:
             continue
         aspect = cw / float(ch)
         area = cw * ch
-        if 1.8 <= aspect <= 7.0 and area > best_score:
+        if 1.5 <= aspect <= 8.0 and area > best_score:
             best_score = area
             best_box = (x, y, cw, ch)
 
     if best_box is None:
-        fx1, fy1 = int(w * 0.25), int(lower_half.shape[0] * 0.4)
-        fx2, fy2 = int(w * 0.75), lower_half.shape[0]
-        return lower_half[fy1:fy2, fx1:fx2]
+        # Fallback: lower 70% of crop
+        return vehicle_crop[int(h * 0.3):, :]
 
     x, y, cw, ch = best_box
     pad_x, pad_y = int(cw * 0.08), int(ch * 0.15)
     x1, y1 = max(0, x - pad_x), max(0, y - pad_y)
-    x2, y2 = min(lower_half.shape[1], x + cw + pad_x), min(lower_half.shape[0], y + ch + pad_y)
-    return lower_half[y1:y2, x1:x2]
+    x2, y2 = min(w, x + cw + pad_x), min(h, y + ch + pad_y)
+    return vehicle_crop[y1:y2, x1:x2]
 
 
 def enhance_for_ocr(plate_crop: np.ndarray):
@@ -120,41 +121,47 @@ def detect_vehicle_color(crop: np.ndarray) -> str:
         h, w = crop.shape[:2]
         if h < 15 or w < 15:
             return "unknown"
-        body_crop = crop[:int(h * 0.7), int(w * 0.1):int(w * 0.9)]
-        if body_crop.size == 0:
-            return "unknown"
+
+        # Focus strictly on center vehicle hood/body (avoiding top windshield glass & bottom tires/asphalt)
+        y1, y2 = int(h * 0.30), int(h * 0.75)
+        x1, x2 = int(w * 0.20), int(w * 0.80)
+        body_crop = crop[y1:y2, x1:x2]
+        if body_crop.size == 0 or body_crop.shape[0] < 5 or body_crop.shape[1] < 5:
+            body_crop = crop[:int(h * 0.7), int(w * 0.1):int(w * 0.9)]
 
         # Check for Nighttime IR (monochrome) camera feed: R, G, B channel means are virtually identical
         b_mean, g_mean, r_mean = cv2.mean(body_crop)[:3]
         channel_std = np.std([r_mean, g_mean, b_mean])
-        if channel_std < 4.0:
+        if channel_std < 3.5:
             # Monochrome IR camera mode detected — color cannot be reliably determined
             return "unknown"
 
         hsv = cv2.cvtColor(body_crop, cv2.COLOR_BGR2HSV)
-        v_val = float(np.mean(hsv[:, :, 2]))
-        s_val = float(np.mean(hsv[:, :, 1]))
-        h_val = float(np.mean(hsv[:, :, 0]))
+        
+        # Use median color statistics to eliminate shadow/glare outliers
+        h_val = float(np.median(hsv[:, :, 0]))
+        s_val = float(np.median(hsv[:, :, 1]))
+        v_val = float(np.median(hsv[:, :, 2]))
 
-        if v_val < 55:
+        if v_val < 50:
             return "black"
-        elif v_val > 195 and s_val < 35:
+        elif v_val > 200 and s_val < 30:
             return "white"
-        elif s_val < 45 and 55 <= v_val <= 195:
+        elif s_val < 40 and 50 <= v_val <= 200:
             return "silver"
 
-        if h_val < 10 or h_val > 170:
+        if h_val < 12 or h_val > 165:
             return "red"
-        elif 15 <= h_val <= 35:
+        elif 12 <= h_val <= 30:
             return "yellow"
-        elif 35 < h_val <= 85:
+        elif 30 < h_val <= 85:
             return "green"
         elif 85 < h_val <= 130:
             return "blue"
-        elif 130 < h_val <= 170:
+        elif 130 < h_val <= 165:
             return "purple"
 
-        return "dark" if v_val < 125 else "light"
+        return "black" if v_val < 100 else "silver"
     except Exception as e:
         logger.warning(f"[VehicleColor] Color extraction failed: {e}")
         return "unknown"
@@ -169,7 +176,11 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
     demo_mode = cfg.get("demo_mode", False)
 
     vehicles_detected = []
-    vehicle_classes = {"car", "truck", "motorcycle", "bus"}
+    vehicle_classes = {
+        "car", "truck", "motorcycle", "bus", "bicycle", "auto_rickshaw",
+        "rickshaw", "tuktuk", "scooter", "moped", "van", "suv", "vehicle", "three_wheeler"
+    }
+    vehicles = [d for d in detections if d.get("class_name") in vehicle_classes]
     vehicles = [d for d in detections if d.get("class_name") in vehicle_classes]
     plate_detections = [d for d in detections if d.get("class_name") == "license_plate"]
 
@@ -324,8 +335,9 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
                         avg_conf = sum(r[2] for r in res) / len(res)
 
                         parsed_res = parse_plate(combined_raw)
-                        if parsed_res["parsed"] is not None and avg_conf > best_conf:
-                            best_text = parsed_res["parsed"]
+                        target_text = parsed_res["parsed"] if parsed_res.get("parsed") else (combined_raw if len(combined_raw) >= 4 else None)
+                        if target_text and avg_conf > best_conf:
+                            best_text = target_text
                             best_conf = avg_conf
 
                     if best_text:

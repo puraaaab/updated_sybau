@@ -33,22 +33,35 @@ for uname, pwd, role in users_to_seed:
         db.add(User(username=uname, password_hash=get_password_hash(pwd), role=role))
 db.commit()
 
-# 1. Seed RTSP cameras ONLY if table is completely empty
-existing_cams_count = db.query(Camera).count()
-if existing_cams_count == 0:
-    print("Database has no cameras. Seeding initial RTSP camera feeds...")
-    cams_to_seed = [
-        Camera(id='cam_1', name='Central Bus Depo', location='Platform Area', stream_url='rtsp://127.0.0.1:8554/cam_1', status='online', width=1920, height=1080, latitude=21.2035, longitude=72.8406),
-        Camera(id='cam_2', name='Chauta Bazaar A', location='Market Entrance', stream_url='rtsp://127.0.0.1:8554/cam_2', status='online', width=1920, height=1080, latitude=21.1959, longitude=72.8194),
-        Camera(id='cam_3', name='Chauta Bazaar B', location='Market Inside', stream_url='rtsp://127.0.0.1:8554/cam_3', status='online', width=1920, height=1080, latitude=21.1965, longitude=72.8210),
-        Camera(id='cam_4', name='Gopi Talav', location='Gate', stream_url='rtsp://127.0.0.1:8554/cam_4', status='online', width=1920, height=1080, latitude=21.1901, longitude=72.8252),
-        Camera(id='cam_5', name='Mahidharpura', location='Diamond Mkt', stream_url='rtsp://127.0.0.1:8554/cam_5', status='online', width=1920, height=1080, latitude=21.2012, longitude=72.8315),
-        Camera(id='cam_6', name='Rly Station', location='Bismillah Rest', stream_url='rtsp://127.0.0.1:8554/cam_6', status='online', width=1920, height=1080, latitude=21.2052, longitude=72.8412),
-        Camera(id='cam_7', name='Merged View', location='Custom', stream_url='rtsp://127.0.0.1:8554/cam_7', status='online', width=1920, height=1080, latitude=21.2052, longitude=72.8412)
-    ]
-    for cam in cams_to_seed:
-        db.add(cam)
+# 1. Seed video cameras ONLY if database table is completely empty
+# (prevents re-creating cameras that the user explicitly deleted from the UI)
+videos_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'Videos'))
+
+cams_def = [
+    ('cam_1', 'Central Bus Depo', 'Platform Area', os.path.join(videos_dir, 'Export__Central Bus Depo-Entry Gate Platform Area_Friday July 10 2026110138  b33bb2a.avi'), 21.2035, 72.8406),
+    ('cam_2', 'Chauta Bazaar A', 'Market Entrance', os.path.join(videos_dir, 'Export__Chauta Bazaar-003_Friday July 10 202655158  c62a714.avi'), 21.1959, 72.8194),
+    ('cam_3', 'Chauta Bazaar B', 'Market Inside', os.path.join(videos_dir, 'Export__Chauta Bazaar-003_Friday July 10 202655158  c62a714 (1).avi'), 21.1965, 72.8210),
+    ('cam_4', 'Gopi Talav', 'Gate', os.path.join(videos_dir, 'Export__Gopi Talav-Towards Gopi Talav Gate_Friday July 10 202661000  dc1f515.avi'), 21.1901, 72.8252),
+    ('cam_5', 'Mahidharpura', 'Diamond Mkt', os.path.join(videos_dir, 'Export__Mahidharpura-Pipla Sheri Diamond Mkt_Friday July 10 202655441  beb5fa4.avi'), 21.2012, 72.8315),
+    ('cam_6', 'Rly Station', 'Bismillah Rest', os.path.join(videos_dir, 'Export__Rly Station-Towards Bismillah Rest left_Friday July 10 202661242  09a94cc.avi'), 21.2052, 72.8412),
+    ('cam_7', 'Merged View', 'Custom', os.path.join(videos_dir, 'merged.mp4'), 21.2052, 72.8412),
+]
+
+existing_count = db.query(Camera).count()
+if existing_count == 0:
+    for cid, cname, cloc, curl, clat, clon in cams_def:
+        db.add(Camera(
+            id=cid, name=cname, location=cloc, stream_url=curl,
+            status='online', width=1920, height=1080, latitude=clat, longitude=clon
+        ))
+
     db.commit()
-    print('Initial camera feeds seeded successfully.')
+    print('Base video camera feeds seeded successfully.')
+
+    from backend.scripts.seed_cyber_crime_cams import seed_cyber_crime_dataset_cameras
+    seed_cyber_crime_dataset_cameras()
 else:
-    print(f'Preserving existing {existing_cams_count} camera(s) in PostgreSQL database.')
+    print(f'Database already populated with {existing_count} camera(s). Preserving user camera configuration.')
+
+db.close()
+

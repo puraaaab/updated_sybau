@@ -18,9 +18,9 @@
   },
   "florence": {
     "enabled": true,
-    "model_id": "microsoft/Florence-2-large",
+    "model_id": "microsoft/Florence-2-base",
     "device": "cuda",
-    "invoke_every_n_frames": 30
+    "invoke_every_n_frames": 1
   },
   "embeddings": {
     "model_name": "all-MiniLM-L6-v2",
