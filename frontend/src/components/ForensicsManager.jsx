@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Box, Typography, Grid, Paper, TextField, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Select, MenuItem, InputLabel, FormControl, Slider, Alert
+  Box, Typography, Grid, Paper, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Select, MenuItem, InputLabel, FormControl, Slider, Alert
 } from '@mui/material';
 import VideocamIcon from '@mui/icons-material/Videocam';
 import ShieldIcon from '@mui/icons-material/Shield';
@@ -16,7 +16,7 @@ export default function ForensicsManager({ role, token }) {
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState('');
 
-  const loadData = () => {
+  const loadData = useCallback(() => {
     if (!token) return;
 
     fetch('/api/v1/cameras', {
@@ -38,11 +38,11 @@ export default function ForensicsManager({ role, token }) {
       })
       .then(data => setExportsList(Array.isArray(data) ? data : []))
       .catch(err => console.error("Error loading exports:", err));
-  };
+  }, [token]);
 
   useEffect(() => {
     loadData();
-  }, [token]);
+  }, [loadData]);
 
   const handleTriggerExport = (e) => {
     e.preventDefault();
@@ -62,7 +62,7 @@ export default function ForensicsManager({ role, token }) {
         }
         return body;
       })
-      .then(data => {
+      .then(_data => {
         setExporting(false);
         loadData();
       })

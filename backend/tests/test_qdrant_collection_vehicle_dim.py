@@ -1,8 +1,10 @@
 import sys
 from pathlib import Path
 import pytest
+qdrant_client = pytest.importorskip("qdrant_client")
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
+
 from backend.search.qdrant_utils import qdrant_client_with_timeout
 
 COLLECTION = "vms_embeddings"

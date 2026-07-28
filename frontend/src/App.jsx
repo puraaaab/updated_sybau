@@ -28,16 +28,19 @@ import DiscoveryScanner from './components/DiscoveryScanner';
 import ForensicsManager from './components/ForensicsManager';
 import SettingsConsole from './components/SettingsConsole';
 import TrajectoryMap from './components/TrajectoryMap';
+import LoginModal from './components/LoginModal';
 
 const drawerWidth = 240;
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('live');
   const [token, setToken] = useState(localStorage.getItem('vms_token') || '');
-  const [role, setRole] = useState(localStorage.getItem('vms_role') || 'admin');
-  const [username, setUsername] = useState(localStorage.getItem('vms_username') || 'admin');
+  const [role, setRole] = useState(localStorage.getItem('vms_role') || '');
+  const [username, setUsername] = useState(localStorage.getItem('vms_username') || '');
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
 
-  const [wsAlert, setWsAlert] = useState(null);
+  const [wsAlert, _setWsAlert] = useState(null);
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [anchorEl, setAnchorEl] = useState(null);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -50,7 +53,7 @@ export default function App() {
     try {
       const saved = localStorage.getItem('sybau_ui_settings');
       if (saved) return JSON.parse(saved);
-    } catch (e) {}
+    } catch (_e) {}
     return {
       themeMode: 'stark-dark', // stark-dark | stark-light | emerald | amber
       density: 'compact', // comfortable | compact
@@ -206,8 +209,8 @@ export default function App() {
   }, [settings]);
 
   // Shared Admin States
-  const [usersList, setUsersList] = useState([]);
-  const [requests, setRequests] = useState([]);
+  const [usersList, _setUsersList] = useState([]);
+  const [requests, _setRequests] = useState([]);
 
   // Shared ONVIF Scan States
   const [scanning, setScanning] = useState(false);
@@ -231,134 +234,18 @@ export default function App() {
         setToken('');
       }
     }).catch(() => {});
-  }, []);
+  }, [token]);
 
-  // Auto login with default credentials if no token exists
+  // Auto login with default credentials ONLY if VITE_DEMO_MODE is true
   useEffect(() => {
-    if (!token) {
+    if (!token && import.meta.env.VITE_DEMO_MODE === 'true') {
       handleLogin('admin', 'Admin@123456');
     }
   }, [token]);
 
-  // Load Admin Data when authenticated
-  const loadAdminData = () => {
-    if (!token || role !== 'admin') return;
-
-    // Load users
-    fetch('/api/admin/users?include_deleted=true', {
-      headers: { Authorization: `Bearer ${token}` }
-    })
-      .then(res => res.json())
-      .then(data => {
-        if (Array.isArray(data)) setUsersList(data);
-      })
-      .catch(() => {});
-
-    // Load elevation requests
-    fetch('/api/admin/elevation-requests', {
-      headers: { Authorization: `Bearer ${token}` }
-    })
-      .then(res => res.json())
-      .then(data => {
-        if (Array.isArray(data)) setRequests(data);
-      })
-      .catch(() => {});
-  };
-
-  useEffect(() => {
-    loadAdminData();
-  }, [token, role]);
-
-  // Establish WebSocket for alerts
-  useEffect(() => {
-    if (!token) return;
-
-    let ws = null;
-    let reconnectDelay = 1000;
-    const MAX_RECONNECT_DELAY = 30000;
-    let destroyed = false;
-
-    // Dual-Tone alarm synthesizer simulator
-    const playConsoleAlarm = () => {
-      if (!settings.soundEnabled) return;
-      try {
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        
-        // Tone 1
-        const osc1 = audioCtx.createOscillator();
-        const gain1 = audioCtx.createGain();
-        osc1.type = 'square';
-        osc1.frequency.setValueAtTime(880, audioCtx.currentTime);
-        gain1.gain.setValueAtTime(0.1, audioCtx.currentTime);
-        gain1.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
-        osc1.connect(gain1);
-        gain1.connect(audioCtx.destination);
-        osc1.start();
-        osc1.stop(audioCtx.currentTime + 0.1);
-
-        // Tone 2
-        setTimeout(() => {
-          const osc2 = audioCtx.createOscillator();
-          const gain2 = audioCtx.createGain();
-          osc2.type = 'square';
-          osc2.frequency.setValueAtTime(660, audioCtx.currentTime);
-          gain2.gain.setValueAtTime(0.08, audioCtx.currentTime);
-          gain2.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
-          osc2.connect(gain2);
-          gain2.connect(audioCtx.destination);
-          osc2.start();
-          osc2.stop(audioCtx.currentTime + 0.15);
-        }, 80);
-      } catch (e) {
-        console.warn('Audio synthesis block:', e);
-      }
-    };
-
-    function connect() {
-      if (destroyed) return;
-
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/alerts`);
-
-      ws.onopen = () => {
-        reconnectDelay = 1000;
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload.topic === 'alerts') {
-            setWsAlert(payload.data);
-            setSnackbarOpen(true);
-
-            if (payload.data.type === 'POI_MATCH') {
-              playConsoleAlarm();
-            }
-          }
-        } catch (err) {
-          console.error('[WS] Event decode error:', err);
-        }
-      };
-
-      ws.onclose = () => {
-        if (destroyed) return;
-        setTimeout(connect, reconnectDelay);
-        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
-      };
-    }
-
-    connect();
-
-    return () => {
-      destroyed = true;
-      if (ws) {
-        ws.onclose = null;
-        ws.close();
-      }
-    };
-  }, [token, settings.soundEnabled]);
-
-  const handleLogin = async (uname, pwd, retryCount = 0) => {
+  const handleLogin = async (uname, pwd) => {
+    setLoginError('');
+    setLoginLoading(true);
     try {
       const formData = new URLSearchParams();
       formData.append('username', uname);
@@ -379,19 +266,14 @@ export default function App() {
         setRole(data.role);
         setUsername(data.username);
       } else {
-        if (retryCount < 6) {
-          console.warn(`[Auth] Login failed. Retrying in 2s (Attempt ${retryCount + 1}/6)...`);
-          setTimeout(() => handleLogin(uname, pwd, retryCount + 1), 2000);
-        } else {
-          alert("Authentication failed! Verify that backend service is running.");
-        }
+        const errData = await res.json().catch(() => ({ detail: 'Authentication failed' }));
+        setLoginError(errData.detail || 'Invalid username or password');
       }
     } catch (e) {
       console.error(e);
-      if (retryCount < 6) {
-        console.warn(`[Auth] Connection failed. Retrying in 2s (Attempt ${retryCount + 1}/6)...`);
-        setTimeout(() => handleLogin(uname, pwd, retryCount + 1), 2000);
-      }
+      setLoginError('Could not connect to authentication service.');
+    } finally {
+      setLoginLoading(false);
     }
   };
 
@@ -400,10 +282,11 @@ export default function App() {
     localStorage.removeItem('vms_role');
     localStorage.removeItem('vms_username');
     setToken('');
-    setRole('viewer');
+    setRole('');
     setUsername('');
     setAnchorEl(null);
   };
+
 
   const handleRoleSwitch = (targetRole) => {
     const passwordMap = { admin: 'Admin@123456', operator: 'Operator@123456', viewer: 'Viewer@123456' };
@@ -813,6 +696,14 @@ export default function App() {
             </Alert>
           )}
         </Snackbar>
+
+        {/* Authentication Modal */}
+        <LoginModal
+          open={!token}
+          onLogin={handleLogin}
+          error={loginError}
+          loading={loginLoading}
+        />
       </Box>
     </ThemeProvider>
   );

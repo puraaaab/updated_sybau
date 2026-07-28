@@ -26,12 +26,14 @@ class UserCreateRequest(BaseModel):
     username: str
     password: str
     role: str = "viewer"
+    allowed_cameras: Optional[List[str]] = None
 
 
 class UserUpdateRequest(BaseModel):
     role: Optional[str] = None
     status: Optional[str] = None
     password: Optional[str] = None
+    allowed_cameras: Optional[List[str]] = None
 
 
 class HardDeleteRequest(BaseModel):
@@ -49,16 +51,27 @@ def list_users(
     user=Depends(verify_admin)
 ):
     """List all user accounts in the system."""
-    users = db.query(User).all()
+    import json
+    query = db.query(User)
+    if not include_deleted:
+        query = query.filter(User.deleted_at.is_(None))
+    users = query.all()
     result = []
     for u in users:
+        allowed = []
+        if getattr(u, "allowed_cameras", None):
+            try:
+                allowed = json.loads(u.allowed_cameras)
+            except Exception:
+                allowed = []
         result.append({
             "id": u.id,
             "username": u.username,
             "role": u.role,
-            "status": getattr(u, "status", "active"),
-            "must_change_password": getattr(u, "must_change_password", False),
-            "deleted_at": getattr(u, "deleted_at", None),
+            "status": u.status,
+            "must_change_password": u.must_change_password,
+            "allowed_cameras": allowed,
+            "deleted_at": u.deleted_at.isoformat() if u.deleted_at else None,
         })
     return result
 
@@ -70,6 +83,7 @@ def create_user(
     current_user=Depends(verify_admin)
 ):
     """Create a new user account."""
+    import json
     if body.role not in ["admin", "operator", "viewer", "auditor"]:
         raise HTTPException(status_code=400, detail="Invalid role.")
 
@@ -77,10 +91,14 @@ def create_user(
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists.")
 
+    allowed_json = json.dumps(body.allowed_cameras) if body.allowed_cameras is not None else "[]"
+
     new_user = User(
         username=body.username,
         password_hash=get_password_hash(body.password),
         role=body.role,
+        status="active",
+        allowed_cameras=allowed_json
     )
     db.add(new_user)
 
@@ -102,7 +120,8 @@ def update_user(
     db: Session = Depends(get_db),
     current_user=Depends(verify_admin)
 ):
-    """Update role, status, or password for a user."""
+    """Update role, status, password, or allowed cameras for a user."""
+    import json
     target = db.query(User).filter(User.id == user_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -119,11 +138,14 @@ def update_user(
         changes.append("password reset")
 
     if body.status is not None:
-        # Store status in a dynamic attribute (column may not exist on base model)
-        # Gracefully handle if column doesn't exist yet
-        if hasattr(target, "status"):
-            target.status = body.status
+        if body.status not in ["active", "suspended", "disabled"]:
+            raise HTTPException(status_code=400, detail="Invalid status value.")
+        target.status = body.status
         changes.append(f"status -> {body.status}")
+
+    if body.allowed_cameras is not None:
+        target.allowed_cameras = json.dumps(body.allowed_cameras)
+        changes.append(f"allowed_cameras -> {len(body.allowed_cameras)} cameras")
 
     db.add(AuditLog(
         username=current_user.username,
@@ -148,8 +170,8 @@ def soft_delete_user(
     if target.username == current_user.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account.")
 
-    if hasattr(target, "deleted_at"):
-        target.deleted_at = datetime.datetime.utcnow()
+    target.deleted_at = datetime.datetime.utcnow()
+    target.status = "disabled"
 
     db.add(AuditLog(
         username=current_user.username,

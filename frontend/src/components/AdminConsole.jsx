@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   Box, Typography, Grid, Paper, Tabs, Tab, TextField, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Select, MenuItem, InputLabel, FormControl, IconButton, Alert, Chip, Dialog, DialogTitle, DialogContent, DialogActions
 } from '@mui/material';
@@ -11,7 +11,7 @@ import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 
-export default function AdminConsole({ role: myRole, token }) {
+export default function AdminConsole({ token }) {
   const [activeSubTab, setActiveSubTab] = useState(0);
   
   // Users States
@@ -40,14 +40,7 @@ export default function AdminConsole({ role: myRole, token }) {
   const [filterEnd, setFilterEnd] = useState('');
   const [logsError, setLogsError] = useState('');
 
-  useEffect(() => {
-    if (!token) return;
-    loadUsers();
-    loadRequests();
-    loadLogs();
-  }, [token, activeSubTab]);
-
-  const loadUsers = () => {
+  const loadUsers = useCallback(() => {
     setUserError('');
     fetch('/api/admin/users?include_deleted=true', {
       headers: { Authorization: `Bearer ${token}` }
@@ -58,9 +51,9 @@ export default function AdminConsole({ role: myRole, token }) {
       })
       .then(data => setUsersList(data))
       .catch(err => setUserError(err.message));
-  };
+  }, [token]);
 
-  const loadRequests = () => {
+  const loadRequests = useCallback(() => {
     setReqError('');
     fetch('/api/admin/elevation-requests', {
       headers: { Authorization: `Bearer ${token}` }
@@ -71,9 +64,9 @@ export default function AdminConsole({ role: myRole, token }) {
       })
       .then(data => setRequests(data))
       .catch(err => setReqError(err.message));
-  };
+  }, [token]);
 
-  const loadLogs = () => {
+  const loadLogs = useCallback(() => {
     setLogsError('');
     let url = '/api/admin/audit-logs';
     const params = [];
@@ -92,7 +85,14 @@ export default function AdminConsole({ role: myRole, token }) {
       })
       .then(data => setLogs(data))
       .catch(err => setLogsError(err.message));
-  };
+  }, [token, filterUser, filterAction, filterStart, filterEnd]);
+
+  useEffect(() => {
+    if (!token) return;
+    loadUsers();
+    loadRequests();
+    loadLogs();
+  }, [token, activeSubTab, loadUsers, loadRequests, loadLogs]);
 
   const handleCreateUser = (e) => {
     e.preventDefault();

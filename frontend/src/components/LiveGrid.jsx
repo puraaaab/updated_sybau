@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Hls from 'hls.js';
 import {
   Box, Card, Typography, TextField, Dialog, DialogTitle, DialogContent,
@@ -415,7 +415,7 @@ export default function LiveGrid({ role, token, alerts, searchQuery = '', settin
     }
   };
 
-  const fetchCameras = () => {
+  const fetchCameras = useCallback(() => {
     if (!token) return;
     fetch('/api/cameras', {
       headers: { 'Authorization': `Bearer ${token}` }
@@ -436,14 +436,14 @@ export default function LiveGrid({ role, token, alerts, searchQuery = '', settin
         console.error("Failed to load cameras:", err);
         setLoading(false);
       });
-  };
+  }, [token]);
 
   useEffect(() => {
     if (!token) return;
     fetchCameras();
     const pollInterval = setInterval(fetchCameras, settings.refreshRate || 4000);
     return () => clearInterval(pollInterval);
-  }, [token, settings.refreshRate]);
+  }, [token, settings.refreshRate, fetchCameras]);
 
   const verifyZoneClearance = (camera) => {
     if (!role || role === 'admin' || role === 'viewer') return true;

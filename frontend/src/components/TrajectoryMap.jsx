@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 
 export default function TrajectoryMap({ token }) {
   const [targetId, setTargetId] = useState('MH04AB1234');
@@ -8,7 +8,7 @@ export default function TrajectoryMap({ token }) {
   const [activeNodeIdx, setActiveNodeIdx] = useState(0);
   const [error, setError] = useState('');
 
-  const fetchTrajectory = (queryId) => {
+  const fetchTrajectory = useCallback((queryId) => {
     if (!token) return;
     setLoading(true);
     setError('');
@@ -38,11 +38,11 @@ export default function TrajectoryMap({ token }) {
       .then(res => res.json())
       .then(data => setCoOccurrenceData(data))
       .catch(err => console.error("Co-occurrence error:", err));
-  };
+  }, [token, targetId]);
 
   useEffect(() => {
     fetchTrajectory('MH04AB1234');
-  }, [token]);
+  }, [fetchTrajectory]);
 
   const handleSearch = (e) => {
     e.preventDefault();

@@ -67,6 +67,15 @@ class CameraStream:
                 return False, None, 0.0
             return True, self.latest_frame.copy(), self.latest_frame_time
 
+    def get_latest_frame(self) -> Tuple[Optional[np.ndarray], float]:
+        """
+        Returns (frame_copy, timestamp) for DeadlinedBatchCollector compatibility.
+        """
+        with self._lock:
+            if self.latest_frame is None:
+                return None, 0.0
+            return self.latest_frame.copy(), self.latest_frame_time
+
     def _open_capture(self) -> Optional[cv2.VideoCapture]:
         CameraStateMachine.update_state(self.camera_id, CameraStateMachine.CONNECTING)
         resolved_url = resolve_stream_url(self.camera_id, self.stream_url)
@@ -145,12 +154,15 @@ class StreamManager:
         self._streams = {}
         self._lock = threading.Lock()
 
-    def get_stream(self, camera_id: str, stream_url: str) -> CameraStream:
+    def get_stream(self, camera_id: str, stream_url: str = "") -> Optional[CameraStream]:
         with self._lock:
             if camera_id not in self._streams:
+                if not stream_url:
+                    return None
                 self._streams[camera_id] = CameraStream(camera_id, stream_url)
             stream = self._streams[camera_id]
-            stream.add_consumer()
+            if stream_url:
+                stream.add_consumer()
             return stream
 
     def release_stream(self, camera_id: str):

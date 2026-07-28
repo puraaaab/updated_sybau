@@ -83,6 +83,8 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.query(User).filter(User.username == username).first()
     if user is None:
         raise credentials_exception
+    if getattr(user, "status", "active") != "active" or getattr(user, "deleted_at", None) is not None:
+        raise credentials_exception
     return user
 
 
@@ -111,3 +113,29 @@ class RoleChecker:
 verify_admin = RoleChecker(["admin"])
 verify_operator = RoleChecker(["admin", "operator"])
 verify_viewer = RoleChecker(["admin", "operator", "viewer"])
+
+
+def verify_camera_access(camera_id: str, user: User) -> bool:
+    """
+    Checks if a user has permission to view or manage a specific camera.
+    Admins have unrestricted access. Operators/viewers are checked against allowed_cameras JSON list.
+    """
+    if not user:
+        return False
+    if user.role == "admin":
+        return True
+    
+    import json
+    allowed_list = []
+    if getattr(user, "allowed_cameras", None):
+        try:
+            allowed_list = json.loads(user.allowed_cameras)
+        except (ValueError, TypeError):
+            allowed_list = []
+            
+    # If no specific cameras are set in allowed_cameras, default to granting access
+    if not allowed_list:
+        return True
+        
+    return camera_id in allowed_list
+

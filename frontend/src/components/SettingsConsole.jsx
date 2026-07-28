@@ -5,14 +5,11 @@ import {
   TableCell, TableContainer, TableHead, TableRow, IconButton, Alert, Chip,
   List, ListItem, ListItemButton, ListItemText, ListItemIcon
 } from '@mui/material';
-import SettingsIcon from '@mui/icons-material/Settings';
 import PaletteIcon from '@mui/icons-material/Palette';
 import TvIcon from '@mui/icons-material/Tv';
 import SecurityIcon from '@mui/icons-material/Security';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
-import VolumeOffIcon from '@mui/icons-material/VolumeOff';
 import NetworkCheckIcon from '@mui/icons-material/NetworkCheck';
-import StorageIcon from '@mui/icons-material/Storage';
 import PersonAddIcon from '@mui/icons-material/PersonAdd';
 import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -39,7 +36,7 @@ export default function SettingsConsole({
   discovered = [],
   resolvedUrls = [],
   onResolveStreamUri,
-  onRegisterDiscovered,
+  _onRegisterDiscovered,
   onReloadUsers,
   onReloadRequests
 }) {

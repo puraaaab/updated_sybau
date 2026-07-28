@@ -19,6 +19,9 @@ def generate_fir_case_report(export_id: str, user=Depends(verify_viewer), db: Se
     now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     case_num = f"FIR-2026-SURAT-{export_id.upper()}"
     
+    from ..utils.audit import log_audit_event
+    log_audit_event(db, action="GENERATE_FIR_REPORT", detail=f"Case {case_num}", username=user.username)
+    
     cams = db.query(Camera).all()
     cams_dict = {c.id: c for c in cams}
     

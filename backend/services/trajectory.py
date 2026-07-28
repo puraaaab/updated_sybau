@@ -40,23 +40,26 @@ def get_target_trajectory(target_id: str, user=Depends(verify_viewer), db: Sessi
 
     cams_dict = {c.id: c for c in db.query(Camera).all()}
 
-    # Standard fallback camera sequence if empty tracks
+    # Standard fallback camera sequence if empty tracks and demo_mode is enabled
     if not matched_tracks:
-        cams_list = list(cams_dict.values())
-        now = datetime.datetime.now(datetime.timezone.utc)
-        for idx, cam in enumerate(cams_list):
-            t_node = now - datetime.timedelta(minutes=(len(cams_list) - idx) * 3)
-            nodes.append({
-                "sequence_index": idx + 1,
-                "camera_id": cam.id,
-                "camera_name": cam.name,
-                "location": cam.location,
-                "latitude": getattr(cam, "latitude", 21.1950 + idx * 0.002),
-                "longitude": getattr(cam, "longitude", 72.8200 + idx * 0.003),
-                "timestamp": t_node.strftime("%Y-%m-%d %H:%M:%S"),
-                "speed_kmh": round(25.0 + idx * 4.2, 1),
-                "snapshot_url": f"/api/v1/cameras/{cam.id}/snapshot"
-            })
+        from ..config.service import get_models
+        cfg = get_models()
+        if cfg.get("demo_mode", False):
+            cams_list = list(cams_dict.values())
+            now = datetime.datetime.now(datetime.timezone.utc)
+            for idx, cam in enumerate(cams_list):
+                t_node = now - datetime.timedelta(minutes=(len(cams_list) - idx) * 3)
+                nodes.append({
+                    "sequence_index": idx + 1,
+                    "camera_id": cam.id,
+                    "camera_name": cam.name,
+                    "location": cam.location,
+                    "latitude": getattr(cam, "latitude", 21.1950 + idx * 0.002),
+                    "longitude": getattr(cam, "longitude", 72.8200 + idx * 0.003),
+                    "timestamp": t_node.strftime("%Y-%m-%d %H:%M:%S"),
+                    "speed_kmh": round(25.0 + idx * 4.2, 1),
+                    "snapshot_url": f"/api/v1/cameras/{cam.id}/snapshot"
+                })
     else:
         for idx, tr in enumerate(matched_tracks):
             cam = cams_dict.get(tr.camera_id)

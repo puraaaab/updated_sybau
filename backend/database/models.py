@@ -11,6 +11,10 @@ class User(Base):
     username = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
     role = Column(String, default="viewer", nullable=False)  # admin, operator, viewer
+    status = Column(String, default="active", nullable=False)  # active, suspended, disabled
+    must_change_password = Column(Boolean, default=False, nullable=False)
+    allowed_cameras = Column(String, default="[]", nullable=False)  # JSON array of allowed camera IDs
+    deleted_at = Column(DateTime, nullable=True)
 
 
 class Camera(Base):

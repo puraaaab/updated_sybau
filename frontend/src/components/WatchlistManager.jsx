@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Box, Typography, Grid, Paper, TextField, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, IconButton, Alert
 } from '@mui/material';
 import PersonAddIcon from '@mui/icons-material/PersonAdd';
 import DeleteIcon from '@mui/icons-material/Delete';
-import ShieldIcon from '@mui/icons-material/Shield';
 import FileUploadIcon from '@mui/icons-material/FileUpload';
 
 export default function WatchlistManager({ token }) {
@@ -18,7 +17,7 @@ export default function WatchlistManager({ token }) {
   const [submitError, setSubmitError] = useState(null);
   const fileInputRef = useRef(null);
 
-  const loadWatchlist = () => {
+  const loadWatchlist = useCallback(() => {
     if (!token) return;
     setLoading(true);
     fetch('/api/v1/watchlist', {
@@ -33,11 +32,11 @@ export default function WatchlistManager({ token }) {
         console.error("Failed to load watchlist:", err);
         setLoading(false);
       });
-  };
+  }, [token]);
 
   useEffect(() => {
     loadWatchlist();
-  }, [token]);
+  }, [loadWatchlist]);
 
   const handleFileChange = (e) => {
     const f = e.target.files[0];

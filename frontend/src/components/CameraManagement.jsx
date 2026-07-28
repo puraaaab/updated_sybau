@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Box, Typography, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   IconButton, Button, Dialog, DialogTitle, DialogContent, DialogActions, TextField, Alert, Chip, CircularProgress
@@ -19,7 +19,7 @@ export default function CameraManagement({ token }) {
   const [isEditing, setIsEditing] = useState(false);
   const [formData, setFormData] = useState({ id: '', name: '', location: '', stream_url: '', width: 1920, height: 1080 });
 
-  const fetchCameras = async () => {
+  const fetchCameras = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/v1/cameras', {
@@ -33,11 +33,11 @@ export default function CameraManagement({ token }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token]);
 
   useEffect(() => {
     if (token) fetchCameras();
-  }, [token]);
+  }, [token, fetchCameras]);
 
   const handleOpenAdd = () => {
     setFormData({ id: '', name: '', location: '', stream_url: '', width: 1920, height: 1080 });

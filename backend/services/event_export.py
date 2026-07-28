@@ -3,6 +3,7 @@ import zipfile
 import json
 import hashlib
 import shutil
+import datetime
 from sqlalchemy.orm import Session
 from ..database.models import Alert
 
@@ -57,14 +58,14 @@ def export_alert_evidence(alert_id: int, db: Session) -> str:
             
     # 3. Create metadata JSON content
     metadata = {
-        "export_timestamp": datetime_to_iso(datetime_now()),
+        "export_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "alert_id": alert.id,
         "camera_id": alert.camera_id,
         "type": alert.type,
         "message": alert.message,
         "severity": alert.severity,
-        "alert_timestamp": datetime_to_iso(alert.timestamp),
-        "chain_of_custody": "VMS Secure Forensic Export (Prototype)"
+        "alert_timestamp": alert.timestamp.isoformat() if alert.timestamp else None,
+        "chain_of_custody": "VMS Secure Forensic Export"
     }
     
     # Setup temporary directory for packing

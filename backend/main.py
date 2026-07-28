@@ -4,6 +4,7 @@ import os
 os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;10000|reconnect;1|reconnect_streamed;1|reconnect_delay_max;5"
 
+import json
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Query, Request
@@ -30,6 +31,8 @@ from .monitoring import health as monitoring_health
 from .services import event_export
 from .search import vector_search
 from .messaging.kafka_client import memory_bus
+from .utils.security import safe_join_path
+from .utils.ssrf import validate_proxy_url
 
 # ---------------------------------------------------------------------------
 # Lifespan context manager (replaces deprecated @app.on_event)
@@ -96,15 +99,9 @@ async def lifespan(app: FastAPI):
                 ))
             db.commit()
 
-        # Seed default users
-        from .database.models import User
-        if db.query(User).count() == 0:
-            print("Seeding default users...")
-            from .auth.helpers import get_password_hash
-            db.add(User(username="admin", password_hash=get_password_hash("Admin@123456"), role="admin"))
-            db.add(User(username="operator", password_hash=get_password_hash("Operator@123456"), role="operator"))
-            db.add(User(username="viewer", password_hash=get_password_hash("Viewer@123456"), role="viewer"))
-            db.commit()
+        # Seed initial users if empty
+        from .auth.router import _seed_users
+        _seed_users(db)
     finally:
         db.close()
 
@@ -122,16 +119,18 @@ async def lifespan(app: FastAPI):
         model_manager.get_yolo()
         model_manager.get_ocr()
 
-        # Start continuous recording and AI threads
+        from .ai.scheduler import inference_scheduler
+        inference_scheduler.start()
+
+        # Start continuous recording and AI threads only after the inference
+        # scheduler is live; otherwise camera workers can block on their first
+        # GPU task during startup.
         print("Starting background Stream Recorders and AI Workers...")
         recorder.start_all_recorders()
         ai_worker.start_all_ai_workers()
 
         from .recording.retention import retention_manager
         retention_manager.start()
-
-        from .ai.scheduler import inference_scheduler
-        inference_scheduler.start()
 
     # Start the AI subsystem in a background thread so the FastAPI server
     # can bind to port 8000 immediately without blocking `manage.ps1`
@@ -287,13 +286,17 @@ def scan_onvif_cameras(user=Depends(verify_viewer)):
     except Exception as e:
         print("WS-Discovery scan note:", e)
 
-    # Use real discovered devices if found, otherwise use realistic demo fallback
-    devices = discovered_real if len(discovered_real) > 0 else [
-        {"name": "Hikvision NVR Channel 1", "ip": "192.168.1.101", "port": 80, "mac": "00:1A:2B:3C:4D:01"},
-        {"name": "Dahua Body-Worn Cam Relay", "ip": "192.168.1.102", "port": 80, "mac": "00:1A:2B:3C:4D:02"},
-        {"name": "Axis Dome Camera P3245", "ip": "192.168.1.103", "port": 80, "mac": "00:1A:2B:3C:4D:03"},
-        {"name": "CP PLUS Speed Dome", "ip": "192.168.1.104", "port": 80, "mac": "00:1A:2B:3C:4D:04"}
-    ]
+    # Use real discovered devices if found, otherwise return demo fallback if demo_mode is enabled
+    devices = discovered_real
+    if len(devices) == 0:
+        cfg = get_models()
+        if cfg.get("demo_mode", False):
+            devices = [
+                {"name": "Hikvision NVR Channel 1", "ip": "192.168.1.101", "port": 80, "mac": "00:1A:2B:3C:4D:01"},
+                {"name": "Dahua Body-Worn Cam Relay", "ip": "192.168.1.102", "port": 80, "mac": "00:1A:2B:3C:4D:02"},
+                {"name": "Axis Dome Camera P3245", "ip": "192.168.1.103", "port": 80, "mac": "00:1A:2B:3C:4D:03"},
+                {"name": "CP PLUS Speed Dome", "ip": "192.168.1.104", "port": 80, "mac": "00:1A:2B:3C:4D:04"}
+            ]
     return {"status": "success", "count": len(devices), "is_real": len(discovered_real) > 0, "devices": devices}
 
 
@@ -492,8 +495,9 @@ def download_forensic_export(alert_id: int, db: Session = Depends(get_db), user=
 # ---------------------------------------------------------------------------
 
 @app.get("/api/v1/playback/snapshot/{snap_id}")
-def serve_snapshot(snap_id: str):
-    snap_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "snapshots", f"{snap_id}.jpg"))
+def serve_snapshot(snap_id: str, user=Depends(verify_viewer)):
+    snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "snapshots"))
+    snap_path = safe_join_path(snap_dir, f"{snap_id}.jpg")
     if not os.path.exists(snap_path):
         raise HTTPException(status_code=404, detail="Snapshot not found")
     return FileResponse(snap_path)
@@ -501,7 +505,8 @@ def serve_snapshot(snap_id: str):
 
 @app.get("/api/v1/playback/timeline/{camera_id}")
 def get_timeline_clips(camera_id: str, user=Depends(verify_viewer)):
-    cam_rec_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "recordings", camera_id))
+    rec_base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "recordings"))
+    cam_rec_dir = safe_join_path(rec_base_dir, camera_id)
     if not os.path.exists(cam_rec_dir):
         return []
     files = sorted(os.listdir(cam_rec_dir))
@@ -509,11 +514,13 @@ def get_timeline_clips(camera_id: str, user=Depends(verify_viewer)):
 
 
 @app.get("/api/v1/playback/video/{camera_id}/{clip_name}")
-def serve_video_clip(camera_id: str, clip_name: str):
-    video_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "recordings", camera_id, clip_name))
+def serve_video_clip(camera_id: str, clip_name: str, user=Depends(verify_viewer)):
+    rec_base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "recordings"))
+    video_path = safe_join_path(rec_base_dir, camera_id, clip_name)
     if not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail="Video clip not found")
     return FileResponse(video_path, media_type="video/mp4")
+
 
 
 # ---------------------------------------------------------------------------
@@ -581,11 +588,35 @@ def debug_search(user=Depends(verify_viewer)):
 @app.post("/api/v1/search/face")
 async def search_face(file: UploadFile = File(...), user=Depends(verify_viewer)):
     import numpy as np
-    # Read uploaded image bytes and generate a real embedding if possible
-    # For now use a 384-dim random vector matching the MiniLM embedding dimension
-    mock_face_embedding = np.random.normal(0, 1, 384).tolist()
-    results = vector_search.perform_face_search(mock_face_embedding)
-    return results
+    import cv2
+    from .ai.face import face_pipeline
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Could not decode image format. Upload a valid JPG/PNG file.")
+
+    h, w = img.shape[:2]
+    try:
+        detector, recognizer = face_pipeline.get_face_models(w, h)
+        detector.setInputSize((w, h))
+        _, faces = detector.detect(img)
+
+        if faces is not None and len(faces) > 0:
+            aligned_face = recognizer.alignCrop(img, faces[0])
+            embedding = recognizer.feature(aligned_face).flatten().tolist()
+            results = vector_search.perform_face_search(embedding)
+            return results
+        else:
+            raise HTTPException(status_code=422, detail="No face detected in uploaded image. Please provide a clear face snapshot.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Face embedding pipeline error: {str(e)}")
 
 
 # ---------------------------------------------------------------------------
@@ -660,9 +691,10 @@ from fastapi.responses import Response, StreamingResponse
 
 
 @app.get("/api/v1/proxy/m3u8")
-async def proxy_m3u8(url: str, request: Request):
+async def proxy_m3u8(url: str, request: Request, user=Depends(verify_viewer)):
+    validated_url = validate_proxy_url(url)
     async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}) as client:
-        res = await client.get(url, timeout=12)
+        res = await client.get(validated_url, timeout=12)
         if res.status_code != 200:
             raise HTTPException(status_code=res.status_code, detail="Failed to fetch manifest")
 
@@ -688,10 +720,11 @@ async def proxy_m3u8(url: str, request: Request):
 
 
 @app.get("/api/v1/proxy/ts")
-async def proxy_ts(url: str):
+async def proxy_ts(url: str, user=Depends(verify_viewer)):
+    validated_url = validate_proxy_url(url)
     async def stream_ts():
         async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}) as client:
-            async with client.stream("GET", url, timeout=18) as r:
+            async with client.stream("GET", validated_url, timeout=18) as r:
                 async for chunk in r.aiter_bytes(chunk_size=32768):
                     yield chunk
 
@@ -731,14 +764,16 @@ def get_spatial_heatmap_data(camera_id: str = Query(default="cam_1"), user=Depen
                 "value": round(random.uniform(0.4, 0.95), 2)
             })
     else:
-        # High density hotspot clusters for live demonstration
-        hotspots = [
-            (0.35, 0.45, 0.9), (0.38, 0.48, 0.85), (0.70, 0.60, 0.95),
-            (0.20, 0.30, 0.7), (0.50, 0.50, 0.8), (0.75, 0.65, 0.88),
-            (0.85, 0.70, 0.75), (0.15, 0.80, 0.6), (0.40, 0.40, 0.92)
-        ]
-        for x, y, v in hotspots:
-            points.append({"x": x, "y": y, "value": v})
+        cfg = get_models()
+        if cfg.get("demo_mode", False):
+            # High density hotspot clusters for live demonstration
+            hotspots = [
+                (0.35, 0.45, 0.9), (0.38, 0.48, 0.85), (0.70, 0.60, 0.95),
+                (0.20, 0.30, 0.7), (0.50, 0.50, 0.8), (0.75, 0.65, 0.88),
+                (0.85, 0.70, 0.75), (0.15, 0.80, 0.6), (0.40, 0.40, 0.92)
+            ]
+            for x, y, v in hotspots:
+                points.append({"x": x, "y": y, "value": v})
             
     return {
         "camera_id": camera_id,
@@ -746,4 +781,94 @@ def get_spatial_heatmap_data(camera_id: str = Query(default="cam_1"), user=Depen
         "points_count": len(points),
         "heatmap_points": points
     }
+
+
+# ---------------------------------------------------------------------------
+# PTZ & Target Auto-Tracking API
+# ---------------------------------------------------------------------------
+
+from .services.onvif_ptz import send_ptz_command
+from .services.ptz_tracker import toggle_auto_tracking, is_auto_tracking_active
+
+
+@app.post("/api/v1/cameras/{camera_id}/ptz/control")
+async def control_ptz(camera_id: str, payload: dict, user=Depends(verify_operator), db: Session = Depends(get_db)):
+    """
+    Dispatches manual ONVIF PTZ commands (Pan/Tilt/Zoom, Stop) to target IP camera.
+    """
+    cam = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    action = payload.get("action", "ContinuousMove")
+    pan = float(payload.get("pan", 0.0))
+    tilt = float(payload.get("tilt", 0.0))
+    zoom = float(payload.get("zoom", 0.0))
+
+    # Extract IP address from camera stream URL if applicable
+    import urllib.parse
+    parsed = urllib.parse.urlparse(cam.stream_url if cam.stream_url.startswith("http") or cam.stream_url.startswith("rtsp") else "http://127.0.0.1")
+    ip = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 80
+
+    res = await send_ptz_command(ip, port, action, pan, tilt, zoom)
+    return {"camera_id": camera_id, "ptz_result": res}
+
+
+@app.post("/api/v1/cameras/{camera_id}/ptz/auto-track")
+def set_ptz_auto_track(camera_id: str, payload: dict, user=Depends(verify_operator)):
+    """
+    Toggles automatic PTZ target tracking on a camera stream.
+    """
+    enabled = payload.get("enabled", False)
+    target_id = payload.get("target_id", None)
+    res = toggle_auto_tracking(camera_id, enabled, target_id)
+    return res
+
+
+# ---------------------------------------------------------------------------
+# Traffic Analytics & Speed Estimation API
+# ---------------------------------------------------------------------------
+
+from .services.traffic_analytics import compute_traffic_analytics
+
+
+@app.get("/api/v1/analytics/traffic-speed")
+def get_traffic_speed_analytics(camera_id: str = Query(default="cam_1"), user=Depends(verify_viewer), db: Session = Depends(get_db)):
+    """
+    Returns live vehicle count, speed distribution (km/h), max speed, and wrong-direction violations.
+    """
+    recent_tracks = db.query(Track).filter(Track.camera_id == camera_id).limit(50).all()
+    tracks_payload = []
+    for tr in recent_tracks:
+        tracks_payload.append({
+            "track_uuid": tr.track_uuid,
+            "label": tr.label,
+            "speed": tr.speed,
+            "path_history": json.loads(tr.path_history) if tr.path_history else []
+        })
+
+    analytics = compute_traffic_analytics(tracks_payload)
+    return {"camera_id": camera_id, "traffic_analytics": analytics}
+
+
+# ---------------------------------------------------------------------------
+# Natural Language Video Question Answering (Video QA) API
+# ---------------------------------------------------------------------------
+
+from .services.video_qa import answer_video_question
+
+
+@app.get("/api/v1/forensics/video-qa")
+def natural_language_video_qa(question: str = Query(...), camera_id: str = Query(default=None), user=Depends(verify_viewer)):
+    """
+    Conversational VLM video question answering across indexed video frame captions and metadata.
+    """
+    if not question.strip():
+        raise HTTPException(status_code=400, detail="Question parameter is required.")
+
+    res = answer_video_question(question, camera_id=camera_id)
+    return res
+
+
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   Box, Typography, Paper, TextField, Button, Select, MenuItem, InputLabel, FormControl, Card, CardMedia, CardContent, CardActions, Chip, Alert, Slider
 } from '@mui/material';
@@ -25,7 +25,7 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
   const [sortBy, setSortBy] = useState('confidence'); // newest | oldest | confidence
   const [classFilter, setClassFilter] = useState('all'); // all | person | vehicle | poi | export
 
-  const loadCameras = () => {
+  const loadCameras = useCallback(() => {
     if (!token) return;
     fetch('/api/cameras', {
       headers: { Authorization: `Bearer ${token}` }
@@ -35,11 +35,11 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
         setCameras(data);
       })
       .catch(() => { });
-  };
+  }, [token]);
 
   useEffect(() => {
     loadCameras();
-  }, [token]);
+  }, [loadCameras]);
 
   useEffect(() => {
     if (initialQuery) {
@@ -68,7 +68,7 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
         .filter(res => !(res.kind === 'object' && res.confidence === 0))
       );
     }
-  }, [searchEvents]);
+  }, [searchEvents, query]);
 
   // Handle Quick Time Presets
   const handleTimePresetChange = (preset) => {

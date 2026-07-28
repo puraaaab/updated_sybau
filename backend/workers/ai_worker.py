@@ -269,6 +269,8 @@ class CameraAIWorker:
                                     "type": "vehicle",
                                     "camera_id": self.camera_id,
                                     "license_plate": veh["license_plate"],
+                                    "vehicle_type": veh.get("vehicle_type", "car"),
+                                    "vehicle_color": veh.get("vehicle_color", "unknown"),
                                     "identity_uuid": resolved_identity,
                                     "track_uuid": veh["track_uuid"],
                                     "snapshot_url": f"/api/v1/playback/snapshot/{vid}",

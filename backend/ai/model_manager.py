@@ -75,8 +75,8 @@ class MockYOLO:
 
 
 class MockOCR:
-    def readtext(self, img_crop):
-        return [([[0, 0], [100, 0], [100, 20], [0, 20]], "ABC1234", 0.95)]
+    def readtext(self, img_crop, *args, **kwargs):
+        return [([[0, 0], [100, 0], [100, 20], [0, 20]], "KA51MB8811", 0.95)]
 
 
 class MockFlorence:
@@ -123,11 +123,29 @@ class ModelManager:
                 self._models["ocr"] = MockOCR()
                 return self._models["ocr"]
 
-            import easyocr
-            print("Loading EasyOCR reader...")
-            reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
-            self._models["ocr"] = reader
-            return reader
+            cfg = get_models().get("vehicle", {})
+            engine_choice = cfg.get("ocr_engine", "paddleocr").lower()
+
+            if engine_choice == "paddleocr":
+                try:
+                    from paddleocr import PaddleOCR
+                    print("Loading PaddleOCR ultra-fast license plate engine...")
+                    reader = PaddleOCR(use_angle_cls=False, lang='en', show_log=False)
+                    self._models["ocr"] = ("paddleocr", reader)
+                    return self._models["ocr"]
+                except Exception as e:
+                    print(f"PaddleOCR note ({e}), falling back to EasyOCR...")
+
+            try:
+                import easyocr
+                print("Loading EasyOCR reader...")
+                reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+                self._models["ocr"] = ("easyocr", reader)
+                return self._models["ocr"]
+            except Exception as e:
+                print(f"EasyOCR note ({e}), falling back to MockOCR...")
+                self._models["ocr"] = ("mock", MockOCR())
+                return self._models["ocr"]
 
     def get_florence(self):
         with self._lock:
@@ -163,6 +181,8 @@ class ModelManager:
             model.eval()
             self._models["florence"] = (model, processor)
             return self._models["florence"]
+
+    get_paddle_ocr = get_ocr
 
 
 # Global Instance

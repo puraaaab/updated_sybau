@@ -31,23 +31,33 @@ class InferenceScheduler:
         self.request_queue = queue.PriorityQueue()
         self.running = False
         self.worker_thread = None
+        self._lifecycle_lock = threading.Lock()
 
     def start(self):
-        self.running = True
-        self.worker_thread = threading.Thread(
-            target=self._scheduler_loop,
-            daemon=True,
-            name="InferenceScheduler",
-        )
-        self.worker_thread.start()
+        with self._lifecycle_lock:
+            if self.running and self.worker_thread and self.worker_thread.is_alive():
+                return
+            self.running = True
+            self.worker_thread = threading.Thread(
+                target=self._scheduler_loop,
+                daemon=True,
+                name="InferenceScheduler",
+            )
+            self.worker_thread.start()
         print("[InferenceScheduler] Priority Queue thread active.")
 
     def stop(self):
-        self.running = False
-        # Wake up the scheduler loop if it is blocked on queue.get()
-        # by inserting a sentinel task
-        sentinel = (0, 0.0, "STOP", None, (), {}, None, None)
-        self.request_queue.put(sentinel)
+        with self._lifecycle_lock:
+            if not self.running:
+                return
+            self.running = False
+            # Wake up the scheduler loop if it is blocked on queue.get()
+            # by inserting a sentinel task
+            sentinel = (0, 0.0, "STOP", None, (), {}, None, None)
+            self.request_queue.put(sentinel)
+            worker = self.worker_thread
+        if worker:
+            worker.join(timeout=5)
 
     def schedule_inference(self, priority: int, inference_func, *args, **kwargs):
         """
@@ -55,6 +65,9 @@ class InferenceScheduler:
         Raises the underlying exception if the task fails.
         Raises TimeoutError if the task does not finish within TASK_TIMEOUT_SECONDS.
         """
+        if not self.running or not (self.worker_thread and self.worker_thread.is_alive()):
+            self.start()
+
         task_id = str(uuid.uuid4())
         result_container = {"result": None, "exception": None}
         done_event = threading.Event()
@@ -87,7 +100,7 @@ class InferenceScheduler:
         return result_container["result"]
 
     def _scheduler_loop(self):
-        while self.running:
+        while self.running or not self.request_queue.empty():
             try:
                 try:
                     task = self.request_queue.get(timeout=0.5)
