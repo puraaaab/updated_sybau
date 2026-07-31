@@ -83,8 +83,40 @@ class CameraStream:
             CameraStateMachine.update_state(self.camera_id, CameraStateMachine.FAILED)
             return None
 
-        cap = cv2.VideoCapture(resolved_url)
-        if cap.isOpened():
+        cap = None
+        is_rtsp = resolved_url.startswith("rtsp://") or resolved_url.startswith("http://") or resolved_url.startswith("https://")
+
+        # 1. Primary Hardware Acceleration Attempt: GStreamer NVIDIA NVDEC Pipeline
+        if is_rtsp and getattr(cv2, "CAP_GSTREAMER", None) is not None:
+            try:
+                gst_pipeline = (
+                    f"rtspsrc location={resolved_url} latency=100 drop-on-latency=true ! "
+                    f"rtph264depay ! h264parse ! nvh264dec ! "
+                    f"videoconvert ! video/x-raw, format=BGR ! appsink drop=true max-buffers=1 sync=false"
+                )
+                gst_cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+                if gst_cap.isOpened():
+                    cap = gst_cap
+                    logger.info(f"[StreamManager] Camera {self.camera_id} opened via GPU NVDEC GStreamer pipeline.")
+            except Exception as e:
+                logger.debug(f"[StreamManager] GStreamer NVDEC attempt skipped: {e}")
+
+        # 2. Secondary Hardware Acceleration Attempt: FFmpeg CUDA Options
+        if cap is None or not cap.isOpened():
+            try:
+                import os as _os
+                _os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|hwaccel;cuda"
+                cap = cv2.VideoCapture(resolved_url, cv2.CAP_FFMPEG)
+                if cap.isOpened():
+                    logger.info(f"[StreamManager] Camera {self.camera_id} opened via FFmpeg CUDA hardware acceleration.")
+            except Exception:
+                cap = None
+
+        # 3. Fallback: Native OpenCV Capture
+        if cap is None or not cap.isOpened():
+            cap = cv2.VideoCapture(resolved_url)
+
+        if cap and cap.isOpened():
             CameraStateMachine.update_state(self.camera_id, CameraStateMachine.ONLINE)
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
@@ -96,7 +128,8 @@ class CameraStream:
             print(f"[StreamManager] Camera {self.camera_id} stream opened successfully ({w}x{h} @ {self.fps} FPS)")
             return cap
 
-        cap.release()
+        if cap:
+            cap.release()
         CameraStateMachine.update_state(self.camera_id, CameraStateMachine.FAILED)
         return None
 

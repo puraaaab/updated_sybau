@@ -64,6 +64,7 @@ class Vehicle(Base):
     license_plate = Column(String, index=True, nullable=True)
     ocr_confidence = Column(Float, default=0.0)
     vehicle_type = Column(String, default="unknown")
+    vehicle_color = Column(String, default="unknown", index=True)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
 
 

@@ -124,6 +124,20 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"Note on SentenceTransformer pre-warm: {e}")
 
+            try:
+                from .ai.person.person_attribute_engine import _get_clip_model
+                _get_clip_model()
+                print("OpenCLIP vision-language embedder pre-warmed for ultra-fast person crop feature extraction.")
+            except Exception as e:
+                print(f"Note on OpenCLIP pre-warm: {e}")
+
+            try:
+                from .search.qdrant_utils import get_qdrant_client
+                get_qdrant_client()
+                print("Qdrant Vector DB collection verified and batch worker thread active.")
+            except Exception as e:
+                print(f"Note on Qdrant pre-init: {e}")
+
             from .ai.scheduler import inference_scheduler
             inference_scheduler.start()
 

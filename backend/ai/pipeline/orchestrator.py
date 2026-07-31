@@ -46,11 +46,18 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
         logger.warning(f"[{camera_id}] YOLO detection failed: {e}")
         tracks = []
     
-    # 2. Process faces for tracked people — ONLY when person detected, CPU (Runs in parallel worker thread)
+    # 2. Process faces & person crops for tracked people — ONLY when person detected
     faces = []
+    person_crops = []
     people = [d for d in tracks if d.get("class_name") == "person"]
-    if people and cfg.get("face", {}).get("enabled", True):
-        faces = process_faces(frame, tracks)
+    if people:
+        if cfg.get("face", {}).get("enabled", True):
+            faces = process_faces(frame, tracks)
+        try:
+            from ..person.person_attribute_engine import process_person_crops
+            person_crops = process_person_crops(frame, tracks)
+        except Exception as e:
+            logger.warning(f"[{camera_id}] Person crop extraction failed: {e}")
     
     # 3. Process vehicle Re-ID & license plates — ONLY when vehicle detected, CPU (Runs in parallel worker thread)
     vehicle_classes = [
@@ -100,10 +107,12 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     embedding = None
 
     # Attempt Florence-2 VLM caption if GPU queue is free
-    florence_enabled = cfg.get("florence", {}).get("enabled", True)
-    if florence_enabled and frame_idx % 2 == 0:
+    florence_cfg = cfg.get("florence", {})
+    florence_enabled = florence_cfg.get("enabled", True)
+    n_frames = florence_cfg.get("invoke_every_n_frames", 1)
+    if florence_enabled and (n_frames <= 1 or frame_idx % n_frames == 0):
         try:
-            if inference_scheduler.request_queue.qsize() < 2:
+            if inference_scheduler.request_queue.qsize() < 4:
                 florence_cap = inference_scheduler.schedule_inference(
                     inference_scheduler.PRIORITY_FLORENCE,
                     generate_scene_caption,
@@ -122,6 +131,7 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     return {
         "tracks": tracks,
         "faces": faces,
+        "person_crops": person_crops,
         "vehicles": vehicles,
         "alerts": alerts,
         "caption": caption,

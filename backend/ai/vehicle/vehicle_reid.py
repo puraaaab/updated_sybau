@@ -17,6 +17,8 @@ _reid_model = None
 _preprocess = None
 _reid_lock = threading.Lock()
 _device = None
+_track_plate_history = {}
+_history_lock = threading.Lock()
 
 
 def get_reid_model():
@@ -345,6 +347,27 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
                         ocr_conf = float(best_conf)
             except Exception as e:
                 logger.error(f"[OCR] Plate OCR failed for track {veh.get('track_id')}: {e}")
+
+        # Multi-frame Tracklet License Plate Consensus Voting
+        track_key = veh.get('track_id')
+        if track_key is not None:
+            with _history_lock:
+                if track_key not in _track_plate_history:
+                    _track_plate_history[track_key] = []
+                if plate_text:
+                    _track_plate_history[track_key].append((plate_text, ocr_conf))
+                    if len(_track_plate_history[track_key]) > 10:
+                        _track_plate_history[track_key].pop(0)
+
+                # Compute consensus plate string via weighted frequency voting
+                history = _track_plate_history[track_key]
+                if history:
+                    votes = {}
+                    for p_str, p_conf in history:
+                        votes[p_str] = votes.get(p_str, 0.0) + p_conf
+                    consensus_plate = max(votes.items(), key=lambda x: x[1])[0]
+                    plate_text = consensus_plate
+                    ocr_conf = max(p_conf for p_str, p_conf in history if p_str == consensus_plate)
 
         # Explicit audited failure fields (no random vector pollution)
         vehicles_detected.append({

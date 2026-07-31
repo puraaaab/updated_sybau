@@ -42,7 +42,8 @@ def get_qdrant_client(timeout: float = 10.0):
                                 vectors_config={
                                     "face": qmodels.VectorParams(size=512, distance=qmodels.Distance.COSINE),
                                     "scene": qmodels.VectorParams(size=384, distance=qmodels.Distance.COSINE),
-                                    "vehicle": qmodels.VectorParams(size=576, distance=qmodels.Distance.COSINE)
+                                    "vehicle": qmodels.VectorParams(size=576, distance=qmodels.Distance.COSINE),
+                                    "person_crop": qmodels.VectorParams(size=512, distance=qmodels.Distance.COSINE)
                                 }
                             )
                             logger.info("Created Qdrant collection 'vms_embeddings' successfully.")
@@ -78,9 +79,12 @@ def enqueue_qdrant_point(vector_id: str, vector: list, payload: dict):
     """
     Non-blocking submission of a vector point into the background batch upsert queue.
     """
-    if len(vector) == 512:
+    p_type = payload.get("type") if isinstance(payload, dict) else None
+    if p_type == "person_crop":
+        vec_name = "person_crop"
+    elif p_type == "face" or (len(vector) == 512 and p_type != "person_crop"):
         vec_name = "face"
-    elif len(vector) == 576:
+    elif p_type == "vehicle" or len(vector) == 576:
         vec_name = "vehicle"
     else:
         vec_name = "scene"

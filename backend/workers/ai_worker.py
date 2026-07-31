@@ -83,7 +83,7 @@ class CameraAIWorker:
         self.stream_url = stream_url
         self.running = False
         self.thread = None
-        self.sampling_rate = 2.0 # 2 FPS
+        self.sampling_rate = 5.0 # High Precision 5 FPS (0.2s cadence)
         self._cached_zones = None
         self._cached_alerts_cfg = None
         self._last_cfg_fetch = 0.0
@@ -168,7 +168,7 @@ class CameraAIWorker:
                     db.add(cam_entry)
                     db.commit()
 
-                interval = 0.5
+                interval = 0.2  # High Precision 5 FPS (0.2s sampling cadence)
                 frame_idx = 0
                 last_frame_ts = 0.0
                 snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
@@ -178,7 +178,7 @@ class CameraAIWorker:
                 last_motion_time = 0.0
                 has_active_tracks = False
                 has_active_alerts = False
-                current_fps = 2.0
+                current_fps = 5.0
                 motion_status = "STREAMING"
 
                 while self.running:
@@ -275,6 +275,27 @@ class CameraAIWorker:
                                 }
                             )
 
+                        # Batch person crops for OpenCLIP attribute search
+                        for p_crop in results.get("person_crops", []):
+                            crop_id = p_crop["embedding_id"]
+                            snap_path = os.path.join(snap_dir, f"{crop_id}.jpg")
+                            save_snapshot_async(snap_path, p_crop.get("crop", frame))
+
+                            index_vector(
+                                vector_id=crop_id,
+                                vector=p_crop["embedding"],
+                                payload={
+                                    "type": "person_crop",
+                                    "camera_id": self.camera_id,
+                                    "track_uuid": p_crop["track_uuid"],
+                                    "upper_color": p_crop.get("upper_color", "unknown"),
+                                    "lower_color": p_crop.get("lower_color", "unknown"),
+                                    "bbox": p_crop.get("bbox", []),
+                                    "snapshot_url": f"/api/v1/playback/snapshot/{crop_id}",
+                                    "timestamp": datetime.datetime.utcnow().isoformat()
+                                }
+                            )
+
                         # Batch vehicles
                         for veh in results.get("vehicles", []):
                             resolved_identity = GlobalIdentityManager.get_or_create_vehicle_identity(
@@ -286,6 +307,7 @@ class CameraAIWorker:
                                 license_plate=veh["license_plate"] or resolved_identity,
                                 ocr_confidence=veh["ocr_confidence"],
                                 vehicle_type=veh["vehicle_type"],
+                                vehicle_color=veh.get("vehicle_color", "unknown"),
                                 timestamp=datetime.datetime.utcnow()
                             )
                             db.add(db_veh)
@@ -298,7 +320,13 @@ class CameraAIWorker:
                                     f"TYPE={veh['vehicle_type']}"
                                 )
 
-                            vid = str(uuid.uuid4())
+                            plate_str = veh.get("license_plate")
+                            if plate_str and str(plate_str).strip():
+                                clean_p = str(plate_str).strip().upper().replace(" ", "")
+                                vid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"VEHICLE_{clean_p}"))
+                            else:
+                                vid = str(uuid.uuid4())
+
                             snap_path = os.path.join(snap_dir, f"{vid}.jpg")
                             save_snapshot_async(snap_path, frame)
 

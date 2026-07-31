@@ -169,44 +169,92 @@ def _build_qdrant_time_filter(start_time: str = None, end_time: str = None):
 
 def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = None, end_time: str = None) -> list:
     """
-    Translates search query to a real semantic embedding via SentenceTransformer,
-    then queries Qdrant for cosine-similar results, optionally filtered by time range.
+    Translates search query to real semantic embeddings via SentenceTransformer & OpenCLIP,
+    querying Qdrant for matching scene captions and visual person crop features.
 
     Falls back to in-memory keyword overlap only if Qdrant is unreachable.
     """
     _seed_demo_vector_db()
 
-    query_vector = get_text_embedding(query_text)
+    scene_query_vec = get_text_embedding(query_text)
     is_production = os.getenv("APP_ENV") == "production"
     query_filter = _build_qdrant_time_filter(start_time, end_time)
 
     try:
         from .qdrant_utils import qdrant_client_with_timeout
+        from ..ai.person.person_attribute_engine import get_clip_text_embedding
+        clip_query_vec = get_clip_text_embedding(query_text)
+
+        qd_results = []
         with qdrant_client_with_timeout(5.0) as client:
-            qd_results = client.query_points(
-                collection_name="vms_embeddings",
-                query=query_vector,
-                using="scene",
-                query_filter=query_filter,
-                limit=limit,
-                with_payload=True
-            ).points
+            # 1. Search scene captions
+            try:
+                scene_res = client.query_points(
+                    collection_name="vms_embeddings",
+                    query=scene_query_vec,
+                    using="scene",
+                    query_filter=query_filter,
+                    limit=limit,
+                    with_payload=True
+                ).points
+                if scene_res:
+                    qd_results.extend(scene_res)
+            except Exception as e:
+                logger.debug(f"Qdrant scene query note: {e}")
+
+            # 2. Search OpenCLIP person crops (512d)
+            try:
+                crop_res = client.query_points(
+                    collection_name="vms_embeddings",
+                    query=clip_query_vec,
+                    using="person_crop",
+                    query_filter=query_filter,
+                    limit=limit,
+                    with_payload=True
+                ).points
+                if crop_res:
+                    qd_results.extend(crop_res)
+            except Exception as e:
+                logger.debug(f"Qdrant person_crop query note: {e}")
+
+            # 3. Search Vehicle Re-ID / attribute vectors (576d or CLIP fallback)
+            try:
+                veh_res = client.query_points(
+                    collection_name="vms_embeddings",
+                    query=scene_query_vec,
+                    using="vehicle",
+                    query_filter=query_filter,
+                    limit=limit,
+                    with_payload=True
+                ).points
+                if veh_res:
+                    qd_results.extend(veh_res)
+            except Exception as e:
+                logger.debug(f"Qdrant vehicle query note: {e}")
 
         if qd_results:
             results = []
+            seen_snapshots = set()
             snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
+
             for r in qd_results:
                 snap_url = r.payload.get("snapshot_url") or ""
                 if snap_url:
+                    if snap_url in seen_snapshots:
+                        continue
+                    seen_snapshots.add(snap_url)
+
                     snap_id = snap_url.split("/")[-1]
                     snap_path = os.path.join(snap_dir, f"{snap_id}.jpg")
                     raw_path = os.path.join(snap_dir, snap_id)
                     if not (os.path.exists(snap_path) or os.path.exists(raw_path)):
                         continue  # Skip records whose snapshot image files no longer exist on disk
 
-                score = r.score
+                score = float(r.score)
                 text_to_compare = " ".join(filter(None, [
                     str(r.payload.get("caption") or ""),
+                    str(r.payload.get("upper_color") or ""),
+                    str(r.payload.get("lower_color") or ""),
                     str(r.payload.get("vehicle_type") or ""),
                     str(r.payload.get("vehicle_color") or ""),
                     str(r.payload.get("license_plate") or "")
@@ -215,7 +263,7 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
                 score = min(score, 0.99)  # Cap score at 0.99 so UI doesn't exceed 99%
                 results.append({"score": score, "payload": r.payload})
 
-            return sorted(results, key=lambda x: x["score"], reverse=True)
+            return sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
     except Exception as e:
         if is_production:
             raise RuntimeError(f"FATAL: Qdrant search failed in production: {e}") from e

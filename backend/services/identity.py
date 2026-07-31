@@ -96,14 +96,15 @@ class GlobalIdentityManager:
         db: Session = SessionLocal()
         try:
             res_id = None
-            if license_plate:
-                plate_id = f"VEHICLE_{license_plate}"
+            if license_plate and str(license_plate).strip():
+                clean_plate = str(license_plate).strip().upper().replace(" ", "")
+                plate_id = f"VEHICLE_{clean_plate}"
                 db_id = db.query(GlobalIdentity).filter(GlobalIdentity.identity_uuid == plate_id).first()
                 if not db_id:
                     db_id = GlobalIdentity(
                         identity_uuid=plate_id,
                         type="vehicle",
-                        name=f"Vehicle {license_plate}",
+                        name=f"Vehicle {clean_plate}",
                         first_seen=datetime.datetime.utcnow(),
                         last_seen=datetime.datetime.utcnow()
                     )
