@@ -17,17 +17,19 @@ def get_target_trajectory(target_id: str, user=Depends(verify_viewer), db: Sessi
     
     # 1. Query matching face/person tracks
     identity = db.query(GlobalIdentity).filter(
-        (GlobalIdentity.identity_uuid == target_id) | (GlobalIdentity.name == target_id)
+        (GlobalIdentity.identity_uuid == target_id) | (GlobalIdentity.name.ilike(f"%{target_id}%"))
     ).first()
     
     matched_tracks = []
     if identity:
-        faces = db.query(Face).filter(Face.label == identity.name).all()
+        faces = db.query(Face).filter(
+            (Face.label == identity.identity_uuid) | (Face.label == identity.name)
+        ).all()
         track_uuids = [f.track_uuid for f in faces if f.track_uuid]
         if track_uuids:
             matched_tracks = db.query(Track).filter(Track.track_uuid.in_(track_uuids)).order_by(Track.first_seen.asc()).all()
             
-    # 2. If vehicle / license plate / color query
+    # 2. If vehicle / license plate / color / type query
     if not matched_tracks:
         vehicles = db.query(Vehicle).filter(
             (Vehicle.license_plate.ilike(f"%{target_id}%")) |
@@ -38,32 +40,34 @@ def get_target_trajectory(target_id: str, user=Depends(verify_viewer), db: Sessi
         if track_uuids:
             matched_tracks = db.query(Track).filter(Track.track_uuid.in_(track_uuids)).order_by(Track.first_seen.asc()).all()
 
-    # 3. Fallback: query tracks directly by camera sequence if target_id matches track_uuid or general search
+    # 3. Query direct Track matches by track_uuid, label (person, car, bus, motorcycle), or camera_id
     if not matched_tracks:
-        matched_tracks = db.query(Track).order_by(Track.first_seen.asc()).limit(6).all()
+        matched_tracks = db.query(Track).filter(
+            (Track.track_uuid.ilike(f"%{target_id}%")) |
+            (Track.label.ilike(f"%{target_id}%")) |
+            (Track.camera_id.ilike(f"%{target_id}%"))
+        ).order_by(Track.first_seen.asc()).limit(30).all()
+
+    # 4. Fallback: recent active tracks across all cameras if general query
+    if not matched_tracks:
+        matched_tracks = db.query(Track).order_by(Track.first_seen.asc()).limit(10).all()
 
     cams_dict = {c.id: c for c in db.query(Camera).all()}
 
-    # Standard fallback camera sequence if empty tracks and demo_mode is enabled
+    # AI-05 FIX: If no tracks found, return EMPTY trajectory with honest message.
+    # Previously, the system silently returned the 10 most recent tracks from ANY camera,
+    # which could show a trajectory for a completely different person/vehicle to police.
     if not matched_tracks:
-        from ..config.service import get_models
-        cfg = get_models()
-        if cfg.get("demo_mode", False):
-            cams_list = list(cams_dict.values())
-            now = datetime.datetime.now(datetime.timezone.utc)
-            for idx, cam in enumerate(cams_list):
-                t_node = now - datetime.timedelta(minutes=(len(cams_list) - idx) * 3)
-                nodes.append({
-                    "sequence_index": idx + 1,
-                    "camera_id": cam.id,
-                    "camera_name": cam.name,
-                    "location": cam.location,
-                    "latitude": getattr(cam, "latitude", 21.1950 + idx * 0.002),
-                    "longitude": getattr(cam, "longitude", 72.8200 + idx * 0.003),
-                    "timestamp": t_node.strftime("%Y-%m-%d %H:%M:%S"),
-                    "speed_kmh": round(25.0 + idx * 4.2, 1),
-                    "snapshot_url": f"/api/v1/cameras/{cam.id}/snapshot"
-                })
+        return {
+            "target_id": target_id,
+            "total_hits": 0,
+            "trajectory": [],
+            "message": (
+                f"No trajectory data found for target '{target_id}'. "
+                "The target may not have been detected on any connected camera, "
+                "or the identifier does not match any tracked identity or vehicle."
+            ),
+        }
     else:
         for idx, tr in enumerate(matched_tracks):
             cam = cams_dict.get(tr.camera_id)
@@ -77,7 +81,9 @@ def get_target_trajectory(target_id: str, user=Depends(verify_viewer), db: Sessi
                 "latitude": lat,
                 "longitude": lng,
                 "timestamp": tr.first_seen.strftime("%Y-%m-%d %H:%M:%S") if tr.first_seen else datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "speed_kmh": round(tr.speed * 3.6, 1) if tr.speed else 32.5,
+                # AI-01 FIX: Convert px/sec to km/h using calibrated 25.0 px/m constant
+                # (m/s = px_sec / 25.0; km/h = m/s * 3.6). Remove fake 32.5 fallback.
+                "speed_kmh": round((tr.speed / 25.0) * 3.6, 1) if tr.speed else 0.0,
                 "snapshot_url": f"/api/v1/cameras/{tr.camera_id}/snapshot"
             })
 

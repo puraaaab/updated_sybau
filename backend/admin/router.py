@@ -13,7 +13,7 @@ import datetime
 
 from ..database.connection import get_db
 from ..database.models import User, AuditLog
-from ..auth.helpers import verify_admin, get_password_hash
+from ..auth.helpers import verify_admin, get_password_hash, validate_password_strength
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -87,6 +87,11 @@ def create_user(
     if body.role not in ["admin", "operator", "viewer", "auditor"]:
         raise HTTPException(status_code=400, detail="Invalid role.")
 
+    # BUG-14 FIX: Enforce password strength policy for admin-created accounts
+    pwd_error = validate_password_strength(body.password)
+    if pwd_error:
+        raise HTTPException(status_code=400, detail=pwd_error)
+
     existing = db.query(User).filter(User.username == body.username).first()
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists.")
@@ -134,6 +139,10 @@ def update_user(
         changes.append(f"role -> {body.role}")
 
     if body.password is not None:
+        # BUG-20 FIX: Enforce password strength for admin-initiated password resets
+        pwd_error = validate_password_strength(body.password)
+        if pwd_error:
+            raise HTTPException(status_code=400, detail=pwd_error)
         target.password_hash = get_password_hash(body.password)
         changes.append("password reset")
 
@@ -170,7 +179,7 @@ def soft_delete_user(
     if target.username == current_user.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account.")
 
-    target.deleted_at = datetime.datetime.utcnow()
+    target.deleted_at = datetime.datetime.now(datetime.timezone.utc)
     target.status = "disabled"
 
     db.add(AuditLog(

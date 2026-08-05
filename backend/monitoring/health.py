@@ -9,6 +9,14 @@ from ..workers.ai_worker import active_ai_workers
 from ..recording.recorder import active_recorders
 
 
+def _qdrant_base_url() -> str:
+    host = os.getenv("QDRANT_HOST", "localhost")
+    port = os.getenv("QDRANT_PORT", "6333")
+    if "://" in host:
+        return host
+    return f"http://{host}:{port}"
+
+
 def _get_storage_root() -> str:
     """Return the appropriate filesystem root for disk usage on any platform."""
     if sys.platform.startswith("win"):
@@ -42,28 +50,61 @@ def get_system_vitals() -> dict:
 
 
 def _get_gpu_stats() -> dict:
-    """Try GPUtil for real GPU stats; return simulated values if unavailable."""
+    """
+    PRES-05 FIX: Returns real GPU stats or clearly marks as unavailable.
+    Priority order:
+      1. pynvml (NVIDIA Management Library) — most accurate
+      2. PyTorch CUDA memory info — works if torch is loaded
+      3. 'GPU_UNAVAILABLE' status — honest, not simulated
+    """
+    # Attempt pynvml (requires pynvml package)
     try:
-        import GPUtil
-        gpus = GPUtil.getGPUs()
-        if gpus:
-            g = gpus[0]
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        name = pynvml.nvmlDeviceGetName(handle)
+        if isinstance(name, bytes):
+            name = name.decode("utf-8")
+        utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        pynvml.nvmlShutdown()
+        return {
+            "name": name,
+            "source": "pynvml",
+            "utilization": float(utilization.gpu),
+            "vram_used_mb": round(mem_info.used / 1024 / 1024, 1),
+            "vram_total_mb": round(mem_info.total / 1024 / 1024, 1),
+        }
+    except Exception:
+        pass
+
+    # Attempt PyTorch CUDA memory stats
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device = torch.cuda.current_device()
+            props = torch.cuda.get_device_properties(device)
+            mem_allocated = torch.cuda.memory_allocated(device)
+            mem_reserved = torch.cuda.memory_reserved(device)
             return {
-                "name": g.name,
-                "utilization": g.load * 100,
-                "vram_used_mb": g.memoryUsed,
-                "vram_total_mb": g.memoryTotal,
+                "name": props.name,
+                "source": "torch_cuda",
+                "utilization": None,  # PyTorch doesn't expose GPU compute utilization
+                "vram_used_mb": round(mem_allocated / 1024 / 1024, 1),
+                "vram_reserved_mb": round(mem_reserved / 1024 / 1024, 1),
+                "vram_total_mb": round(props.total_memory / 1024 / 1024, 1),
             }
     except Exception:
         pass
 
-    # Simulation fallback (displayed when no GPU or GPUtil not installed)
-    workers_active = len(active_ai_workers) > 0
+    # PRES-05 FIX: No GPU found or monitoring unavailable — honest response, not simulated
     return {
-        "name": "NVIDIA GeForce RTX 4060 Laptop GPU (simulated)",
-        "utilization": 42.0 if workers_active else 0.0,
-        "vram_used_mb": 2450.0 if workers_active else 0.0,
-        "vram_total_mb": 8192.0,
+        "name": "GPU_UNAVAILABLE",
+        "source": "none",
+        "utilization": None,
+        "vram_used_mb": None,
+        "vram_total_mb": None,
+        "note": "Install pynvml for NVIDIA GPU monitoring. CUDA not detected.",
     }
 
 
@@ -85,7 +126,7 @@ def get_services_health() -> dict:
     qd_status = "offline"
     try:
         from qdrant_client import QdrantClient
-        client = QdrantClient("http://localhost:6333", timeout=0.5)
+        client = QdrantClient(_qdrant_base_url(), timeout=0.5)
         client.get_collections()
         qd_status = "online"
     except Exception:
@@ -152,7 +193,7 @@ def get_full_health_report() -> dict:
         })
 
     return {
-        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "system_vitals": vitals,
         "services": services,
         "cameras": camera_health,

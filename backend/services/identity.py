@@ -53,7 +53,7 @@ class GlobalIdentityManager:
             if best_match:
                 db_id = db.query(GlobalIdentity).filter(GlobalIdentity.identity_uuid == best_match).first()
                 if db_id:
-                    db_id.last_seen = datetime.datetime.utcnow()
+                    db_id.last_seen = datetime.datetime.now(datetime.timezone.utc)
                     db.commit()
                     res_id = db_id.identity_uuid
             else:
@@ -63,8 +63,8 @@ class GlobalIdentityManager:
                     identity_uuid=new_id,
                     type="person",
                     name=f"Person {short_uuid}",
-                    first_seen=datetime.datetime.utcnow(),
-                    last_seen=datetime.datetime.utcnow()
+                    first_seen=datetime.datetime.now(datetime.timezone.utc),
+                    last_seen=datetime.datetime.now(datetime.timezone.utc)
                 )
                 db.add(db_id)
                 db.commit()
@@ -105,12 +105,12 @@ class GlobalIdentityManager:
                         identity_uuid=plate_id,
                         type="vehicle",
                         name=f"Vehicle {clean_plate}",
-                        first_seen=datetime.datetime.utcnow(),
-                        last_seen=datetime.datetime.utcnow()
+                        first_seen=datetime.datetime.now(datetime.timezone.utc),
+                        last_seen=datetime.datetime.now(datetime.timezone.utc)
                     )
                     db.add(db_id)
                 else:
-                    db_id.last_seen = datetime.datetime.utcnow()
+                    db_id.last_seen = datetime.datetime.now(datetime.timezone.utc)
                 db.commit()
                 res_id = plate_id
             else:
@@ -142,7 +142,7 @@ class GlobalIdentityManager:
                 if best_match:
                     db_id = db.query(GlobalIdentity).filter(GlobalIdentity.identity_uuid == best_match).first()
                     if db_id:
-                        db_id.last_seen = datetime.datetime.utcnow()
+                        db_id.last_seen = datetime.datetime.now(datetime.timezone.utc)
                         db.commit()
                         res_id = db_id.identity_uuid
 
@@ -153,8 +153,8 @@ class GlobalIdentityManager:
                         identity_uuid=new_id,
                         type="vehicle",
                         name=f"Vehicle {short_uuid}",
-                        first_seen=datetime.datetime.utcnow(),
-                        last_seen=datetime.datetime.utcnow()
+                        first_seen=datetime.datetime.now(datetime.timezone.utc),
+                        last_seen=datetime.datetime.now(datetime.timezone.utc)
                     )
                     db.add(db_id)
                     db.commit()

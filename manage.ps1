@@ -10,19 +10,36 @@ $ProjectRoot = $PSScriptRoot
 # Path to the project's virtual environment Python executable
 $VenvPython = "$ProjectRoot\.venv\Scripts\python.exe"
 
+function Test-DockerAvailable {
+    try {
+        $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c docker info >nul 2>&1" -WindowStyle Hidden -PassThru
+        if (-not $p.WaitForExit(3000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        return ($p.ExitCode -eq 0)
+    } catch {
+        return $false
+    }
+}
+
 function Stop-VMS {
     Write-Host "Stopping Sybau VMS Services..." -ForegroundColor Yellow
 
-    # 1. Stop Docker
-    Write-Host "  Stopping Docker containers..."
-    Set-Location $ProjectRoot
-    & docker-compose down --remove-orphans 2>&1 | ForEach-Object { if ($_ -notmatch 'level=warning') { Write-Host $_ } }
-    Start-Sleep -Seconds 2
+    # 1. Stop Docker (if daemon is responding)
+    if (Test-DockerAvailable) {
+        Write-Host "  Stopping Docker containers..."
+        Set-Location $ProjectRoot
+        cmd.exe /c "docker compose down --remove-orphans"
+    } else {
+        Write-Host "  Docker daemon unresponsive or stopped - skipping container teardown." -ForegroundColor Yellow
+    }
+    Start-Sleep -Seconds 1
 
     # 2. Kill Uvicorn (Backend)
     Write-Host "  Stopping Python backend (uvicorn)..."
     $pythonProcs = Get-CimInstance Win32_Process | Where-Object {
-        $_.Name -eq 'python.exe' -and $_.CommandLine -match 'uvicorn'
+        $_.Name -eq 'python.exe' -and ($_.CommandLine -match 'uvicorn' -or $_.CommandLine -match 'backend.main')
     }
     foreach ($proc in $pythonProcs) {
         Write-Host "    Killing Backend PID: $($proc.ProcessId)"
@@ -56,54 +73,77 @@ function Stop-VMS {
 function Start-VMS {
     Write-Host "Starting Sybau VMS Services..." -ForegroundColor Cyan
 
-    # 1. Start Docker Infrastructure (PostgreSQL, Qdrant, MediaMTX, MinIO, Kafka)
-    Write-Host "  Starting Docker infrastructure containers..."
-    Set-Location $ProjectRoot
-    & docker-compose up -d postgres qdrant mediamtx minio zookeeper kafka 2>&1 | ForEach-Object { if ($_ -notmatch 'level=warning') { Write-Host $_ } }
-    $global:LASTEXITCODE = 0
-    Write-Host "  Waiting for services to be ready..."
-    Start-Sleep -Seconds 5
+    # 1. Create required directories
+    $LogsDir = "$ProjectRoot\logs"
+    if (-not (Test-Path $LogsDir)) {
+        New-Item -ItemType Directory -Path $LogsDir | Out-Null
+    }
 
-    # 2. Seed RTSP Cameras
+    $StorageDirs = @(
+        "$ProjectRoot\storage\recordings",
+        "$ProjectRoot\storage\snapshots",
+        "$ProjectRoot\storage\exports",
+        "$ProjectRoot\storage\temp"
+    )
+    foreach ($dir in $StorageDirs) {
+        if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+    }
+
+    # 2. Start Docker Infrastructure if available
+    if (Test-DockerAvailable) {
+        Write-Host "  Starting Docker infrastructure containers..."
+        Set-Location $ProjectRoot
+        cmd.exe /c "docker compose up -d postgres qdrant mediamtx minio zookeeper kafka"
+        Write-Host "  Waiting for infrastructure services..."
+        Start-Sleep -Seconds 8
+    } else {
+        Write-Host "  Docker Desktop daemon not responding - system using local fallback database." -ForegroundColor Yellow
+    }
+
+    # 3. Seed RTSP Cameras in Database
     Write-Host "  Seeding RTSP Cameras in Database..."
     & $VenvPython .\backend\scripts\seed_rtsp_cams.py
 
-    # Create logs directory
-    $LogsDir = "$ProjectRoot\logs"
-    if (-not (Test-Path $LogsDir)) { New-Item -ItemType Directory -Path $LogsDir | Out-Null }
-
-    # 3. Start Backend — stdout+stderr merged into backend.log via cmd.exe redirection (prevents PowerShell stderr wrapping)
+    # 4. Start Backend (uvicorn)
     Write-Host "  Starting Backend server (uvicorn + venv)... (Logging to logs\backend.log)"
-    $bCmd = "/c cd /d `"$ProjectRoot`" && `"$VenvPython`" -u -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 > `"$LogsDir\backend.log`" 2>&1"
+    $bCmd = "/c cd /d `"$ProjectRoot`" && `"$VenvPython`" -u -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --no-access-log > `"$LogsDir\backend.log`" 2>&1"
     Start-Process cmd.exe -ArgumentList $bCmd -WindowStyle Hidden
 
-    # 4. Start Frontend — stdout+stderr merged into frontend.log
+    # 5. Start Frontend (Vite)
     Write-Host "  Starting Frontend server (Vite)... (Logging to logs\frontend.log)"
     $fCmd = "/c cd /d `"$ProjectRoot\frontend`" && npm run dev > `"$LogsDir\frontend.log`" 2>&1"
     Start-Process cmd.exe -ArgumentList $fCmd -WindowStyle Hidden
 
-    # 5. Start NVR Emulator — stdout+stderr (incl. all FFmpeg camera output) merged into nvr.log
+    # 6. Start NVR Emulator (FFmpeg stream loop)
     Write-Host "  Starting NVR Emulator (FFmpeg stream loop)... (Logging to logs\nvr.log)"
     $nCmd = "/c cd /d `"$ProjectRoot`" && `"$VenvPython`" -u backend\scripts\nvr_emulator.py > `"$LogsDir\nvr.log`" 2>&1"
     Start-Process cmd.exe -ArgumentList $nCmd -WindowStyle Hidden
 
-    # 6. Wait for backend to be ready — polls /docs up to 120s
+    # 7. Wait for backend to be ready
     Write-Host "  Waiting for backend to respond..."
     $backendReady = $false
     $attempts = 0
-    while (-not $backendReady -and $attempts -lt 60) {
+    while (-not $backendReady -and $attempts -lt 40) {
         Start-Sleep -Seconds 2
         $attempts++
         try {
-            $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/docs" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-            if ($r.StatusCode -eq 200) { $backendReady = $true }
-        } catch { }
-        if ($attempts % 5 -eq 0) { Write-Host "    Still waiting for response... ($($attempts * 2)s elapsed)" }
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/docs" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+            if ($r.StatusCode -eq 200) {
+                $backendReady = $true
+            }
+        } catch {
+            # Backend warming up on startup
+        }
+        if ($attempts % 5 -eq 0) {
+            Write-Host "    Backend initialization progress... ($($attempts * 2)s elapsed)"
+        }
     }
     if ($backendReady) {
         Write-Host "  Backend ready! ($($attempts * 2)s)" -ForegroundColor Green
     } else {
-        Write-Host "  WARNING: Backend did not respond in 120s - check logs\backend.log" -ForegroundColor Yellow
+        Write-Host "  WARNING: Backend did not respond in 80s - check logs\backend.log" -ForegroundColor Yellow
     }
 
     Write-Host ""

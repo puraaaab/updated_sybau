@@ -8,11 +8,7 @@ from backend.database.models import Camera
 from sqlalchemy import text
 
 # Ensure database tables exist & migrate missing columns
-# Base.metadata.create_all(bind=engine)
-# with engine.connect() as conn:
-#     conn.execute(text("ALTER TABLE cameras ADD COLUMN IF NOT EXISTS latitude FLOAT DEFAULT 21.1702;"))
-#     conn.execute(text("ALTER TABLE cameras ADD COLUMN IF NOT EXISTS longitude FLOAT DEFAULT 72.8311;"))
-#     conn.commit()
+Base.metadata.create_all(bind=engine)
 
 
 from backend.database.models import Camera, User

@@ -1,6 +1,7 @@
 import logging
 import uuid
 import threading
+import torch
 import numpy as np
 import cv2
 from PIL import Image
@@ -14,14 +15,14 @@ _person_cache = {}
 _person_cache_lock = threading.Lock()
 
 COLOR_MAP = {
-    "red": ([0, 100, 100], [10, 255, 255]),
-    "red2": ([170, 100, 100], [180, 255, 255]),
-    "blue": ([100, 150, 0], [140, 255, 255]),
-    "green": ([35, 100, 100], [85, 255, 255]),
-    "yellow": ([20, 100, 100], [35, 255, 255]),
-    "white": ([0, 0, 200], [180, 30, 255]),
-    "black": ([0, 0, 0], [180, 255, 50]),
-    "gray": ([0, 0, 50], [180, 50, 200])
+    "red": ([0, 70, 50], [10, 255, 255]),
+    "red2": ([165, 70, 50], [180, 255, 255]),
+    "blue": ([90, 50, 50], [135, 255, 255]),
+    "green": ([35, 50, 50], [85, 255, 255]),
+    "yellow": ([15, 70, 70], [35, 255, 255]),
+    "white": ([0, 0, 180], [180, 45, 255]),
+    "black": ([0, 0, 0], [180, 255, 60]),
+    "gray": ([0, 0, 60], [180, 45, 180])
 }
 
 
@@ -39,11 +40,11 @@ def _get_clip_model():
             try:
                 import torch
                 from sentence_transformers import SentenceTransformer
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                logger.info(f"Loading OpenCLIP vision model (clip-ViT-B-32) on {device}...")
-                _clip_model = SentenceTransformer("clip-ViT-B-32", device=device)
+                device = cfg.get("person", {}).get("device", "cpu")
+                logger.info(f"Loading OpenCLIP vision model (clip-ViT-L-14) on {device}...")
+                _clip_model = SentenceTransformer("clip-ViT-L-14", device=device)
             except Exception as e:
-                logger.warning(f"Could not load SentenceTransformer clip-ViT-B-32: {e}")
+                logger.warning(f"Could not load SentenceTransformer clip-ViT-L-14: {e}")
                 _clip_model = None
 
     return _clip_model
@@ -90,7 +91,7 @@ def extract_dominant_colors(crop_bgr: np.ndarray) -> dict:
                     max_pixels = cnt
                     best_color = "red" if color_name == "red2" else color_name
 
-            return best_color if (max_pixels / float(total_pixels)) > 0.15 else "unknown"
+            return best_color if (max_pixels / float(total_pixels)) > 0.10 else "unknown"
 
         return {
             "upper_color": get_color(upper_region),
@@ -98,6 +99,7 @@ def extract_dominant_colors(crop_bgr: np.ndarray) -> dict:
         }
     except Exception:
         return {"upper_color": "unknown", "lower_color": "unknown"}
+
 
 
 def process_person_crops(frame: np.ndarray, tracks: list, max_crop_embeddings: int = 25) -> list:
@@ -127,6 +129,9 @@ def process_person_crops(frame: np.ndarray, tracks: list, max_crop_embeddings: i
     for p in person_tracks_sorted[:max_crop_embeddings]:
         bbox = p.get("bbox", [])
         if len(bbox) < 4:
+            continue
+
+        if any(np.isnan(b) for b in bbox[:4]):
             continue
 
         x1 = max(0, int(bbox[0]))
@@ -163,12 +168,12 @@ def process_person_crops(frame: np.ndarray, tracks: list, max_crop_embeddings: i
         else:
             colors = extract_dominant_colors(crop)
             vec = None
-            crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(crop_rgb)
-
             if model is not None:
                 try:
-                    vec = model.encode(pil_img).tolist()
+                    crop_rgb = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), (224, 224))
+                    pil_img = Image.fromarray(crop_rgb)
+                    with torch.inference_mode():
+                        vec = model.encode(pil_img, show_progress_bar=False).tolist()
                 except Exception as e:
                     logger.warning(f"CLIP encoding error for person crop: {e}")
 

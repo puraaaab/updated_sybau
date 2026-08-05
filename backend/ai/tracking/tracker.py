@@ -22,7 +22,7 @@ class TrajectoryTracker:
         Returns:
             Updated tracks dictionary containing path history and speed.
         """
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
         updated_detections = []
 
         with self._lock:

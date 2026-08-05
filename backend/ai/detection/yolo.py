@@ -3,6 +3,15 @@ from typing import List, Dict, Any
 
 import numpy as np
 import torch
+import torch.nn as nn
+
+# Patch nn.Module.__delattr__ to safely ignore missing 'bn' attributes during Ultralytics model fusion (YOLO26l / YOLOv10)
+_orig_delattr = nn.Module.__delattr__
+def _safe_delattr(self, name):
+    if name == "bn" and not hasattr(self, "bn"):
+        return
+    _orig_delattr(self, name)
+nn.Module.__delattr__ = _safe_delattr
 
 from ...config.service import get_models
 from ..model_manager import model_manager
@@ -37,23 +46,24 @@ def _confidence_threshold() -> float:
 def _parse_result_boxes(result) -> List[Dict[str, Any]]:
     detections: List[Dict[str, Any]] = []
     boxes = getattr(result, "boxes", None)
-    if boxes is None or len(boxes) == 0 or not hasattr(boxes, "id") or boxes.id is None:
+    if boxes is None or len(boxes) == 0:
         return detections
 
     try:
         xyxy_list = boxes.xyxy.cpu().numpy()
         cls_list = boxes.cls.cpu().numpy()
         conf_list = boxes.conf.cpu().numpy()
-        id_list = boxes.id.cpu().numpy()
+        id_list = boxes.id.cpu().numpy() if hasattr(boxes, "id") and boxes.id is not None else np.arange(len(cls_list))
     except Exception:
         logger.exception("Failed to convert YOLO boxes tensors to CPU numpy arrays.")
         return detections
 
-    for i, track_id in enumerate(id_list):
-        if np.isnan(track_id) or track_id < 0:
-            continue
-        if i >= len(cls_list) or i >= len(conf_list) or i >= len(xyxy_list):
+    for i in range(len(xyxy_list)):
+        if i >= len(cls_list) or i >= len(conf_list):
             break
+        track_id = id_list[i] if i < len(id_list) else i + 1
+        if np.isnan(track_id) or track_id < 0:
+            track_id = i + 1
         cls_id = int(cls_list[i])
         class_name = COCO_CLASSES.get(cls_id)
         if class_name is None:
@@ -69,20 +79,37 @@ def _parse_result_boxes(result) -> List[Dict[str, Any]]:
 
 def detect_and_track(frame: np.ndarray):
     """Executes YOLO tracking on one camera frame."""
+    yolo_model = None
+    device_target = "cuda" if torch.cuda.is_available() else "cpu"
     try:
         yolo_model = model_manager.get_yolo()
-        device_target = "cuda" if torch.cuda.is_available() else "cpu"
         results = yolo_model.track(
             frame,
             persist=True,
             tracker="bytetrack.yaml",
+            imgsz=640,
             classes=COCO_CLASS_IDS,
             conf=_confidence_threshold(),
             device=device_target,
             verbose=False,
         )
     except Exception:
-        logger.exception("YOLO track() failed for this frame; skipping.")
+        logger.warning("YOLO track() failed for this frame; falling back to plain predict.")
+        try:
+            if yolo_model is None:
+                return []
+            results = yolo_model.predict(
+                frame,
+                imgsz=640,
+                classes=COCO_CLASS_IDS,
+                conf=_confidence_threshold(),
+                device=device_target,
+                verbose=False,
+            )
+            if results:
+                return _parse_result_boxes(results[0])
+        except Exception:
+            pass
         return []
 
     if not results:
@@ -116,6 +143,7 @@ def detect_and_track_batch(
             frames_to_process,
             persist=True,
             tracker="bytetrack.yaml",
+            imgsz=960,
             classes=COCO_CLASS_IDS,
             conf=_confidence_threshold(),
             verbose=False,

@@ -41,12 +41,6 @@ def get_face_models(width=640, height=480):
                 0.3,
                 100
             )
-            if hasattr(cv2, 'cuda') and cv2.cuda.getCudaEnabledDeviceCount() > 0:
-                try:
-                    det.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-                    det.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-                except Exception:
-                    pass
             _detectors[key] = det
         detector = _detectors[key]
             
@@ -55,12 +49,6 @@ def get_face_models(width=640, height=480):
                 SFACE_PATH,
                 ""
             )
-            if hasattr(cv2, 'cuda') and cv2.cuda.getCudaEnabledDeviceCount() > 0:
-                try:
-                    rec.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-                    rec.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-                except Exception:
-                    pass
             _recognizer = rec
         return detector, _recognizer
 

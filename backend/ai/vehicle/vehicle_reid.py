@@ -26,20 +26,23 @@ def get_reid_model():
     global _reid_model, _preprocess, _device
     if _reid_model is None:
         with _reid_lock:
-            if _reid_model is None:
-                _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                logger.info(f"[VehicleReID] Initializing MobileNetV3-Small on {_device} for feature extraction...")
-                weights = models.MobileNet_V3_Small_Weights.DEFAULT
-                model = models.mobilenet_v3_small(weights=weights)
-                model.classifier = torch.nn.Identity()
-                model.eval()
-                _reid_model = model.to(_device)
+            if _reid_model is not None:
+                return _reid_model, _preprocess, _device
 
-                _preprocess = transforms.Compose([
-                    transforms.Resize((224, 224)),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-                ])
+            cfg = get_models()
+            _device = torch.device(cfg.get("vehicle", {}).get("device", "cpu"))
+            logger.info(f"[VehicleReID] Initializing MobileNetV3-Small on {_device} for feature extraction...")
+            weights = models.MobileNet_V3_Small_Weights.DEFAULT
+            model = models.mobilenet_v3_small(weights=weights)
+            model.classifier = torch.nn.Identity()
+            model.eval()
+            _reid_model = model.to(_device)
+
+            _preprocess = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
     return _reid_model, _preprocess, _device
 
 
@@ -169,6 +172,14 @@ def detect_vehicle_color(crop: np.ndarray) -> str:
         return "unknown"
 
 
+def detect_crop_color(crop: np.ndarray) -> str:
+    """
+    Extracts dominant color for any object crop (vehicles, motorcycles, bags, etc.).
+    """
+    return detect_vehicle_color(crop)
+
+
+
 def process_vehicles(frame: np.ndarray, detections: list) -> list:
     """
     Identifies vehicles, extracts license plate crops (prioritizing YOLO license_plate boxes),
@@ -268,7 +279,8 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
     valid_indices = [i for i, t in enumerate(tensors_list) if t is not None]
     if valid_indices and reid_model is not None:
         try:
-            batch_tensor = torch.stack([tensors_list[i] for i in valid_indices]).to(device)
+            model_dtype = next(reid_model.parameters()).dtype
+            batch_tensor = torch.stack([tensors_list[i] for i in valid_indices]).to(device=device, dtype=model_dtype)
             with torch.no_grad():
                 features = reid_model(batch_tensor)  # shape: (B, 576)
                 features_np = features.cpu().numpy()
@@ -305,12 +317,18 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
                     for img_variant in [binarized, binarized_inv, gray_enhanced]:
                         try:
                             if ocr_type == "paddleocr":
+                                # PaddleOCR 2.x: cls=False skips text direction classification
                                 pd_res = reader.ocr(img_variant, cls=False)
                                 res = []
-                                if pd_res and pd_res[0]:
-                                    for sub in pd_res[0]:
-                                        bbox_coords, (txt, conf) = sub
-                                        res.append((bbox_coords, txt, float(conf)))
+                                # 2.x returns [[[bbox, (txt, conf)], ...]] — one list per image
+                                page = pd_res[0] if pd_res else None
+                                if page:
+                                    for sub in page:
+                                        if sub and len(sub) == 2:
+                                            bbox_coords, rec = sub
+                                            if isinstance(rec, (list, tuple)) and len(rec) == 2:
+                                                txt, conf = rec
+                                                res.append((bbox_coords, str(txt), float(conf)))
                             else:
                                 res = reader.readtext(
                                     img_variant,
@@ -341,6 +359,8 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
                         if target_text and avg_conf > best_conf:
                             best_text = target_text
                             best_conf = avg_conf
+                            if best_conf >= 0.70:
+                                break
 
                     if best_text:
                         plate_text = best_text

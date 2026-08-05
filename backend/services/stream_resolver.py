@@ -68,9 +68,46 @@ def resolve_stream_url(camera_id: str, raw_url: str) -> str | None:
     if not raw_url:
         return None
 
+    # ── ONVIF / NVR URI Resolver ──────────────────────────────────────────
+    lower_url = raw_url.lower()
+    if lower_url.startswith("onvif://"):
+        # Format: onvif://username:password@ip:port/profile
+        from .onvif_discovery import onvif_media_client
+        try:
+            # Parse credentials and target host
+            parts = raw_url[8:].split("@", 1)
+            creds = parts[0].split(":", 1) if "@" in raw_url else ["", ""]
+            host_part = parts[1] if "@" in raw_url else parts[0]
+            ip_port = host_part.split("/")[0].split(":")
+            ip = ip_port[0]
+            port = int(ip_port[1]) if len(ip_port) > 1 else 80
+            return f"rtsp://{creds[0]}:{creds[1]}@{ip}:554/Streaming/Channels/101" if creds[0] else f"rtsp://{ip}:554/live/ch0"
+        except Exception:
+            return raw_url
+
+    if lower_url.startswith("nvr://"):
+        # Format: nvr://vendor:user:pass@ip:port/channel
+        from .nvr_adapter import nvr_adapter
+        try:
+            # Parse nvr://hikvision:admin:pass@192.168.1.100:554/1
+            parts = raw_url[6:].split("@", 1)
+            meta = parts[0].split(":")
+            vendor = meta[0]
+            user = meta[1] if len(meta) > 1 else None
+            pwd = meta[2] if len(meta) > 2 else None
+            host_chan = parts[1].split("/")
+            ip_port = host_chan[0].split(":")
+            ip = ip_port[0]
+            port = int(ip_port[1]) if len(ip_port) > 1 else 554
+            channel = int(host_chan[1]) if len(host_chan) > 1 else 1
+            return nvr_adapter.build_channel_url(vendor, ip, port, channel, user, pwd)
+        except Exception:
+            return raw_url
+
     # ── RTSP / direct HTTP(S) / HLS / local video files ──────────────────
     if not is_youtube_url(raw_url):
         return raw_url
+
 
     # ── YouTube Live adapter ─────────────────────────────────────────────
     now = time.time()

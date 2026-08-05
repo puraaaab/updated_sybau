@@ -17,6 +17,7 @@ class BehaviorEngine:
     def check_behaviors(self, tracks: list, zones: list, alerts_cfg: dict, frame_width: float = 1920.0, frame_height: float = 1080.0) -> list:
         """
         Orchestrates all behavior checks on the active object tracks.
+        Each check only runs if explicitly enabled in alerts_cfg (e.g. {"loitering": {"enabled": true, ...}}).
 
         Args:
             tracks:       Active detection+tracking results for this frame.
@@ -34,71 +35,86 @@ class BehaviorEngine:
         # Cleanup loitering stale tracks
         self.loitering_detector.cleanup_stale_tracks(active_track_ids)
 
-        # 1. Check loitering threshold
-        loitering_sec = alerts_cfg.get("loitering", {}).get("time_threshold_seconds", 10.0)
+        loitering_cfg  = alerts_cfg.get("loitering", {})  if isinstance(alerts_cfg, dict) else {}
+        running_cfg    = alerts_cfg.get("running", {})    if isinstance(alerts_cfg, dict) else {}
+        crowd_cfg      = alerts_cfg.get("crowd", {})      if isinstance(alerts_cfg, dict) else {}
+        restricted_cfg = alerts_cfg.get("restricted", {}) if isinstance(alerts_cfg, dict) else {}
+        wdir_cfg       = alerts_cfg.get("wrong_direction", {}) if isinstance(alerts_cfg, dict) else {}
+        abandoned_cfg  = alerts_cfg.get("abandoned", {})  if isinstance(alerts_cfg, dict) else {}
 
-        # 2. Check running threshold
-        running_speed = alerts_cfg.get("running", {}).get("speed_threshold_pixels_per_second", 150.0)
+        loitering_enabled  = loitering_cfg.get("enabled", False)
+        running_enabled    = running_cfg.get("enabled", False)
+        crowd_enabled      = crowd_cfg.get("enabled", False)
+        restricted_enabled = restricted_cfg.get("enabled", False)
+        wdir_enabled       = wdir_cfg.get("enabled", False)
+        abandoned_enabled  = abandoned_cfg.get("enabled", False)
 
-        # 3. Check crowd density
-        crowd_limit = alerts_cfg.get("crowd", {}).get("density_threshold", 5)
+        loitering_sec  = loitering_cfg.get("time_threshold_seconds", 10.0)
+        running_speed  = running_cfg.get("speed_threshold_pixels_per_second", 150.0)
+        crowd_limit    = crowd_cfg.get("density_threshold", 5)
 
         # Run individual track checks
         for track in tracks:
             # A. Restricted Area Check
-            res_trigger, res_msg = self.restricted_detector.check(track, zones, frame_width, frame_height)
-            if res_trigger:
-                triggered_alerts.append({
-                    "type": "restricted",
-                    "message": res_msg,
-                    "severity": "high"
-                })
+            if restricted_enabled:
+                res_trigger, res_msg = self.restricted_detector.check(track, zones, frame_width, frame_height)
+                if res_trigger:
+                    triggered_alerts.append({
+                        "type": "restricted",
+                        "message": res_msg,
+                        "severity": "high"
+                    })
 
             # B. Loitering Area Check
-            loit_trigger, loit_msg = self.loitering_detector.check(track, zones, loitering_sec, frame_width, frame_height)
-            if loit_trigger:
-                triggered_alerts.append({
-                    "type": "loitering",
-                    "message": loit_msg,
-                    "severity": "medium"
-                })
+            if loitering_enabled:
+                loit_trigger, loit_msg = self.loitering_detector.check(track, zones, loitering_sec, frame_width, frame_height)
+                if loit_trigger:
+                    triggered_alerts.append({
+                        "type": "loitering",
+                        "message": loit_msg,
+                        "severity": "medium"
+                    })
 
             # C. Running Check
-            run_trigger, run_msg = self.running_detector.check(track, running_speed)
-            if run_trigger:
-                triggered_alerts.append({
-                    "type": "running",
-                    "message": run_msg,
-                    "severity": "low"
-                })
+            if running_enabled:
+                run_trigger, run_msg = self.running_detector.check(track, running_speed)
+                if run_trigger:
+                    triggered_alerts.append({
+                        "type": "running",
+                        "message": run_msg,
+                        "severity": "low"
+                    })
 
             # D. Wrong Direction Line Crossing Check
-            wdir_trigger, wdir_msg = self.wrong_direction_detector.check(track, zones)
-            if wdir_trigger:
-                triggered_alerts.append({
-                    "type": "wrong_direction",
-                    "message": wdir_msg,
-                    "severity": "high"
-                })
+            if wdir_enabled:
+                wdir_trigger, wdir_msg = self.wrong_direction_detector.check(track, zones)
+                if wdir_trigger:
+                    triggered_alerts.append({
+                        "type": "wrong_direction",
+                        "message": wdir_msg,
+                        "severity": "high"
+                    })
 
         # 4. Crowd Density Checks (Zone-wide / Global)
-        crowd_alerts = self.crowd_detector.check(tracks, zones, crowd_limit, frame_width, frame_height)
-        for trig, msg in crowd_alerts:
-            if trig:
-                triggered_alerts.append({
-                    "type": "crowd",
-                    "message": msg,
-                    "severity": "medium"
-                })
+        if crowd_enabled:
+            crowd_alerts = self.crowd_detector.check(tracks, zones, crowd_limit, frame_width, frame_height)
+            for trig, msg in crowd_alerts:
+                if trig:
+                    triggered_alerts.append({
+                        "type": "crowd",
+                        "message": msg,
+                        "severity": "medium"
+                    })
 
         # 5. Abandoned Object Check
-        ab_trig, ab_msg = self.abandoned_detector.check(tracks)
-        if ab_trig:
-            triggered_alerts.append({
-                "type": "abandoned",
-                "message": ab_msg,
-                "severity": "high"
-            })
+        if abandoned_enabled:
+            ab_trig, ab_msg = self.abandoned_detector.check(tracks)
+            if ab_trig:
+                triggered_alerts.append({
+                    "type": "abandoned",
+                    "message": ab_msg,
+                    "severity": "high"
+                })
 
         return triggered_alerts
 

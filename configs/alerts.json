@@ -1,11 +1,23 @@
 {
   "loitering": {
+    "enabled": false,
     "time_threshold_seconds": 10.0
   },
   "crowd": {
+    "enabled": false,
     "density_threshold": 5
   },
   "running": {
+    "enabled": false,
     "speed_threshold_pixels_per_second": 150.0
+  },
+  "restricted": {
+    "enabled": false
+  },
+  "wrong_direction": {
+    "enabled": false
+  },
+  "abandoned": {
+    "enabled": false
   }
 }

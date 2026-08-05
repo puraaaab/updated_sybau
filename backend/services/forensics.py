@@ -41,7 +41,7 @@ def get_forensic_exports_ledger(user=Depends(verify_viewer), db: Session = Depen
             "role": "operator",
             "timestamp": log.timestamp.isoformat(),
             "sha256_hash": sha,
-            "timestamp_authority": "DigiCert Public TSA",
+            "timestamp_authority": "VMS Server Internal (NTP-synced UTC)",  # Honest: not a 3rd-party TSA
             "mp4_download_url": f"/api/v1/forensics/download/{zip_file}" if zip_file else None,
             "sidecar_download_url": f"/api/v1/forensics/download/{zip_file}" if zip_file else None
         })
@@ -53,6 +53,8 @@ def create_forensic_export(
     camera_id: str = Query(...),
     duration_seconds: int = Query(default=10),
     archive_clip_url: str = Query(default=None),
+    redact_faces: bool = Query(default=False),
+    redact_plates: bool = Query(default=False),
     user=Depends(verify_operator),
     db: Session = Depends(get_db)
 ):
@@ -70,6 +72,13 @@ def create_forensic_export(
         if files:
             target_video = os.path.join(cam_rec_dir, files[-1])
             
+    if not target_video and os.path.exists(RECORDINGS_DIR):
+        for root, dirs, files in os.walk(RECORDINGS_DIR):
+            mp4s = [f for f in files if f.endswith(".mp4")]
+            if mp4s:
+                target_video = os.path.join(root, mp4s[-1])
+                break
+                
     export_id = str(uuid.uuid4())[:8]
     zip_filename = f"evidence_{camera_id}_{export_id}.zip"
     zip_path = os.path.join(EXPORT_DIR, zip_filename)
@@ -103,12 +112,15 @@ def create_forensic_export(
             shutil.rmtree(temp_dir)
             
     # Write audit log
-    db.add(AuditLog(
-        username=user.username,
+    from ..utils.audit import log_audit_event
+    ip = getattr(user, "_client_ip", None)
+    log_audit_event(
+        db,
         action="EVIDENCE_EXPORT",
-        detail=f"{cam_name}|{sha_hash}|{zip_filename}"
-    ))
-    db.commit()
+        detail=f"{cam_name}|{sha_hash}|{zip_filename}",
+        username=user.username,
+        ip_address=ip,
+    )
     
     return {
         "message": "Forensic evidence compiled successfully.",

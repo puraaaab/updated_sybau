@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Box, Typography, Grid, Paper, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Select, MenuItem, InputLabel, FormControl, Slider, Alert
 } from '@mui/material';
@@ -120,13 +120,19 @@ export default function ForensicsManager({ role, token }) {
                 />
               </Box>
 
+              {exporting && (
+                <Alert severity="info" icon={<SyncIcon sx={{ animation: 'spin 2s linear infinite' }} />}>
+                  Compiling clip & computing SHA-256 evidence package... (~5-10s)
+                </Alert>
+              )}
+
               <Button
                 type="submit"
                 variant="contained"
                 disabled={exporting || !selectedCamId}
                 startIcon={exporting ? <SyncIcon sx={{ animation: 'spin 2s linear infinite' }} /> : <VideocamIcon />}
               >
-                {exporting ? 'FFMPEG Capturing...' : 'Compile Evidence'}
+                {exporting ? 'Compiling Clip...' : 'Compile Evidence'}
               </Button>
             </Box>
 
@@ -196,25 +202,25 @@ export default function ForensicsManager({ role, token }) {
                             <Box sx={{ display: 'flex', justifyContent: 'center', gap: 1 }}>
                               <Button
                                 component="a"
-                                href={item.mp4_download_url}
+                                href={item.mp4_download_url ? `${item.mp4_download_url}?token=${token}` : '#'}
                                 download
                                 size="small"
                                 variant="outlined"
                                 startIcon={<DownloadIcon />}
                                 sx={{ textTransform: 'none', px: 1, py: 0.5, fontSize: '0.7rem' }}
                               >
-                                MP4
+                                ZIP / MP4
                               </Button>
                               <Button
                                 component="a"
-                                href={`/api/v1/forensics/fir-report/${item.export_uuid}`}
+                                href={`/api/v1/forensics/fir-report/${item.export_uuid}?token=${token}`}
                                 target="_blank"
                                 size="small"
                                 variant="contained"
                                 color="secondary"
                                 sx={{ textTransform: 'none', px: 1, py: 0.5, fontSize: '0.7rem' }}
                               >
-                                ðŸ“œ FIR Report
+                                📜 FIR Report
                               </Button>
                             </Box>
                           </TableCell>

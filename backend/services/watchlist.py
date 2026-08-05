@@ -15,35 +15,80 @@ router = APIRouter(prefix="/watchlist", tags=["Watchlist"])
 
 @router.get("")
 def get_watchlist(user=Depends(verify_viewer), db: Session = Depends(get_db)):
-    """Retrieve all target POIs registered in the live watchlist (auto-purging DPDP expired profiles)."""
-    now = datetime.datetime.now(datetime.timezone.utc)
+    """
+    Retrieve all target POIs registered in the live watchlist.
+    COMP-02 FIX: GET endpoint no longer deletes records (was a REST violation).
+    DPDP retention purge is now a separate admin-only action endpoint.
+    """
+    _UTC = datetime.timezone.utc
+    now = datetime.datetime.now(_UTC)
     identities = db.query(GlobalIdentity).filter(GlobalIdentity.type == "person").all()
-    
+
     active_results = []
     for i in identities:
-        # Auto-purge expired entries per DPDP Act retention rules if first_seen is older than retention
-        # Default retention: 30 days unless specified
         created_at = i.first_seen if i.first_seen else now
-        # Ensure timezone-aware comparison (legacy DB rows may be naive UTC)
         if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=datetime.timezone.utc)
-        if (now - created_at).days > 90: # Hard DPDP max retention window
-            db.delete(i)
-            continue
+            created_at = created_at.replace(tzinfo=_UTC)
+
+        days_held = (now - created_at).days
+        # Flag entries approaching DPDP 90-day limit but do NOT delete on GET
+        dpdp_status = "ACTIVE_RETENTION_VERIFIED"
+        if days_held > 90:
+            dpdp_status = "RETENTION_EXCEEDED_PURGE_REQUIRED"
+        elif days_held > 75:
+            dpdp_status = "APPROACHING_RETENTION_LIMIT"
 
         active_results.append({
             "id": i.id,
             "identity_uuid": i.identity_uuid,
             "name": i.name,
             "description": f"Target profile registered on {created_at.strftime('%Y-%m-%d')}",
-            "first_seen": created_at.isoformat() if created_at else None,
+            "first_seen": created_at.isoformat(),
             "last_seen": i.last_seen.isoformat() if i.last_seen else None,
             "embedding_id": i.embedding_id,
-            "dpdp_status": "ACTIVE_RETENTION_VERIFIED"
+            "days_held": days_held,
+            "dpdp_status": dpdp_status,
         })
-        
-    db.commit()
+
     return active_results
+
+
+@router.post("/purge-expired", status_code=200)
+def purge_expired_watchlist_entries(
+    user=Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    COMP-02: Admin-only action to purge DPDP-expired watchlist entries.
+    All deletions are logged in AuditLog for forensic compliance.
+    This separates destructive operations from read-only GET endpoints.
+    """
+    from ..utils.audit import log_audit_event
+    _UTC = datetime.timezone.utc
+    now = datetime.datetime.now(_UTC)
+    identities = db.query(GlobalIdentity).filter(GlobalIdentity.type == "person").all()
+
+    purged = []
+    for i in identities:
+        created_at = i.first_seen if i.first_seen else now
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=_UTC)
+        if (now - created_at).days > 90:
+            purged.append({"identity_uuid": i.identity_uuid, "name": i.name})
+            log_audit_event(
+                db,
+                action="DPDP_AUTO_PURGE",
+                detail=f"Auto-purged DPDP-expired POI {i.identity_uuid} ({i.name}) after 90+ day retention",
+                username=user.username,
+                ip_address=getattr(user, "_client_ip", None),
+            )
+            db.delete(i)
+
+    db.commit()
+    return {
+        "message": f"Purged {len(purged)} expired DPDP entries.",
+        "purged": purged,
+    }
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_watchlist_poi(
@@ -76,8 +121,10 @@ async def create_watchlist_poi(
         embedding_feats = recognizer.feature(aligned)
 
     embedding_list = embedding_feats[0].tolist()
-    # Pad to 512 dims for vector DB compatibility
-    padded_embedding = embedding_list + [0.0] * (512 - len(embedding_list))
+    # AI-02 FIX: Store the actual SFace embedding at its real dimension (128).
+    # Previously, 384 zero dimensions were appended which degraded cosine similarity
+    # by adding pure noise to 75% of the vector space.
+    # The Qdrant face collection uses 128-dim vectors to match SFace output exactly.
 
     short_uuid = str(uuid.uuid4())[:6].upper()
     identity_uuid = f"POI_{short_uuid}"
@@ -99,7 +146,7 @@ async def create_watchlist_poi(
     # Index into vector storage
     index_vector(
         vector_id=short_uuid,
-        vector=padded_embedding,
+        vector=embedding_list,
         payload={
             "type": "face",
             "label": name,

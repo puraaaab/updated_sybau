@@ -1,25 +1,52 @@
 import os
 import json
+import threading
 
 CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "configs"))
 
+_CONFIG_CACHE = {}
+_CONFIG_CACHE_LOCK = threading.Lock()
+
+
+def _get_config_path(filename):
+    return os.path.join(CONFIG_DIR, filename)
+
+
+def _invalidate_config_cache(filename=None):
+    with _CONFIG_CACHE_LOCK:
+        if filename is None:
+            _CONFIG_CACHE.clear()
+        else:
+            _CONFIG_CACHE.pop(filename, None)
+
 def _read_json(filename, default=None):
-    filepath = os.path.join(CONFIG_DIR, filename)
+    filepath = _get_config_path(filename)
     if not os.path.exists(filepath):
         return default or {}
+
+    file_mtime = os.path.getmtime(filepath)
+    with _CONFIG_CACHE_LOCK:
+        cached = _CONFIG_CACHE.get(filename)
+        if cached and cached[0] == file_mtime:
+            return cached[1]
+
     try:
         with open(filepath, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
+            data = json.load(f)
+        with _CONFIG_CACHE_LOCK:
+            _CONFIG_CACHE[filename] = (file_mtime, data)
+        return data
     except Exception as e:
         print(f"Error reading config {filename}: {e}")
         return default or {}
 
 def _write_json(filename, data):
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    filepath = os.path.join(CONFIG_DIR, filename)
+    filepath = _get_config_path(filename)
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        _invalidate_config_cache(filename)
         return True
     except Exception as e:
         print(f"Error writing config {filename}: {e}")
@@ -48,3 +75,15 @@ def get_models():
 
 def save_models(models_data):
     return _write_json("models.json", models_data)
+
+def get_privacy_settings():
+    return _read_json("privacy.json", default={
+        "enabled": False,
+        "redact_faces": True,
+        "redact_plates": True,
+        "blur_kernel_size": 51
+    })
+
+def save_privacy_settings(privacy_data):
+    return _write_json("privacy.json", privacy_data)
+

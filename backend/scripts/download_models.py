@@ -14,7 +14,7 @@ try:
 except Exception as e:
     print(f"Error loading SentenceTransformer: {e}")
 
-print("\n[2/2] Loading Florence-2 (microsoft/Florence-2-large)...")
+print("\n[2/2] Loading Florence-2 (microsoft/Florence-2-base)...")
 try:
     from transformers import AutoProcessor, AutoModelForCausalLM
     import torch
@@ -29,10 +29,10 @@ try:
         sys.modules["flash_attn.flash_attn_triton"] = mock
 
     print("-> Downloading processor config...")
-    processor = AutoProcessor.from_pretrained("microsoft/Florence-2-large", trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
     print("-> Downloading model weights (~1.5GB)...")
     model = AutoModelForCausalLM.from_pretrained(
-        "microsoft/Florence-2-large",
+        "microsoft/Florence-2-base",
         trust_remote_code=True,
         torch_dtype=torch.float32
     )

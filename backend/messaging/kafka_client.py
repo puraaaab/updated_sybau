@@ -52,10 +52,12 @@ class KafkaEventClient:
                 self.producer.send(topic, value=data)
                 return True
             except Exception as e:
-                print(f"Failed to publish to Kafka: {e}")
                 self.connected = False
                 if is_production:
                     raise RuntimeError(f"Failed to publish event to Kafka in production: {e}") from e
+                else:
+                    import logging as _logging
+                    _logging.getLogger(__name__).debug(f"Kafka publish note: {e}")
         else:
             if is_production:
                 raise RuntimeError("Failed to publish event to Kafka in production: Kafka Producer is not connected.")

@@ -1,11 +1,12 @@
 import logging
+import uuid
 import numpy as np
 from ..detection.yolo import detect_and_track
 from ..tracking.tracker import trajectory_tracker
 from ..face.face_pipeline import process_faces
 from ..vehicle.vehicle_reid import process_vehicles
 from ..behavior.behavior_engine import behavior_engine
-from ..captioning.captioner import generate_scene_caption
+from ..captioning.captioner import generate_scene_caption, submit_async_scene_caption
 from ..embeddings.embedder import get_text_embedding
 from ...config.service import get_models
 
@@ -75,8 +76,11 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     frame_height, frame_width = frame.shape[:2]
     alerts = behavior_engine.check_behaviors(tracks, zones, alerts_cfg, float(frame_width), float(frame_height))
     
-    # 5. Build instant frame scene caption (guarantees 100% of frames across all streams produce captions)
+    # 5. Build instant detailed frame scene caption with colors and attributes
+    from ..vehicle.vehicle_reid import detect_crop_color
     description_parts = []
+    
+    # 5a. Vehicles with colors and license plates
     if vehicles:
         veh_counts: dict = {}
         for v in vehicles:
@@ -90,14 +94,49 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
         if plates:
             description_parts.append(f"license plates: {', '.join(plates)}")
 
-    # Include non-vehicle classes
-    class_counts: dict = {}
-    for t in tracks:
-        cls = t.get("class_name", "object")
-        if cls not in vehicle_classes and cls != "license_plate":
-            class_counts[cls] = class_counts.get(cls, 0) + 1
-    for cls, cnt in class_counts.items():
-        description_parts.append(f"{cnt} {cls}")
+    # 5b. People with upper & lower clothing colors
+    if person_crops:
+        p_counts: dict = {}
+        for p in person_crops:
+            u_col = p.get("upper_color", "unknown")
+            l_col = p.get("lower_color", "unknown")
+            if u_col != "unknown" and l_col != "unknown":
+                p_label = f"person in {u_col} top and {l_col} bottom"
+            elif u_col != "unknown":
+                p_label = f"person in {u_col} top"
+            elif l_col != "unknown":
+                p_label = f"person in {l_col} bottom"
+            else:
+                p_label = "person"
+            p_counts[p_label] = p_counts.get(p_label, 0) + 1
+        for p_label, cnt in p_counts.items():
+            description_parts.append(f"{cnt} {p_label}")
+    else:
+        person_count = sum(1 for t in tracks if t.get("class_name") == "person")
+        if person_count > 0:
+            description_parts.append(f"{person_count} person")
+
+    # 5c. Non-vehicle/non-person objects (backpack, handbag, motorcycle, bicycle, etc.) with color detection
+    non_person_non_vehicle = [
+        t for t in tracks 
+        if t.get("class_name") not in vehicle_classes and t.get("class_name") not in ("person", "license_plate")
+    ]
+    if non_person_non_vehicle:
+        obj_counts: dict = {}
+        for obj in non_person_non_vehicle:
+            cls = obj.get("class_name", "object")
+            bbox = obj.get("bbox", [])
+            color = "unknown"
+            if len(bbox) >= 4 and not any(np.isnan(b) for b in bbox[:4]):
+                x1, y1, x2, y2 = max(0, int(bbox[0])), max(0, int(bbox[1])), min(frame_width, int(bbox[2])), min(frame_height, int(bbox[3]))
+                if (x2 - x1) >= 15 and (y2 - y1) >= 15:
+                    obj_crop = frame[y1:y2, x1:x2]
+                    if obj_crop.size > 0:
+                        color = detect_crop_color(obj_crop)
+            label = f"{color} {cls}".strip() if color and color != "unknown" else cls
+            obj_counts[label] = obj_counts.get(label, 0) + 1
+        for label, cnt in obj_counts.items():
+            description_parts.append(f"{cnt} {label}")
 
     if not description_parts:
         description_parts = [f"{len(tracks)} objects"] if tracks else ["Active surveillance stream"]
@@ -106,27 +145,59 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     caption = f"[YOLO]: {yolo_summary} | camera {camera_id}"
     embedding = None
 
-    # Attempt Florence-2 VLM caption if GPU queue is free
+
+    # Execute Florence-2 VLM captioning (Non-blocking async background dispatch)
     florence_cfg = cfg.get("florence", {})
     florence_enabled = florence_cfg.get("enabled", True)
     n_frames = florence_cfg.get("invoke_every_n_frames", 1)
-    if florence_enabled and (n_frames <= 1 or frame_idx % n_frames == 0):
-        try:
-            if inference_scheduler.request_queue.qsize() < 4:
-                florence_cap = inference_scheduler.schedule_inference(
-                    inference_scheduler.PRIORITY_FLORENCE,
-                    generate_scene_caption,
-                    frame
-                )
-                if florence_cap:
-                    caption = f"[YOLO]: {yolo_summary} | [Florence-2]: {florence_cap} | camera {camera_id}"
-        except Exception as e:
-            logger.debug(f"[{camera_id}] Skipping Florence scene captioning: {e}")
 
-    try:
-        embedding = get_text_embedding(caption)
-    except Exception as e:
-        logger.warning(f"[{camera_id}] Text embedding failed: {e}")
+    should_invoke_florence = florence_enabled and (
+        n_frames <= 1 or
+        frame_idx % n_frames == 0 or
+        len(alerts) > 0
+    )
+    logger.debug(f"[FLORENCE-TRACE] cam={camera_id} frame={frame_idx} "
+                 f"eligible_check enabled={florence_enabled} "
+                 f"n_frames={n_frames} alerts={len(alerts)} "
+                 f"-> should_invoke={should_invoke_florence}")
+    florence_queued = False
+    if should_invoke_florence:
+        corr_id = uuid.uuid4().hex[:8]
+        logger.info(f"[FLORENCE-TRACE] corr={corr_id} cam={camera_id} "
+                    f"frame={frame_idx} DISPATCHING to Florence submitter")
+        logger.warning(f"[Florence-2 Orchestrator] Invoking async captioner for camera {camera_id}, frame_idx {frame_idx}")
+        try:
+            florence_queued = submit_async_scene_caption(frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id)
+            logger.info(f"[FLORENCE-TRACE] corr={corr_id} cam={camera_id} "
+                        f"frame={frame_idx} submit_async_scene_caption returned "
+                        f"queued={florence_queued}")
+        except Exception as e:
+            logger.warning(f"[Florence Async] Error on {camera_id}: {e}")
+
+    if should_invoke_florence or len(alerts) > 0 or n_frames <= 1 or frame_idx % n_frames == 0:
+        try:
+            embedding = get_text_embedding(caption)
+        except Exception as e:
+            logger.warning(f"[{camera_id}] Text embedding failed: {e}")
+
+    # Evaluate dynamic custom alert rules (license plates, natural language visual prompts, threats)
+    custom_rules = alerts_cfg.get("custom_rules", []) if isinstance(alerts_cfg, dict) else []
+    if custom_rules:
+        try:
+            from ..behavior.custom_rules import custom_rule_evaluator
+            custom_alerts = custom_rule_evaluator.evaluate_custom_rules(
+                {
+                    "caption": caption,
+                    "embedding": embedding,
+                    "tracks": tracks,
+                    "vehicles": vehicles
+                },
+                custom_rules,
+                camera_id
+            )
+            alerts.extend(custom_alerts)
+        except Exception as e:
+            logger.warning(f"[{camera_id}] Custom rules evaluation note: {e}")
             
     return {
         "tracks": tracks,
@@ -135,5 +206,6 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
         "vehicles": vehicles,
         "alerts": alerts,
         "caption": caption,
-        "embedding": embedding
+        "embedding": embedding,
+        "florence_queued": florence_queued
     }

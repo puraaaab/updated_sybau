@@ -16,6 +16,9 @@ services:
       - MTX_WEBRTC=yes
       - MTX_API=yes
       - MTX_APIADDRESS=:9997
+      - MTX_HLSSEGMENTDURATION=1s
+      - MTX_HLSPARTDURATION=200ms
+      - MTX_HLSMAXPLAYLISTS=5
     restart: unless-stopped
 
   # PostgreSQL for metadata and event history

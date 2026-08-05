@@ -1,0 +1,6 @@
+{
+  "enabled": false,
+  "redact_faces": true,
+  "redact_plates": true,
+  "blur_kernel_size": 51
+}

@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Box, Drawer, List, ListItem, ListItemButton, ListItemIcon, ListItemText,
   AppBar, Toolbar, Typography, Button, Snackbar, Alert, Chip, Menu, MenuItem,
-  Divider, TextField, InputAdornment, IconButton, useMediaQuery, Tooltip
+  Divider, TextField, InputAdornment, IconButton, useMediaQuery, Tooltip,
+  Dialog, DialogTitle, DialogContent, DialogActions
 } from '@mui/material';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
@@ -41,6 +42,11 @@ export default function App() {
   const [username, setUsername] = useState(localStorage.getItem('vms_username') || '');
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+  const [forcePwdCurrentInput, setForcePwdCurrentInput] = useState('');
+  const [forcePwdNewInput, setForcePwdNewInput] = useState('');
+  const [forcePwdError, setForcePwdError] = useState('');
+  const [forcePwdLoading, setForcePwdLoading] = useState(false);
 
   const [wsAlert, _setWsAlert] = useState(null);
   const [snackbarOpen, setSnackbarOpen] = useState(false);
@@ -304,6 +310,10 @@ export default function App() {
         setToken(data.access_token);
         setRole(data.role);
         setUsername(data.username);
+        // BUG-6 FIX: Enforce password change before allowing access
+        if (data.must_change_password) {
+          setMustChangePassword(true);
+        }
       } else {
         const errData = await res.json().catch(() => ({ detail: 'Authentication failed' }));
         setLoginError(errData.detail || 'Invalid username or password');
@@ -323,15 +333,47 @@ export default function App() {
     setToken('');
     setRole('');
     setUsername('');
+    setMustChangePassword(false);
+    setForcePwdCurrentInput('');
+    setForcePwdNewInput('');
+    setForcePwdError('');
     setAnchorEl(null);
   };
 
-
-  const handleRoleSwitch = (targetRole) => {
-    const passwordMap = { admin: 'Admin@123456', operator: 'Operator@123456', viewer: 'Viewer@123456' };
-    handleLogin(targetRole, passwordMap[targetRole]);
-    setAnchorEl(null);
+  const handleForcedPasswordChange = async () => {
+    setForcePwdError('');
+    if (!forcePwdCurrentInput || !forcePwdNewInput) {
+      setForcePwdError('Both fields are required.');
+      return;
+    }
+    if (forcePwdNewInput.length < 8) {
+      setForcePwdError('New password must be at least 8 characters.');
+      return;
+    }
+    setForcePwdLoading(true);
+    try {
+      const res = await fetch('/api/v1/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ current_password: forcePwdCurrentInput, new_password: forcePwdNewInput })
+      });
+      if (res.ok) {
+        setMustChangePassword(false);
+        setForcePwdCurrentInput('');
+        setForcePwdNewInput('');
+      } else {
+        const errData = await res.json().catch(() => ({ detail: 'Password change failed.' }));
+        setForcePwdError(errData.detail || 'Password change failed.');
+      }
+    } catch (e) {
+      setForcePwdError('Could not connect to server.');
+    } finally {
+      setForcePwdLoading(false);
+    }
   };
+
+
+  // handleRoleSwitch removed: it embedded default credentials in the JS bundle (security risk).
 
   // Admin Console actions mapped from Settings page
   const handleUpdateRole = (userId, newRole) => {
@@ -419,7 +461,7 @@ export default function App() {
     setDiscovered([]);
     setResolvedUrls({});
 
-    fetch('/api/cameras/scan', {
+    fetch('/api/v1/cameras/scan', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${token}` }
     })
@@ -433,7 +475,7 @@ export default function App() {
 
   const handleResolveStreamUri = async (device, index, onvifUser, onvifPass) => {
     try {
-      const res = await fetch('/api/cameras/resolve-onvif', {
+      const res = await fetch('/api/v1/cameras/resolve-onvif', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -629,12 +671,9 @@ export default function App() {
                 open={Boolean(anchorEl)}
                 onClose={() => setAnchorEl(null)}
               >
-                <MenuItem disabled><Typography variant="caption">RBAC Quick-Switch Controls</Typography></MenuItem>
-                <MenuItem onClick={() => handleRoleSwitch('admin')}>Admin Console Link</MenuItem>
-                <MenuItem onClick={() => handleRoleSwitch('operator')}>Operator Terminal</MenuItem>
-                <MenuItem onClick={() => handleRoleSwitch('viewer')}>Viewer Feed Mode</MenuItem>
+                <MenuItem disabled><Typography variant="caption">Logged in as {username} ({role})</Typography></MenuItem>
                 <Divider />
-                <MenuItem onClick={handleLogout}>Sign Out Link</MenuItem>
+                <MenuItem onClick={handleLogout}>Sign Out</MenuItem>
               </Menu>
             </Box>
           </Toolbar>
@@ -782,6 +821,44 @@ export default function App() {
           error={loginError}
           loading={loginLoading}
         />
+
+        {/* BUG-6 FIX: Forced Password Change Dialog — blocks app access until completed */}
+        <Dialog open={!!token && mustChangePassword} fullWidth maxWidth="xs" disableEscapeKeyDown>
+          <DialogTitle sx={{ bgcolor: '#0d0d0d', color: '#f2f2f2', borderBottom: '1px solid #232323' }}>
+            🔐 Password Change Required
+          </DialogTitle>
+          <DialogContent sx={{ bgcolor: '#0d0d0d', color: '#f2f2f2', pt: 3 }}>
+            <Typography variant="body2" sx={{ mb: 2, color: '#aaa' }}>
+              Your account requires a password change before you can access the system.
+            </Typography>
+            {forcePwdError && <Alert severity="error" sx={{ mb: 2 }}>{forcePwdError}</Alert>}
+            <TextField
+              fullWidth label="Current Password" type="password"
+              value={forcePwdCurrentInput}
+              onChange={e => setForcePwdCurrentInput(e.target.value)}
+              sx={{ mb: 2, '& .MuiOutlinedInput-root': { color: '#fff', '& fieldset': { borderColor: '#333' } }, '& .MuiInputLabel-root': { color: '#888' } }}
+            />
+            <TextField
+              fullWidth label="New Password" type="password"
+              value={forcePwdNewInput}
+              onChange={e => setForcePwdNewInput(e.target.value)}
+              helperText="Min 8 chars, must include upper, lower, and a digit."
+              FormHelperTextProps={{ style: { color: '#666' } }}
+              sx={{ '& .MuiOutlinedInput-root': { color: '#fff', '& fieldset': { borderColor: '#333' } }, '& .MuiInputLabel-root': { color: '#888' } }}
+            />
+          </DialogContent>
+          <DialogActions sx={{ bgcolor: '#0d0d0d', borderTop: '1px solid #232323', p: 2, gap: 1 }}>
+            <Button onClick={handleLogout} variant="outlined" color="error">Cancel & Logout</Button>
+            <Button
+              onClick={handleForcedPasswordChange}
+              variant="contained"
+              disabled={forcePwdLoading || !forcePwdCurrentInput || !forcePwdNewInput}
+              sx={{ bgcolor: '#00e676', color: '#000', fontWeight: 700, '&:hover': { bgcolor: '#00c853' } }}
+            >
+              {forcePwdLoading ? 'Changing...' : 'Change Password'}
+            </Button>
+          </DialogActions>
+        </Dialog>
       </Box>
     </ThemeProvider>
   );

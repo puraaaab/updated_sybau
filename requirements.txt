@@ -19,3 +19,7 @@ psutil>=5.9.5
 yt-dlp>=2023.0
 httpx>=0.24.0
 pytest>=7.3.1
+slowapi>=0.1.9
+bcrypt>=4.0.0
+qrcode>=7.4.2
+Pillow>=9.0.0

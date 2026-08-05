@@ -49,8 +49,8 @@ def compute_traffic_analytics(tracks: List[dict], direction_vector: Tuple[float,
 
     for tr in tracks:
         speed = tr.get("speed", 0.0)
-        # Convert m/s or pixel speed to km/h if needed
-        speed_kmh = round(speed * 3.6 if speed < 40.0 else speed, 1)
+        # AI-01 FIX: Convert px/sec to km/h using calibrated pixels_per_meter constant
+        speed_kmh = round((speed / PIXELS_PER_METER_DEFAULT) * 3.6, 1) if speed > 0 else 0.0
         speeds.append(speed_kmh)
 
         # Vector direction check

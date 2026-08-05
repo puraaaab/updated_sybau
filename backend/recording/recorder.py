@@ -66,16 +66,15 @@ class CameraRecorder:
                     last_frame_ts = 0.0
 
                     while self.running and (time.time() - segment_start) < self.segment_duration:
-                        success, frame, ts = stream.get_frame()
-                        if not success or frame is None or ts <= last_frame_ts:
+                        success, frame, ts = stream.get_frame(last_frame_ts)
+                        if not success or frame is None:
                             time.sleep(1.0 / record_fps)
                             continue
 
                         last_frame_ts = ts
                         out.write(frame)
                         frames_written += 1
-                        # Pacing to match stream FPS
-                        time.sleep(max(0.005, (1.0 / record_fps) * 0.5))
+                        time.sleep(1.0 / record_fps)
                 finally:
                     out.release()
 

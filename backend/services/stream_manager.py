@@ -58,13 +58,14 @@ class CameraStream:
         CameraStateMachine.update_state(self.camera_id, CameraStateMachine.DISCONNECTED)
         logger.info(f"[StreamManager] Capture thread stopped for Camera {self.camera_id}")
 
-    def get_frame(self) -> Tuple[bool, Optional[np.ndarray], float]:
+    def get_frame(self, since_ts: float = 0.0) -> Tuple[bool, Optional[np.ndarray], float]:
         """
         Returns (success, frame_copy, timestamp).
+        If since_ts is provided and no newer frame is available, returns (False, None, timestamp) without allocating memory.
         """
         with self._lock:
-            if self.latest_frame is None:
-                return False, None, 0.0
+            if self.latest_frame is None or self.latest_frame_time <= since_ts:
+                return False, None, self.latest_frame_time
             return True, self.latest_frame.copy(), self.latest_frame_time
 
     def get_latest_frame(self) -> Tuple[Optional[np.ndarray], float]:
@@ -104,8 +105,6 @@ class CameraStream:
         # 2. Secondary Hardware Acceleration Attempt: FFmpeg CUDA Options
         if cap is None or not cap.isOpened():
             try:
-                import os as _os
-                _os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|hwaccel;cuda"
                 cap = cv2.VideoCapture(resolved_url, cv2.CAP_FFMPEG)
                 if cap.isOpened():
                     logger.info(f"[StreamManager] Camera {self.camera_id} opened via FFmpeg CUDA hardware acceleration.")
@@ -213,6 +212,9 @@ class StreamManager:
                     return None
                 self._streams[camera_id] = CameraStream(camera_id, stream_url)
             stream = self._streams[camera_id]
+            if stream_url and stream.stream_url != stream_url:
+                stream.stream_url = stream_url
+                invalidate_cache(camera_id)
             if stream_url:
                 stream.add_consumer()
             return stream

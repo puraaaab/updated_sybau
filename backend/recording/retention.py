@@ -2,9 +2,12 @@ import os
 import time
 import datetime
 import threading
+import logging
 from sqlalchemy.orm import Session
 from ..database.connection import SessionLocal
 from ..database.models import Alert
+
+logger = logging.getLogger(__name__)
 
 # Path to recordings
 STORAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "recordings"))
@@ -56,7 +59,7 @@ class RetentionManager:
 
             now = datetime.datetime.now()
             cutoff = now - datetime.timedelta(days=self.retention_days)
-            print(f"[RetentionManager] Running pruning cycle. Cutoff: {cutoff.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.debug(f"[RetentionManager] Running pruning cycle. Cutoff: {cutoff.strftime('%Y-%m-%d %H:%M:%S')}")
 
             # Walk through camera directories
             unprotected_files = []
@@ -81,9 +84,9 @@ class RetentionManager:
                     if mtime < cutoff:
                         try:
                             os.remove(filepath)
-                            print(f"[RetentionManager] Deleted expired recording: {camera_id}/{filename} (mtime: {mtime.strftime('%Y-%m-%d')})")
+                            logger.info(f"[RetentionManager] Deleted expired recording: {camera_id}/{filename} (mtime: {mtime.strftime('%Y-%m-%d')})")
                         except OSError as e:
-                            print(f"[RetentionManager] Error deleting expired file {filepath}: {e}")
+                            logger.warning(f"[RetentionManager] Error deleting expired file {filepath}: {e}")
                     else:
                         unprotected_files.append({
                             "filepath": filepath,
@@ -96,10 +99,10 @@ class RetentionManager:
             import shutil
             total, used, free = shutil.disk_usage(STORAGE_DIR)
             usage_percent = (used / total) * 100.0
-            print(f"[RetentionManager] Disk usage at: {usage_percent:.2f}% (Limit: {self.max_disk_usage_percent}%)")
+            logger.debug(f"[RetentionManager] Disk usage at: {usage_percent:.2f}% (Limit: {self.max_disk_usage_percent}%)")
             
             if usage_percent > self.max_disk_usage_percent:
-                print(f"[RetentionManager] Disk usage ({usage_percent:.2f}%) exceeds limit of {self.max_disk_usage_percent}%. Pruning oldest files...")
+                logger.warning(f"[RetentionManager] Disk usage ({usage_percent:.2f}%) exceeds limit of {self.max_disk_usage_percent}%. Pruning oldest files...")
                 # Sort remaining files by mtime (oldest first)
                 unprotected_files.sort(key=lambda x: x["mtime"])
                 

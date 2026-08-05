@@ -32,7 +32,10 @@ from .services import event_export
 from .search import vector_search
 from .messaging.kafka_client import memory_bus
 from .utils.security import safe_join_path
-from .utils.ssrf import validate_proxy_url
+import logging
+logging.getLogger("backend.ai.captioning.captioner").setLevel(logging.DEBUG)
+logging.getLogger("backend.ai.model_manager").setLevel(logging.DEBUG)
+logging.getLogger("backend.ai.pipeline.orchestrator").setLevel(logging.DEBUG)
 
 # ---------------------------------------------------------------------------
 # Lifespan context manager (replaces deprecated @app.on_event)
@@ -1153,6 +1156,17 @@ def get_records_captions(
             "timestamp": c.timestamp.strftime("%Y-%m-%d %H:%M:%S") if c.timestamp else None
         })
     return {"total": total, "items": results}
+
+
+@app.get("/api/v1/florence/stats")
+def get_florence_stats():
+    """Returns real-time processing and queue telemetry for the temporary Live Grid counter."""
+    try:
+        from .ai.captioning.captioner import get_florence_queue_stats
+        return get_florence_queue_stats()
+    except Exception:
+        return {"captioning": 0, "queue": 0}
+
 
 
 

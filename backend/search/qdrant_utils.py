@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import queue
 import time
@@ -14,6 +15,14 @@ _client_lock = threading.Lock()
 _qdrant_batch_queue = queue.Queue(maxsize=10000)
 _batch_thread = None
 _batch_running = False
+
+
+def _qdrant_base_url() -> str:
+    host = os.getenv("QDRANT_HOST", "localhost")
+    port = os.getenv("QDRANT_PORT", "6333")
+    if "://" in host:
+        return host
+    return f"http://{host}:{port}"
 
 def get_qdrant_client(timeout: float = 10.0):
     """
@@ -31,24 +40,41 @@ def get_qdrant_client(timeout: float = 10.0):
                     from qdrant_client import QdrantClient
                     from qdrant_client.http import models as qmodels
 
-                    client = QdrantClient("http://localhost:6333", timeout=10.0)
+                    client = QdrantClient(_qdrant_base_url(), timeout=10.0)
 
                     try:
                         collections = client.get_collections().collections
                         exists = any(c.name == "vms_embeddings" for c in collections)
-                        if not exists:
+                        should_recreate = False
+
+                        if exists:
+                            info = client.get_collection("vms_embeddings")
+                            params = info.config.params.vectors
+                            if hasattr(params, "get"):
+                                scene_size = params.get("scene").size if params.get("scene") else 0
+                            elif isinstance(params, dict):
+                                scene_size = params["scene"].size if "scene" in params else 0
+                            else:
+                                scene_size = getattr(params, "scene", None).size if hasattr(params, "scene") else 0
+
+                            if scene_size != 1024:
+                                logger.info(f"Recreating Qdrant collection 'vms_embeddings' (migrating scene vector size {scene_size} -> 1024)...")
+                                client.delete_collection("vms_embeddings")
+                                should_recreate = True
+
+                        if not exists or should_recreate:
                             client.create_collection(
                                 collection_name="vms_embeddings",
                                 vectors_config={
                                     "face": qmodels.VectorParams(size=512, distance=qmodels.Distance.COSINE),
-                                    "scene": qmodels.VectorParams(size=384, distance=qmodels.Distance.COSINE),
+                                    "scene": qmodels.VectorParams(size=1024, distance=qmodels.Distance.COSINE),
                                     "vehicle": qmodels.VectorParams(size=576, distance=qmodels.Distance.COSINE),
-                                    "person_crop": qmodels.VectorParams(size=512, distance=qmodels.Distance.COSINE)
+                                    "person_crop": qmodels.VectorParams(size=768, distance=qmodels.Distance.COSINE)
                                 }
                             )
                             logger.info("Created Qdrant collection 'vms_embeddings' successfully.")
                     except Exception as e:
-                        logger.warning(f"Qdrant collection init check failed: {e}")
+                        logger.warning(f"Qdrant collection init check note: {e}")
 
                     _global_qdrant_client = client
                     break
@@ -79,6 +105,9 @@ def enqueue_qdrant_point(vector_id: str, vector: list, payload: dict):
     """
     Non-blocking submission of a vector point into the background batch upsert queue.
     """
+    if vector is None:
+        return
+
     p_type = payload.get("type") if isinstance(payload, dict) else None
     if p_type == "person_crop":
         vec_name = "person_crop"
