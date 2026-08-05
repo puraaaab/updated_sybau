@@ -145,19 +145,21 @@ class ModelManager:
             if engine_choice == "paddleocr":
                 try:
                     import numpy as _np
+                    import torch
                     from paddleocr import PaddleOCR
                     import paddleocr as _pocr_mod
+                    use_gpu = torch.cuda.is_available()
                     _pocr_ver = tuple(int(x) for x in getattr(_pocr_mod, "__version__", "2.0.0").split(".")[:2])
-                    print("Loading PaddleOCR ultra-fast license plate engine...", flush=True)
+                    print(f"Loading PaddleOCR ultra-fast license plate engine (GPU={use_gpu})...", flush=True)
                     if _pocr_ver >= (3, 0):
-                        reader = PaddleOCR(use_textline_orientation=False, lang='en')
+                        reader = PaddleOCR(use_textline_orientation=False, lang='en', use_gpu=use_gpu)
                         _probe = _np.ones((32, 128, 3), dtype=_np.uint8) * 128
                         reader.predict(_probe)
                     else:
-                        reader = PaddleOCR(use_angle_cls=False, lang='en', show_log=False)
+                        reader = PaddleOCR(use_angle_cls=False, lang='en', use_gpu=use_gpu, show_log=False)
                         _probe = _np.ones((32, 128, 3), dtype=_np.uint8) * 128
                         reader.ocr(_probe, cls=False)
-                    print("PaddleOCR inference probe passed — engine is healthy.", flush=True)
+                    print(f"PaddleOCR inference probe passed — engine is healthy (GPU={use_gpu}).", flush=True)
                     res = ("paddleocr", reader)
                     self._models["ocr"] = res
                     return res
@@ -166,8 +168,10 @@ class ModelManager:
 
             try:
                 import easyocr
-                print("Loading EasyOCR reader...", flush=True)
-                reader = easyocr.Reader(['en'], gpu=False)
+                import torch
+                use_gpu = torch.cuda.is_available()
+                print(f"Loading EasyOCR reader (GPU={use_gpu})...", flush=True)
+                reader = easyocr.Reader(['en'], gpu=use_gpu)
                 res = ("easyocr", reader)
                 self._models["ocr"] = res
                 return res
@@ -228,7 +232,7 @@ class ModelManager:
             cfg = get_models().get("florence", {})
             model_id = cfg.get("model_id", "microsoft/Florence-2-base")
             device = cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
-            dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else (torch.float16 if device == "cuda" else torch.float32)
+            dtype = torch.float16 if device == "cuda" else torch.float32
 
             logger.warning(f"Loading Florence-2 model {model_id} on {device}...")
             t_load0 = time.time()

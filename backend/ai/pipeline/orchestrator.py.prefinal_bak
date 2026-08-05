@@ -50,7 +50,7 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
             logger.warning(f"[{camera_id}] Fallback YOLO detection failed: {fallback_e}")
             tracks = []
     
-    # 1.5. Florence config read; dispatched AFTER YOLO summary is built below
+    # 1.5. Dispatch frame to Florence-2 queue IMMEDIATELY (0ms delay, bypassing downstream CPU processing)
     florence_cfg = cfg.get("florence", {})
     florence_enabled = florence_cfg.get("enabled", True)
     n_frames = florence_cfg.get("invoke_every_n_frames", 1)
@@ -60,6 +60,12 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
         n_frames <= 1 or
         frame_idx % n_frames == 0
     )
+    if should_invoke_florence:
+        corr_id = uuid.uuid4().hex[:8]
+        try:
+            florence_queued = submit_async_scene_caption(frame, camera_id=camera_id, yolo_summary="", corr_id=corr_id)
+        except Exception as e:
+            logger.warning(f"[Florence Async] Instant dispatch error on {camera_id}: {e}")
 
     # 2. Process faces & person crops for tracked people — ONLY when person detected
     faces = []
@@ -158,16 +164,6 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     yolo_summary = ", ".join(description_parts)
     caption = f"[YOLO]: {yolo_summary} | camera {camera_id}"
     embedding = None
-
-    # Dispatch Florence AFTER YOLO summary — persister receives merged caption
-    if should_invoke_florence:
-        corr_id = uuid.uuid4().hex[:8]
-        try:
-            florence_queued = submit_async_scene_caption(
-                frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id
-            )
-        except Exception as e:
-            logger.warning(f"[Florence Async] Dispatch error on {camera_id}: {e}")
 
 
     # Instant text embedding for YOLO summary

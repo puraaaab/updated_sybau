@@ -46,7 +46,11 @@ def get_text_embedding(text: str):
 
     with _cache_lock_dict:
         if text in _embedding_cache:
-            return _embedding_cache[text]
+            cached_vec = _embedding_cache[text]
+            if len(cached_vec) == EMBEDDING_DIM:
+                return cached_vec
+            else:
+                del _embedding_cache[text]
 
     if demo_mode:
         vec = _mock_embedding(text, EMBEDDING_DIM)
@@ -74,6 +78,11 @@ def get_text_embedding(text: str):
                             st_class = SentenceTransformer
 
                         _sentence_transformer_model = st_class(model_name, device=device)
+                        if device == "cuda" and hasattr(_sentence_transformer_model, "half"):
+                            try:
+                                _sentence_transformer_model.half()
+                            except Exception:
+                                pass
                         EMBEDDING_DIM = _sentence_transformer_model.get_sentence_embedding_dimension() or 1024
 
             import torch

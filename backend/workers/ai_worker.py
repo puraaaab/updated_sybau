@@ -247,301 +247,301 @@ class CameraAIWorker:
                         results = process_frame(frame, self.camera_id, zones, alerts_cfg, frame_idx)
                         frame_idx += 1
 
-                    if frame_idx % 100 == 0:
-                        import gc, torch
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                        if frame_idx % 100 == 0:
+                            import gc, torch
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
 
-                    tracks_count = len(results.get("tracks", []))
-                    alerts_count = len(results.get("alerts", []))
-                    has_active_tracks = tracks_count > 0
-                    has_active_alerts = alerts_count > 0
+                        tracks_count = len(results.get("tracks", []))
+                        alerts_count = len(results.get("alerts", []))
+                        has_active_tracks = tracks_count > 0
+                        has_active_alerts = alerts_count > 0
 
-                    raw_tracks = results.get("tracks", [])
-                    clean_tracks = []
-                    for tr in raw_tracks:
-                        clean_tr = {}
-                        for k, v in tr.items():
-                            if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
-                                clean_tr[k] = 0.0
-                            elif isinstance(v, list):
-                                clean_tr[k] = [0.0 if (isinstance(elem, float) and (np.isnan(elem) or np.isinf(elem))) else elem for elem in v]
-                            else:
-                                clean_tr[k] = v
-                        clean_tracks.append(clean_tr)
+                        raw_tracks = results.get("tracks", [])
+                        clean_tracks = []
+                        for tr in raw_tracks:
+                            clean_tr = {}
+                            for k, v in tr.items():
+                                if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                                    clean_tr[k] = 0.0
+                                elif isinstance(v, list):
+                                    clean_tr[k] = [0.0 if (isinstance(elem, float) and (np.isnan(elem) or np.isinf(elem))) else elem for elem in v]
+                                else:
+                                    clean_tr[k] = v
+                            clean_tracks.append(clean_tr)
 
-                    latest_telemetry[self.camera_id] = {
-                        "tracks": clean_tracks,
-                        "faces_count": len(results.get("faces", [])),
-                        "vehicles_count": len(results.get("vehicles", [])),
-                        "alerts_count": alerts_count,
-                        "frame_idx": frame_idx,
-                        "motion_status": motion_status,
-                        "fps": current_fps,
-                        "timestamp": datetime.datetime.now(_IST).isoformat()
-                    }
-
-                    from ..services.identity import GlobalIdentityManager
-
-                    pending_snapshot_writes = []
-                    pending_vector_index_ops = []
-                    pending_caption_events = []
-                    pending_alert_events = []
-
-                    # Bulk batch active tracks into database to eliminate N+1 queries
-                    tracks_list = results.get("tracks", [])
-                    if tracks_list:
-                        t_tuples = [
-                            (tr, tr.get("track_uuid") or f"TRK_{self.camera_id}_{tr.get('track_id')}")
-                            for tr in tracks_list
-                        ]
-                        t_uuids = [t_uuid for _, t_uuid in t_tuples]
-                        existing_tracks = {
-                            t.track_uuid: t
-                            for t in db.query(Track).filter(Track.track_uuid.in_(t_uuids)).all()
+                        latest_telemetry[self.camera_id] = {
+                            "tracks": clean_tracks,
+                            "faces_count": len(results.get("faces", [])),
+                            "vehicles_count": len(results.get("vehicles", [])),
+                            "alerts_count": alerts_count,
+                            "frame_idx": frame_idx,
+                            "motion_status": motion_status,
+                            "fps": current_fps,
+                            "timestamp": datetime.datetime.now(_IST).isoformat()
                         }
 
-                        for tr, t_uuid in t_tuples:
-                            path_coords = []
-                            if tr.get("path"):
-                                try:
-                                    path_coords = [[float(pt[0]), float(pt[1])] for pt in tr.get("path", [])]
-                                except Exception:
-                                    path_coords = []
-                            path_json = json.dumps(path_coords)
+                        from ..services.identity import GlobalIdentityManager
 
-                            # AI-04 FIX: Compute normalized bbox center from real detection box
-                            bbox = tr.get("box", None)
-                            if bbox and len(bbox) >= 4:
-                                x1, y1, x2, y2 = bbox[:4]
-                                frame_h, frame_w = frame.shape[:2] if frame is not None else (1080, 1920)
-                                bbox_cx = ((x1 + x2) / 2.0) / frame_w
-                                bbox_cy = ((y1 + y2) / 2.0) / frame_h
-                            else:
-                                bbox_cx = tr.get("cx", 0.5)
-                                bbox_cy = tr.get("cy", 0.5)
+                        pending_snapshot_writes = []
+                        pending_vector_index_ops = []
+                        pending_caption_events = []
+                        pending_alert_events = []
 
-                            if np.isnan(bbox_cx) or np.isinf(bbox_cx): bbox_cx = 0.5
-                            if np.isnan(bbox_cy) or np.isinf(bbox_cy): bbox_cy = 0.5
+                        # Bulk batch active tracks into database to eliminate N+1 queries
+                        tracks_list = results.get("tracks", [])
+                        if tracks_list:
+                            t_tuples = [
+                                (tr, tr.get("track_uuid") or f"TRK_{self.camera_id}_{tr.get('track_id')}")
+                                for tr in tracks_list
+                            ]
+                            t_uuids = [t_uuid for _, t_uuid in t_tuples]
+                            existing_tracks = {
+                                t.track_uuid: t
+                                for t in db.query(Track).filter(Track.track_uuid.in_(t_uuids)).all()
+                            }
 
-                            speed_val = float(tr.get("speed", 0.0))
-                            if np.isnan(speed_val) or np.isinf(speed_val): speed_val = 0.0
+                            for tr, t_uuid in t_tuples:
+                                path_coords = []
+                                if tr.get("path"):
+                                    try:
+                                        path_coords = [[float(pt[0]), float(pt[1])] for pt in tr.get("path", [])]
+                                    except Exception:
+                                        path_coords = []
+                                path_json = json.dumps(path_coords)
 
-                            _now = datetime.datetime.now(_IST)  # IST timezone
-                            existing_tr = existing_tracks.get(t_uuid)
-                            if not existing_tr:
-                                db_track = Track(
-                                    track_uuid=t_uuid,
+                                # AI-04 FIX: Compute normalized bbox center from real detection box
+                                bbox = tr.get("box", None)
+                                if bbox and len(bbox) >= 4:
+                                    x1, y1, x2, y2 = bbox[:4]
+                                    frame_h, frame_w = frame.shape[:2] if frame is not None else (1080, 1920)
+                                    bbox_cx = ((x1 + x2) / 2.0) / frame_w
+                                    bbox_cy = ((y1 + y2) / 2.0) / frame_h
+                                else:
+                                    bbox_cx = tr.get("cx", 0.5)
+                                    bbox_cy = tr.get("cy", 0.5)
+
+                                if np.isnan(bbox_cx) or np.isinf(bbox_cx): bbox_cx = 0.5
+                                if np.isnan(bbox_cy) or np.isinf(bbox_cy): bbox_cy = 0.5
+
+                                speed_val = float(tr.get("speed", 0.0))
+                                if np.isnan(speed_val) or np.isinf(speed_val): speed_val = 0.0
+
+                                _now = datetime.datetime.now(_IST)  # IST timezone
+                                existing_tr = existing_tracks.get(t_uuid)
+                                if not existing_tr:
+                                    db_track = Track(
+                                        track_uuid=t_uuid,
+                                        camera_id=self.camera_id,
+                                        label=tr.get("class_name", "object"),
+                                        first_seen=_now,
+                                        last_seen=_now,
+                                        speed=speed_val,
+                                        path_history=path_json,
+                                        last_bbox_x=round(float(bbox_cx), 4),
+                                        last_bbox_y=round(float(bbox_cy), 4),
+                                    )
+                                    db.add(db_track)
+                                else:
+                                    existing_tr.last_seen = _now
+                                    existing_tr.speed = speed_val
+                                    existing_tr.path_history = path_json
+                                    existing_tr.last_bbox_x = round(float(bbox_cx), 4)
+                                    existing_tr.last_bbox_y = round(float(bbox_cy), 4)
+
+                            # Batch faces
+                            for face in results.get("faces", []):
+                                resolved_identity = GlobalIdentityManager.get_or_create_face_identity(
+                                    face["track_uuid"], self.camera_id, face["embedding"]
+                                )
+                                db_face = Face(
+                                    track_uuid=face["track_uuid"],
+                                    label=resolved_identity,
+                                    embedding_id=face["embedding_id"],
+                                    timestamp=datetime.datetime.now(_IST)
+                                )
+                                db.add(db_face)
+
+                                snap_path = os.path.join(snap_dir, f"{face['embedding_id']}.jpg")
+                                pending_snapshot_writes.append((snap_path, frame))
+                                pending_vector_index_ops.append((
+                                    face["embedding_id"],
+                                    face["embedding"],
+                                    {
+                                        "type": "face",
+                                        "camera_id": self.camera_id,
+                                        "label": resolved_identity,
+                                        "identity_uuid": resolved_identity,
+                                        "track_uuid": face["track_uuid"],
+                                        "snapshot_url": f"/api/v1/playback/snapshot/{face['embedding_id']}",
+                                        "timestamp": datetime.datetime.now(_IST).isoformat(),
+                                    }
+                                ))
+
+                            # Batch person crops for OpenCLIP attribute search
+                            for p_crop in results.get("person_crops", []):
+                                crop_id = p_crop["embedding_id"]
+                                snap_path = os.path.join(snap_dir, f"{crop_id}.jpg")
+                                pending_snapshot_writes.append((snap_path, p_crop.get("crop", frame)))
+                                pending_vector_index_ops.append((
+                                    crop_id,
+                                    p_crop["embedding"],
+                                    {
+                                        "type": "person_crop",
+                                        "camera_id": self.camera_id,
+                                        "track_uuid": p_crop["track_uuid"],
+                                        "upper_color": p_crop.get("upper_color", "unknown"),
+                                        "lower_color": p_crop.get("lower_color", "unknown"),
+                                        "bbox": p_crop.get("bbox", []),
+                                        "snapshot_url": f"/api/v1/playback/snapshot/{crop_id}",
+                                        "timestamp": datetime.datetime.now(_IST).isoformat(),
+                                    }
+                                ))
+
+                            # Batch vehicles
+                            for veh in results.get("vehicles", []):
+                                resolved_identity = GlobalIdentityManager.get_or_create_vehicle_identity(
+                                    veh["track_uuid"], self.camera_id, veh["reid_vector"], veh["license_plate"]
+                                )
+                                db_veh = Vehicle(
+                                    track_uuid=veh["track_uuid"],
                                     camera_id=self.camera_id,
-                                    label=tr.get("class_name", "object"),
-                                    first_seen=_now,
-                                    last_seen=_now,
-                                    speed=speed_val,
-                                    path_history=path_json,
-                                    last_bbox_x=round(float(bbox_cx), 4),
-                                    last_bbox_y=round(float(bbox_cy), 4),
+                                    license_plate=veh["license_plate"] or resolved_identity,
+                                    ocr_confidence=veh["ocr_confidence"],
+                                    vehicle_type=veh["vehicle_type"],
+                                    vehicle_color=veh.get("vehicle_color", "unknown"),
+                                    timestamp=datetime.datetime.now(_IST)
                                 )
-                                db.add(db_track)
-                            else:
-                                existing_tr.last_seen = _now
-                                existing_tr.speed = speed_val
-                                existing_tr.path_history = path_json
-                                existing_tr.last_bbox_x = round(float(bbox_cx), 4)
-                                existing_tr.last_bbox_y = round(float(bbox_cy), 4)
+                                db.add(db_veh)
 
-                        # Batch faces
-                        for face in results.get("faces", []):
-                            resolved_identity = GlobalIdentityManager.get_or_create_face_identity(
-                                face["track_uuid"], self.camera_id, face["embedding"]
+                                if veh["license_plate"]:
+                                    _plates_logger.info(
+                                        f"CAMERA={self.camera_id} "
+                                        f"PLATE={veh['license_plate']} "
+                                        f"CONF={veh['ocr_confidence']:.2f} "
+                                        f"TYPE={veh['vehicle_type']}"
+                                    )
+
+                                plate_str = veh.get("license_plate")
+                                if plate_str and str(plate_str).strip():
+                                    clean_p = str(plate_str).strip().upper().replace(" ", "")
+                                    vid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"VEHICLE_{clean_p}"))
+                                else:
+                                    vid = str(uuid.uuid4())
+
+                                snap_path = os.path.join(snap_dir, f"{vid}.jpg")
+                                pending_snapshot_writes.append((snap_path, frame))
+                                pending_vector_index_ops.append((
+                                    vid,
+                                    veh["reid_vector"],
+                                    {
+                                        "type": "vehicle",
+                                        "camera_id": self.camera_id,
+                                        "license_plate": veh["license_plate"],
+                                        "vehicle_type": veh.get("vehicle_type", "car"),
+                                        "vehicle_color": veh.get("vehicle_color", "unknown"),
+                                        "identity_uuid": resolved_identity,
+                                        "track_uuid": veh["track_uuid"],
+                                        "snapshot_url": f"/api/v1/playback/snapshot/{vid}",
+                                        "timestamp": datetime.datetime.now(_IST).isoformat(),
+                                    }
+                                ))
+
+                            # Save detailed YOLO caption periodically and whenever Florence is disabled/not queued
+                            florence_enabled = get_models().get("florence", {}).get("enabled", True)
+                            florence_queued = results.get("florence_queued", False)
+                            has_alerts = len(results.get("alerts", [])) > 0
+
+                            should_save_caption = (
+                                (not florence_enabled) or
+                                (not florence_queued) or
+                                has_alerts
                             )
-                            db_face = Face(
-                                track_uuid=face["track_uuid"],
-                                label=resolved_identity,
-                                embedding_id=face["embedding_id"],
-                                timestamp=datetime.datetime.now(_IST)
-                            )
-                            db.add(db_face)
 
-                            snap_path = os.path.join(snap_dir, f"{face['embedding_id']}.jpg")
-                            pending_snapshot_writes.append((snap_path, frame))
-                            pending_vector_index_ops.append((
-                                face["embedding_id"],
-                                face["embedding"],
-                                {
-                                    "type": "face",
-                                    "camera_id": self.camera_id,
-                                    "label": resolved_identity,
-                                    "identity_uuid": resolved_identity,
-                                    "track_uuid": face["track_uuid"],
-                                    "snapshot_url": f"/api/v1/playback/snapshot/{face['embedding_id']}",
-                                    "timestamp": datetime.datetime.now(_IST).isoformat(),
-                                }
-                            ))
-
-                        # Batch person crops for OpenCLIP attribute search
-                        for p_crop in results.get("person_crops", []):
-                            crop_id = p_crop["embedding_id"]
-                            snap_path = os.path.join(snap_dir, f"{crop_id}.jpg")
-                            pending_snapshot_writes.append((snap_path, p_crop.get("crop", frame)))
-                            pending_vector_index_ops.append((
-                                crop_id,
-                                p_crop["embedding"],
-                                {
-                                    "type": "person_crop",
-                                    "camera_id": self.camera_id,
-                                    "track_uuid": p_crop["track_uuid"],
-                                    "upper_color": p_crop.get("upper_color", "unknown"),
-                                    "lower_color": p_crop.get("lower_color", "unknown"),
-                                    "bbox": p_crop.get("bbox", []),
-                                    "snapshot_url": f"/api/v1/playback/snapshot/{crop_id}",
-                                    "timestamp": datetime.datetime.now(_IST).isoformat(),
-                                }
-                            ))
-
-                        # Batch vehicles
-                        for veh in results.get("vehicles", []):
-                            resolved_identity = GlobalIdentityManager.get_or_create_vehicle_identity(
-                                veh["track_uuid"], self.camera_id, veh["reid_vector"], veh["license_plate"]
-                            )
-                            db_veh = Vehicle(
-                                track_uuid=veh["track_uuid"],
-                                camera_id=self.camera_id,
-                                license_plate=veh["license_plate"] or resolved_identity,
-                                ocr_confidence=veh["ocr_confidence"],
-                                vehicle_type=veh["vehicle_type"],
-                                vehicle_color=veh.get("vehicle_color", "unknown"),
-                                timestamp=datetime.datetime.now(_IST)
-                            )
-                            db.add(db_veh)
-
-                            if veh["license_plate"]:
-                                _plates_logger.info(
-                                    f"CAMERA={self.camera_id} "
-                                    f"PLATE={veh['license_plate']} "
-                                    f"CONF={veh['ocr_confidence']:.2f} "
-                                    f"TYPE={veh['vehicle_type']}"
-                                )
-
-                            plate_str = veh.get("license_plate")
-                            if plate_str and str(plate_str).strip():
-                                clean_p = str(plate_str).strip().upper().replace(" ", "")
-                                vid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"VEHICLE_{clean_p}"))
-                            else:
+                            if should_save_caption and results.get("caption") and results.get("embedding"):
                                 vid = str(uuid.uuid4())
+                                snap_path = os.path.join(snap_dir, f"{vid}.jpg")
+                                pending_snapshot_writes.append((snap_path, frame))
 
-                            snap_path = os.path.join(snap_dir, f"{vid}.jpg")
-                            pending_snapshot_writes.append((snap_path, frame))
-                            pending_vector_index_ops.append((
-                                vid,
-                                veh["reid_vector"],
-                                {
-                                    "type": "vehicle",
-                                    "camera_id": self.camera_id,
-                                    "license_plate": veh["license_plate"],
-                                    "vehicle_type": veh.get("vehicle_type", "car"),
-                                    "vehicle_color": veh.get("vehicle_color", "unknown"),
-                                    "identity_uuid": resolved_identity,
-                                    "track_uuid": veh["track_uuid"],
-                                    "snapshot_url": f"/api/v1/playback/snapshot/{vid}",
-                                    "timestamp": datetime.datetime.now(_IST).isoformat(),
-                                }
-                            ))
+                                snap_url = f"/api/v1/playback/snapshot/{vid}"
+                                pending_vector_index_ops.append((
+                                    vid,
+                                    results["embedding"],
+                                    {
+                                        "type": "scene",
+                                        "camera_id": self.camera_id,
+                                        "caption": results["caption"],
+                                        "snapshot_url": snap_url,
+                                        "timestamp": datetime.datetime.now(_IST).isoformat(),
+                                    }
+                                ))
 
-                        # Save detailed YOLO caption periodically and whenever Florence is disabled/not queued
-                        florence_enabled = get_models().get("florence", {}).get("enabled", True)
-                        florence_queued = results.get("florence_queued", False)
-                        has_alerts = len(results.get("alerts", [])) > 0
+                                db_caption = SceneCaption(
+                                    camera_id=self.camera_id,
+                                    caption=results["caption"],
+                                    snapshot_url=snap_url,
+                                    timestamp=datetime.datetime.now(_IST)
+                                )
+                                db.add(db_caption)
 
-                        should_save_caption = (
-                            (not florence_enabled) or
-                            (not florence_queued) or
-                            has_alerts
-                        )
-
-                        if should_save_caption and results.get("caption") and results.get("embedding"):
-                            vid = str(uuid.uuid4())
-                            snap_path = os.path.join(snap_dir, f"{vid}.jpg")
-                            pending_snapshot_writes.append((snap_path, frame))
-
-                            snap_url = f"/api/v1/playback/snapshot/{vid}"
-                            pending_vector_index_ops.append((
-                                vid,
-                                results["embedding"],
-                                {
-                                    "type": "scene",
+                                pending_caption_events.append({
                                     "camera_id": self.camera_id,
                                     "caption": results["caption"],
-                                    "snapshot_url": snap_url,
                                     "timestamp": datetime.datetime.now(_IST).isoformat(),
-                                }
-                            ))
+                                })
 
-                            db_caption = SceneCaption(
-                                camera_id=self.camera_id,
-                                caption=results["caption"],
-                                snapshot_url=snap_url,
-                                timestamp=datetime.datetime.now(_IST)
-                            )
-                            db.add(db_caption)
+                            # Batch alerts
+                            for alert in results.get("alerts", []):
+                                snap_id = str(uuid.uuid4())
+                                snap_path = os.path.join(snap_dir, f"{snap_id}.jpg")
+                                pending_snapshot_writes.append((snap_path, frame))
 
-                            pending_caption_events.append({
-                                "camera_id": self.camera_id,
-                                "caption": results["caption"],
-                                "timestamp": datetime.datetime.now(_IST).isoformat(),
-                            })
+                                calc_latency = round((time.time() - start_time) * 1000.0, 2)
+                                alert_conf = float(alert.get("confidence", 0.95))
+                                db_alert = Alert(
+                                    camera_id=self.camera_id,
+                                    type=alert["type"],
+                                    message=alert["message"],
+                                    severity=alert["severity"],
+                                    confidence=alert_conf,
+                                    timestamp=datetime.datetime.now(_IST),
+                                    latency_ms=calc_latency,
+                                    snapshot_url=f"/api/v1/playback/snapshot/{snap_id}"
+                                )
+                                db.add(db_alert)
+                                db.flush() # assign ID before commit
 
-                        # Batch alerts
-                        for alert in results.get("alerts", []):
-                            snap_id = str(uuid.uuid4())
-                            snap_path = os.path.join(snap_dir, f"{snap_id}.jpg")
-                            pending_snapshot_writes.append((snap_path, frame))
+                                pending_alert_events.append({
+                                    "id": db_alert.id,
+                                    "camera_id": self.camera_id,
+                                    "type": alert["type"],
+                                    "message": alert["message"],
+                                    "severity": alert["severity"],
+                                    "confidence": alert_conf,
+                                    "timestamp": db_alert.timestamp.isoformat(),
+                                    "latency_ms": calc_latency,
+                                    "snapshot_url": db_alert.snapshot_url,
+                                })
 
-                            calc_latency = round((time.time() - start_time) * 1000.0, 2)
-                            alert_conf = float(alert.get("confidence", 0.95))
-                            db_alert = Alert(
-                                camera_id=self.camera_id,
-                                type=alert["type"],
-                                message=alert["message"],
-                                severity=alert["severity"],
-                                confidence=alert_conf,
-                                timestamp=datetime.datetime.now(_IST),
-                                latency_ms=calc_latency,
-                                snapshot_url=f"/api/v1/playback/snapshot/{snap_id}"
-                            )
-                            db.add(db_alert)
-                            db.flush() # assign ID before commit
+                            # Single batch commit for the frame
+                            try:
+                                db.commit()
+                            except Exception as e:
+                                logger.warning(f"[{self.camera_id}] DB commit error: {e}")
+                                db.rollback()
+                            else:
+                                for snap_path, snap_frame in pending_snapshot_writes:
+                                    save_snapshot_async(snap_path, snap_frame)
 
-                            pending_alert_events.append({
-                                "id": db_alert.id,
-                                "camera_id": self.camera_id,
-                                "type": alert["type"],
-                                "message": alert["message"],
-                                "severity": alert["severity"],
-                                "confidence": alert_conf,
-                                "timestamp": db_alert.timestamp.isoformat(),
-                                "latency_ms": calc_latency,
-                                "snapshot_url": db_alert.snapshot_url,
-                            })
+                                for vector_id, vector, payload in pending_vector_index_ops:
+                                    index_vector(vector_id=vector_id, vector=vector, payload=payload)
 
-                        # Single batch commit for the frame
-                        try:
-                            db.commit()
-                        except Exception as e:
-                            logger.warning(f"[{self.camera_id}] DB commit error: {e}")
-                            db.rollback()
-                        else:
-                            for snap_path, snap_frame in pending_snapshot_writes:
-                                save_snapshot_async(snap_path, snap_frame)
+                                for caption_event in pending_caption_events:
+                                    event_client.publish_event("captions", caption_event)
 
-                            for vector_id, vector, payload in pending_vector_index_ops:
-                                index_vector(vector_id=vector_id, vector=vector, payload=payload)
-
-                            for caption_event in pending_caption_events:
-                                event_client.publish_event("captions", caption_event)
-
-                            for alert_payload in pending_alert_events:
-                                event_client.publish_event("alerts", alert_payload)
+                                for alert_payload in pending_alert_events:
+                                    event_client.publish_event("alerts", alert_payload)
 
                 except Exception as e:
                     logger.error(f"[{self.camera_id}] Unexpected error in frame processing: {e}", exc_info=True)

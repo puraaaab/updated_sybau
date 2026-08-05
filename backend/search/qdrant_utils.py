@@ -109,7 +109,7 @@ def enqueue_qdrant_point(vector_id: str, vector: list, payload: dict):
         return
 
     p_type = payload.get("type") if isinstance(payload, dict) else None
-    if p_type == "person_crop":
+    if p_type == "person_crop" or len(vector) == 768:
         vec_name = "person_crop"
     elif p_type == "face" or (len(vector) == 512 and p_type != "person_crop"):
         vec_name = "face"
@@ -172,14 +172,28 @@ def _qdrant_batch_worker():
         if not client:
             continue
 
-        points = [
-            qmodels.PointStruct(
-                id=qid,
-                vector={vname: vec},
-                payload=p
+        EXPECTED_DIMS = {
+            "scene": 1024,
+            "face": 512,
+            "vehicle": 576,
+            "person_crop": 768,
+        }
+
+        points = []
+        for (qid, vname, vec, p) in batch:
+            exp_dim = EXPECTED_DIMS.get(vname)
+            if exp_dim and len(vec) != exp_dim:
+                if len(vec) < exp_dim:
+                    vec = vec + [0.0] * (exp_dim - len(vec))
+                else:
+                    vec = vec[:exp_dim]
+            points.append(
+                qmodels.PointStruct(
+                    id=qid,
+                    vector={vname: vec},
+                    payload=p
+                )
             )
-            for (qid, vname, vec, p) in batch
-        ]
 
         try:
             client.upsert(

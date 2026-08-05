@@ -28,12 +28,7 @@ MOCK_DESCRIPTIONS = [
     "An operator walking past the camera range."
 ]
 
-CAPTION_PROMPT = (
-    "<MORE_DETAILED_CAPTION> "
-    "Describe the scene in a single rich paragraph with as much visual detail as possible. "
-    "Include people, clothing, actions, vehicles, object positions, colors, lighting, motion, "
-    "camera perspective, and background context."
-)
+CAPTION_PROMPT = "<MORE_DETAILED_CAPTION>"
 
 
 def _florence_dispatch_interval_seconds() -> float:
@@ -51,13 +46,13 @@ def _florence_dispatch_interval_seconds() -> float:
 def _florence_max_new_tokens() -> int:
     cfg = get_models().get("florence", {})
     if isinstance(cfg, dict):
-        tokens = cfg.get("max_new_tokens", 192)
+        tokens = cfg.get("max_new_tokens", 1024)
         try:
             tokens = int(tokens)
         except (TypeError, ValueError):
-            tokens = 192
+            tokens = 1024
         return max(32, tokens)
-    return 192
+    return 1024
 
 
 def _florence_caption_batch_size() -> int:
@@ -68,7 +63,7 @@ def _florence_caption_batch_size() -> int:
             batch_size = int(batch_size)
         except (TypeError, ValueError):
             batch_size = 2
-        return max(1, min(4, batch_size))
+        return max(1, min(16, batch_size))
     return 2
 
 
@@ -364,15 +359,15 @@ def generate_scene_captions(frames: list[np.ndarray], corr_id: str | None = None
             return [None for _ in frames]
         model, processor = florence_res
 
-        logger.warning(f"[Florence-2 Debug] corr={corr_id} 2. Preprocessing {len(frames)} frame(s) (fast 320px scale)...")
+        logger.warning(f"[Florence-2 Debug] corr={corr_id} 2. Preprocessing {len(frames)} frame(s) (768px scale for color/detail)...")
         pil_images = []
         for frame in frames:
             if frame is None or frame.size == 0:
                 pil_images.append(None)
                 continue
             h, w = frame.shape[:2]
-            if max(h, w) > 320:
-                scale = 320.0 / max(h, w)
+            if max(h, w) > 768:
+                scale = 768.0 / max(h, w)
                 frame = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_LINEAR)
 
             rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -401,15 +396,23 @@ def generate_scene_captions(frames: list[np.ndarray], corr_id: str | None = None
             logger.warning(f"[Florence-2 Debug] corr={corr_id} 5. Calling model.generate on CUDA...")
             t_gen0 = time.time()
             max_new_tokens = _florence_max_new_tokens()
+            eos_id = getattr(getattr(processor, "tokenizer", None), "eos_token_id", None)
+            pad_id = getattr(getattr(processor, "tokenizer", None), "pad_token_id", None)
+            gen_kwargs = {
+                "input_ids": input_ids,
+                "pixel_values": pixel_values,
+                "max_new_tokens": max_new_tokens,
+                "do_sample": False,
+                "num_beams": 1,
+                "use_cache": True,
+            }
+            if eos_id is not None:
+                gen_kwargs["eos_token_id"] = eos_id
+            if pad_id is not None:
+                gen_kwargs["pad_token_id"] = pad_id
+
             with torch.inference_mode():
-                generated_ids = model.generate(
-                    input_ids=input_ids,
-                    pixel_values=pixel_values,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    num_beams=1,
-                    use_cache=True,
-                )
+                generated_ids = model.generate(**gen_kwargs)
             logger.warning(f"[Florence-2 Debug] corr={corr_id} model.generate() took {time.time()-t_gen0:.2f}s")
             logger.warning(f"[Florence-2 Debug] corr={corr_id} 6. model.generate completed successfully!")
 

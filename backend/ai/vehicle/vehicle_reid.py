@@ -203,7 +203,7 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
                 mock_plates = ["KA51MB8811", "DL3CQQ1234", "MH12DE5678", "TX99VMS"]
                 plate_text = mock_plates[veh["track_id"] % len(mock_plates)]
                 vehicles_detected.append({
-                    "track_uuid": f"track_{veh['track_id']}",
+                    "track_uuid": veh.get("track_uuid") or f"TRK_{veh.get('camera_id', 'cam1')}_{veh['track_id']}",
                     "license_plate": plate_text,
                     "ocr_confidence": 0.96,
                     "vehicle_type": veh["class_name"],
@@ -321,8 +321,8 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
                                 pd_res = reader.ocr(img_variant, cls=False)
                                 res = []
                                 # 2.x returns [[[bbox, (txt, conf)], ...]] — one list per image
-                                page = pd_res[0] if pd_res else None
-                                if page:
+                                page = pd_res[0] if (pd_res and isinstance(pd_res, list) and len(pd_res) > 0 and pd_res[0] is not None) else None
+                                if page and isinstance(page, list):
                                     for sub in page:
                                         if sub and len(sub) == 2:
                                             bbox_coords, rec = sub
@@ -391,7 +391,7 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
 
         # Explicit audited failure fields (no random vector pollution)
         vehicles_detected.append({
-            "track_uuid": f"track_{veh['track_id']}",
+            "track_uuid": veh.get("track_uuid") or f"TRK_{veh.get('camera_id', 'cam1')}_{veh['track_id']}",
             "license_plate": plate_text,
             "ocr_confidence": ocr_conf,
             "vehicle_type": veh["class_name"],

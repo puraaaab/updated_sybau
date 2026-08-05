@@ -167,12 +167,95 @@ def _build_qdrant_time_filter(start_time: str = None, end_time: str = None):
         return None
 
 
+def _sql_text_matches(query_text: str, limit: int = 10, start_time: str = None, end_time: str = None) -> list:
+    """
+    Queries SQL database (SceneCaption, Vehicle, Face, Track) for keyword matches
+    when Qdrant vector search is empty or unavailable.
+    """
+    try:
+        from ..database.connection import SessionLocal
+        from ..database.models import SceneCaption, Vehicle, Face
+        q_norm = normalize_text(query_text)
+        q_words = [w for w in q_norm.split() if w not in STOPWORDS and len(w) > 1]
+        if not q_words:
+            q_words = [query_text.strip().lower()]
+
+        results = []
+        seen_snapshots = set()
+
+        with SessionLocal() as db:
+            # 1. Search SceneCaptions
+            query_sc = db.query(SceneCaption)
+            for word in q_words[:3]:
+                query_sc = query_sc.filter(SceneCaption.caption.ilike(f"%{word}%"))
+            if start_time:
+                query_sc = query_sc.filter(SceneCaption.timestamp >= start_time)
+            if end_time:
+                query_sc = query_sc.filter(SceneCaption.timestamp <= end_time)
+
+            sc_list = query_sc.order_by(SceneCaption.timestamp.desc()).limit(limit).all()
+            for sc in sc_list:
+                snap = sc.snapshot_url or ""
+                if snap and snap in seen_snapshots:
+                    continue
+                if snap:
+                    seen_snapshots.add(snap)
+
+                results.append({
+                    "score": 0.88,
+                    "payload": {
+                        "type": "scene",
+                        "camera_id": sc.camera_id,
+                        "caption": sc.caption,
+                        "snapshot_url": sc.snapshot_url,
+                        "timestamp": sc.timestamp.isoformat() if sc.timestamp else ""
+                    }
+                })
+
+            # 2. Search Vehicles (license plate, color, vehicle_type)
+            from sqlalchemy import or_
+            query_v = db.query(Vehicle)
+            conds = []
+            for word in q_words[:3]:
+                conds.append(Vehicle.license_plate.ilike(f"%{word}%"))
+                conds.append(Vehicle.vehicle_color.ilike(f"%{word}%"))
+                conds.append(Vehicle.vehicle_type.ilike(f"%{word}%"))
+            query_v = query_v.filter(or_(*conds))
+
+            if start_time:
+                query_v = query_v.filter(Vehicle.timestamp >= start_time)
+            if end_time:
+                query_v = query_v.filter(Vehicle.timestamp <= end_time)
+
+            v_list = query_v.order_by(Vehicle.timestamp.desc()).limit(limit).all()
+            for v in v_list:
+                results.append({
+                    "score": 0.95 if any(w in (v.license_plate or "").lower() for w in q_words) else 0.85,
+                    "payload": {
+                        "type": "vehicle",
+                        "camera_id": v.camera_id or "cam_1",
+                        "license_plate": v.license_plate,
+                        "vehicle_type": v.vehicle_type,
+                        "vehicle_color": v.vehicle_color,
+                        "identity_uuid": f"VEHICLE_{v.license_plate}" if v.license_plate else f"track_{v.track_uuid}",
+                        "track_uuid": v.track_uuid,
+                        "snapshot_url": f"/api/v1/playback/snapshot/veh_{v.id}",
+                        "timestamp": v.timestamp.isoformat() if v.timestamp else ""
+                    }
+                })
+
+        return sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
+    except Exception as e:
+        logger.warning(f"SQL search fallback note: {e}")
+        return []
+
+
 def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = None, end_time: str = None) -> list:
     """
     Translates search query to real semantic embeddings via SentenceTransformer & OpenCLIP,
     querying Qdrant for matching scene captions and visual person crop features.
 
-    Falls back to in-memory keyword overlap only if Qdrant is unreachable.
+    Falls back to SQL database and in-memory keyword overlap if Qdrant is empty or unreachable.
     """
     _seed_demo_vector_db()
 
@@ -186,7 +269,7 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
         clip_query_vec = get_clip_text_embedding(query_text)
 
         qd_results = []
-        with qdrant_client_with_timeout(5.0) as client:
+        with qdrant_client_with_timeout(1.5) as client:
             # 1. Search scene captions
             try:
                 scene_res = client.query_points(
@@ -202,7 +285,7 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
             except Exception as e:
                 logger.debug(f"Qdrant scene query note: {e}")
 
-            # 2. Search OpenCLIP person crops (512d)
+            # 2. Search OpenCLIP person crops
             try:
                 crop_res = client.query_points(
                     collection_name="vms_embeddings",
@@ -217,7 +300,7 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
             except Exception as e:
                 logger.debug(f"Qdrant person_crop query note: {e}")
 
-            # 3. Search Vehicle Re-ID / attribute vectors (576d or CLIP fallback)
+            # 3. Search Vehicle Re-ID / attribute vectors
             try:
                 veh_res = client.query_points(
                     collection_name="vms_embeddings",
@@ -263,13 +346,19 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
                 score = min(score, 0.99)  # Cap score at 0.99 so UI doesn't exceed 99%
                 results.append({"score": score, "payload": r.payload})
 
-            return sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
+            if results:
+                return sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
     except Exception as e:
         if is_production:
             raise RuntimeError(f"FATAL: Qdrant search failed in production: {e}") from e
-        logger.warning("Qdrant unavailable, falling back to in-memory: %s", e)
+        logger.warning("Qdrant unavailable, falling back to SQL/in-memory: %s", e)
 
-    # Fallback: local in-memory word-overlap search on seeded demo records
+    # Fallback 1: SQL database text matches
+    sql_matches = _sql_text_matches(query_text, limit, start_time, end_time)
+    if sql_matches:
+        return sql_matches
+
+    # Fallback 2: local in-memory word-overlap search on seeded demo records
     return _local_text_matches(query_text, limit, start_time, end_time)
 
 

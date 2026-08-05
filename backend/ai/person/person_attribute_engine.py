@@ -40,9 +40,14 @@ def _get_clip_model():
             try:
                 import torch
                 from sentence_transformers import SentenceTransformer
-                device = cfg.get("person", {}).get("device", "cpu")
+                device = cfg.get("person", {}).get("device", "cuda" if torch.cuda.is_available() else "cpu")
                 logger.info(f"Loading OpenCLIP vision model (clip-ViT-L-14) on {device}...")
                 _clip_model = SentenceTransformer("clip-ViT-L-14", device=device)
+                if device == "cuda" and hasattr(_clip_model, "half"):
+                    try:
+                        _clip_model.half()
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.warning(f"Could not load SentenceTransformer clip-ViT-L-14: {e}")
                 _clip_model = None
@@ -59,9 +64,9 @@ def get_clip_text_embedding(text_query: str) -> list:
         except Exception as e:
             logger.warning(f"CLIP text encoding failed: {e}")
 
-    # Fallback deterministic synthetic embedding
+    # Fallback deterministic synthetic embedding (768d for clip-ViT-L-14)
     rng = np.random.default_rng(hash(text_query) % 4294967295)
-    vec = rng.normal(0, 1, 512)
+    vec = rng.normal(0, 1, 768)
     vec = vec / np.linalg.norm(vec)
     return vec.tolist()
 
@@ -178,9 +183,9 @@ def process_person_crops(frame: np.ndarray, tracks: list, max_crop_embeddings: i
                     logger.warning(f"CLIP encoding error for person crop: {e}")
 
             if vec is None:
-                # Deterministic fallback synthetic vector (512d)
+                # Deterministic fallback synthetic vector (768d for clip-ViT-L-14)
                 rng = np.random.default_rng(hash(track_uuid or "p") % 4294967295)
-                vec = (rng.normal(0, 1, 512) / np.linalg.norm(rng.normal(0, 1, 512))).tolist()
+                vec = (rng.normal(0, 1, 768) / np.linalg.norm(rng.normal(0, 1, 768))).tolist()
 
             if track_uuid:
                 with _person_cache_lock:

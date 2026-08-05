@@ -18,7 +18,8 @@ services:
       - MTX_APIADDRESS=:9997
       - MTX_HLSSEGMENTDURATION=1s
       - MTX_HLSPARTDURATION=200ms
-      - MTX_HLSMAXPLAYLISTS=5
+      - MTX_HLSSEGMENTCOUNT=30
+      - MTX_HLSMAXPLAYLISTS=30
     restart: unless-stopped
 
   # PostgreSQL for metadata and event history

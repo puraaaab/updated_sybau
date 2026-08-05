@@ -121,7 +121,7 @@ def detect_and_track_batch(
     frames: List[np.ndarray],
     stream_ids: List[str],
     frame_counters: List[int],
-    skip_interval: int = 3,
+    skip_interval: int = 1,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Executes batched YOLO tracking across multiple camera streams with selective frame skipping."""
     batch_detections = {stream_id: [] for stream_id in stream_ids}
@@ -139,24 +139,31 @@ def detect_and_track_batch(
 
     try:
         yolo_model = model_manager.get_yolo()
+        device_target = "cuda" if torch.cuda.is_available() else "cpu"
         results = yolo_model.track(
             frames_to_process,
             persist=True,
             tracker="bytetrack.yaml",
-            imgsz=960,
+            imgsz=640,
             classes=COCO_CLASS_IDS,
             conf=_confidence_threshold(),
+            device=device_target,
             verbose=False,
         )
-    except Exception:
-        logger.exception("Batched YOLO track() failed due to runtime/CUDA surge; skipping batch.")
-        return batch_detections
-
-    for batch_idx, result in enumerate(results or []):
-        if batch_idx >= len(active_stream_indices):
-            break
-        orig_stream_idx = active_stream_indices[batch_idx]
-        stream_id = stream_ids[orig_stream_idx]
-        batch_detections[stream_id] = _parse_result_boxes(result)
+        for batch_idx, result in enumerate(results or []):
+            if batch_idx >= len(active_stream_indices):
+                break
+            orig_stream_idx = active_stream_indices[batch_idx]
+            stream_id = stream_ids[orig_stream_idx]
+            batch_detections[stream_id] = _parse_result_boxes(result)
+    except Exception as exc:
+        logger.warning(f"Batched YOLO track() failed ({exc}); falling back to single-frame detect_and_track.")
+        for orig_idx in active_stream_indices:
+            sid = stream_ids[orig_idx]
+            frm = frames[orig_idx]
+            try:
+                batch_detections[sid] = detect_and_track(frm)
+            except Exception:
+                batch_detections[sid] = []
 
     return batch_detections

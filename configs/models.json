@@ -9,21 +9,24 @@
     "enabled": true,
     "detector_path": "scrfd_500m.onnx",
     "recognizer_model": "buffalo_l",
-    "device": "cuda"
+    "device": "cpu"
   },
   "vehicle": {
     "enabled": true,
     "reid_model": "market1501",
     "ocr_engine": "paddleocr"
   },
+  "person": {
+    "device": "cpu"
+  },
   "florence": {
     "enabled": true,
-    "model_id": "microsoft/Florence-2-base",
+    "model_id": "microsoft/Florence-2-large",
     "device": "cuda",
-    "invoke_every_n_frames": 1,
+    "invoke_every_n_frames": 30,
     "dispatch_interval_seconds": 0.5,
-    "caption_batch_size": 2,
-    "max_new_tokens": 224
+    "caption_batch_size": 9,
+    "max_new_tokens": 1024
   },
   "embeddings": {
     "model_name": "BAAI/bge-large-en-v1.5",

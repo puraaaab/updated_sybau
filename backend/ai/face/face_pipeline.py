@@ -69,7 +69,7 @@ def process_faces(frame: np.ndarray, detections: list):
                 face_id = str(uuid.uuid4())
                 mock_embedding = np.random.normal(0, 1, 512).tolist()
                 faces_detected.append({
-                    "track_uuid": f"track_{person['track_id']}",
+                    "track_uuid": person.get("track_uuid") or f"TRK_{person.get('camera_id', 'cam1')}_{person['track_id']}",
                     "face_bbox": [
                         person["bbox"][0] + 20, 
                         person["bbox"][1] + 10, 
@@ -136,7 +136,7 @@ def process_faces(frame: np.ndarray, detections: list):
                         dist = (fx - px_center)**2 + (fy - py_center)**2
                         if dist < min_dist:
                             min_dist = dist
-                            best_track_uuid = f"track_{person['track_id']}"
+                            best_track_uuid = person.get("track_uuid") or f"TRK_{person.get('camera_id', 'cam1')}_{person['track_id']}"
                             
                 if best_track_uuid:
                     face_id = str(uuid.uuid4())

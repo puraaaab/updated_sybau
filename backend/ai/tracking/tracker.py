@@ -72,6 +72,7 @@ class TrajectoryTracker:
                 det_copy = det.copy()
                 det_copy["label"] = det["class_name"]
                 det_copy["camera_id"] = camera_id
+                det_copy["track_uuid"] = f"TRK_{camera_id}_{det['track_id']}"
                 det_copy["speed"] = self.active_tracks[key]["speed"]
                 det_copy["path"] = self.active_tracks[key]["path"]
                 updated_detections.append(det_copy)
