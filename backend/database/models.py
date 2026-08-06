@@ -90,6 +90,7 @@ class Vehicle(Base):
     ocr_confidence = Column(Float, default=0.0, index=True)  # SCALE-05: added index
     vehicle_type = Column(String, default="unknown")
     vehicle_color = Column(String, default="unknown", index=True)
+    snapshot_url = Column(String, nullable=True)
     timestamp = Column(DateTime(timezone=True), default=_utcnow)
 
 

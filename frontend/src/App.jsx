@@ -74,6 +74,50 @@ export default function App() {
     return () => clearInterval(interval);
   }, [token]);
 
+  // WebSocket real-time alerts client
+  useEffect(() => {
+    if (!token) return;
+    let ws = null;
+    let timer = null;
+    let isSubscribed = true;
+
+    const connectWS = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host;
+      const wsUrl = `${protocol}//${host}/api/v1/ws/alerts`;
+      ws = new WebSocket(wsUrl);
+
+      ws.onmessage = (event) => {
+        if (!isSubscribed) return;
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload && payload.topic === 'alerts' && payload.data) {
+            _setWsAlert(payload.data);
+            setSnackbarOpen(true);
+          }
+        } catch (e) {}
+      };
+
+      ws.onclose = () => {
+        if (isSubscribed) {
+          timer = setTimeout(connectWS, 5000);
+        }
+      };
+
+      ws.onerror = () => {
+        try { ws.close(); } catch(e) {}
+      };
+    };
+
+    connectWS();
+
+    return () => {
+      isSubscribed = false;
+      if (timer) clearTimeout(timer);
+      if (ws) try { ws.close(); } catch(e) {}
+    };
+  }, [token]);
+
   // Customizable Settings State
   const [settings, setSettings] = useState(() => {
     try {

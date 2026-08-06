@@ -9,7 +9,7 @@ Implements:
 
 import socket
 import httpx
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 import logging
 import re
 from typing import List, Dict, Optional

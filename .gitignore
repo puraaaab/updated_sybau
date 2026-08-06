@@ -17,10 +17,17 @@ logs/
 scratch/
 tmp/
 .temp/
+*.bak
+*.bak*
+*.clean_bak
+*.prefinal_bak
+recovered_app*.txt
 
 # Data & Storage
 storage/recordings/
 storage/snapshots/
+**/snapshots/
+backend/storage/snapshots/
 storage/exports/
 *.mp4
 *.avi

@@ -33,6 +33,13 @@ def _mock_embedding(text: str, dim: int = EMBEDDING_DIM) -> list:
 _embedding_cache = {}
 _cache_lock_dict = threading.Lock()
 
+def is_embedder_ready() -> bool:
+    """Returns True if SentenceTransformer embedder is initialized or running in demo/mock mode."""
+    cfg = get_models()
+    if cfg.get("demo_mode", False):
+        return True
+    return _sentence_transformer_model is not None
+
 def get_text_embedding(text: str):
     """
     Generates a high-precision vector embedding for the input text using configured SentenceTransformer model.

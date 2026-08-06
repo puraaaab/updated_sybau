@@ -272,6 +272,33 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
     }
   };
 
+  const handleCaptureFrame = (e) => {
+    if (e) e.stopPropagation();
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) {
+      alert("Stream video frame is not currently ready for capture.");
+      return;
+    }
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+      const link = document.createElement('a');
+      link.href = dataUrl;
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      link.download = `CAM_${String(cameraId || 'STREAM').toUpperCase()}_Snapshot_${ts}.jpg`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error("Failed to capture stream frame snapshot:", err);
+    }
+  };
+
   const currentFrameMode = settings?.frameMode || 'dynamic';
   let dynamicPaddingTop = '56.25%'; // default 16:9 fallback
   if (currentFrameMode === 'fixed-16-9') {
@@ -361,6 +388,28 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
         </Box>
       )}
 
+      {!isOffline && playMode !== 'youtube' && (
+        <Tooltip title="Capture Instant Frame Snapshot">
+          <IconButton
+            size="small"
+            onClick={handleCaptureFrame}
+            sx={{
+              position: 'absolute',
+              bottom: 6,
+              right: 6,
+              backgroundColor: 'rgba(15, 23, 42, 0.75)',
+              color: '#00e676',
+              backdropFilter: 'blur(4px)',
+              border: '1px solid rgba(0, 230, 118, 0.4)',
+              transition: 'all 0.15s ease-in-out',
+              '&:hover': { backgroundColor: 'rgba(0, 230, 118, 0.95)', color: '#000', transform: 'scale(1.1)' }
+            }}
+          >
+            <CameraAltIcon sx={{ fontSize: 16 }} />
+          </IconButton>
+        </Tooltip>
+      )}
+
       {isPttActive && (
         <Box sx={{
           position: 'absolute', bottom: 8, left: 8,
@@ -385,9 +434,10 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
   const [selectedAlert, setSelectedAlert] = useState(null);
 
   // Criminal POI & Face Spotter Dialog State
-  const [showFaceSpotter, setShowFaceSpotter] = useState(false);
   const [spottedFaces, setSpottedFaces] = useState([]);
+  const [showFaceSpotter, setShowFaceSpotter] = useState(false);
   const [suspectQuery, setSuspectQuery] = useState('');
+  const [expandedCamera, setExpandedCamera] = useState(null);
 
   // Add Camera Modal State
   const [showAddModal, setShowAddModal] = useState(false);
@@ -656,6 +706,7 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
                     settings={settings}
                     cameraId={cam.id}
                     isHls={Boolean(cam.hls_url)}
+                    onDoubleClick={() => setExpandedCamera(cam)}
                   />
 
                   {/* Bottom Camera Info */}
@@ -695,7 +746,7 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
               <Typography variant="subtitle2" fontWeight="bold" sx={{ color: latestAlert.severity === 'high' ? 'error.main' : 'warning.main', display: 'flex', alignItems: 'center', gap: 1 }}>
                 🚨 {latestAlert.type} <Chip label={(latestAlert.camera_name || latestAlert.camera_id || "CAM").toUpperCase()} size="small" color="default" sx={{ height: 18, fontSize: '0.65rem' }} />
               </Typography>
-              <Typography variant="body2" color="text.primary" noWrap>
+              <Typography variant="body2" color="text.primary" sx={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
                 {latestAlert.details || latestAlert.message}
               </Typography>
             </Box>
@@ -796,6 +847,57 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setSelectedAlert(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ── Independent Window Focused Stream Dialog (Double-Click Trigger) ────────── */}
+      <Dialog
+        open={Boolean(expandedCamera)}
+        onClose={() => setExpandedCamera(null)}
+        maxWidth="lg"
+        fullWidth
+        PaperProps={{
+          sx: {
+            backgroundColor: '#090d16',
+            border: '1px solid rgba(0, 230, 118, 0.4)',
+            borderRadius: 2,
+          }
+        }}
+      >
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', pb: 1, borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            <RadioButtonCheckedIcon color="success" />
+            <Typography variant="h6" fontWeight="bold" sx={{ color: '#00e676', fontFamily: 'monospace' }}>
+              INDEPENDENT FOCUS STREAM // CAM_{String(expandedCamera?.id || '').toUpperCase()}
+            </Typography>
+            <Chip label={expandedCamera?.location || expandedCamera?.name} size="small" variant="outlined" color="primary" />
+          </Box>
+          <IconButton onClick={() => setExpandedCamera(null)} size="small" sx={{ color: 'text.secondary' }}>
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ p: 2, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', backgroundColor: '#000' }}>
+          {expandedCamera && (
+            <Box sx={{ width: '100%', minHeight: '65vh', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <LivePlayer
+                url={expandedCamera.hls_url || expandedCamera.stream_url}
+                originalUrl={expandedCamera.stream_url}
+                isOffline={expandedCamera.status === 'offline'}
+                token={token}
+                settings={settings}
+                cameraId={expandedCamera.id}
+                isHls={Boolean(expandedCamera.hls_url)}
+              />
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, py: 1.5, borderTop: '1px solid rgba(255,255,255,0.1)', justifyContent: 'space-between' }}>
+          <Typography variant="caption" color="text.secondary">
+            Double-click stream tile or click Return to return to multi-camera grid layout.
+          </Typography>
+          <Button variant="contained" color="primary" onClick={() => setExpandedCamera(null)} size="small">
+            Return to Live Grid
+          </Button>
         </DialogActions>
       </Dialog>
     </Box>

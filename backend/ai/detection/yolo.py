@@ -83,29 +83,31 @@ def detect_and_track(frame: np.ndarray):
     device_target = "cuda" if torch.cuda.is_available() else "cpu"
     try:
         yolo_model = model_manager.get_yolo()
-        results = yolo_model.track(
-            frame,
-            persist=True,
-            tracker="bytetrack.yaml",
-            imgsz=640,
-            classes=COCO_CLASS_IDS,
-            conf=_confidence_threshold(),
-            device=device_target,
-            verbose=False,
-        )
-    except Exception:
-        logger.warning("YOLO track() failed for this frame; falling back to plain predict.")
-        try:
-            if yolo_model is None:
-                return []
-            results = yolo_model.predict(
+        with model_manager.gpu_lock:
+            results = yolo_model.track(
                 frame,
-                imgsz=640,
+                persist=True,
+                tracker="bytetrack.yaml",
+                imgsz=960,
                 classes=COCO_CLASS_IDS,
                 conf=_confidence_threshold(),
                 device=device_target,
                 verbose=False,
             )
+    except Exception:
+        logger.warning("YOLO track() failed for this frame; falling back to plain predict.")
+        try:
+            if yolo_model is None:
+                return []
+            with model_manager.gpu_lock:
+                results = yolo_model.predict(
+                    frame,
+                    imgsz=960,
+                    classes=COCO_CLASS_IDS,
+                    conf=_confidence_threshold(),
+                    device=device_target,
+                    verbose=False,
+                )
             if results:
                 return _parse_result_boxes(results[0])
         except Exception:
@@ -140,16 +142,17 @@ def detect_and_track_batch(
     try:
         yolo_model = model_manager.get_yolo()
         device_target = "cuda" if torch.cuda.is_available() else "cpu"
-        results = yolo_model.track(
-            frames_to_process,
-            persist=True,
-            tracker="bytetrack.yaml",
-            imgsz=640,
-            classes=COCO_CLASS_IDS,
-            conf=_confidence_threshold(),
-            device=device_target,
-            verbose=False,
-        )
+        with model_manager.gpu_lock:
+            results = yolo_model.track(
+                frames_to_process,
+                persist=True,
+                tracker="bytetrack.yaml",
+                imgsz=960,
+                classes=COCO_CLASS_IDS,
+                conf=_confidence_threshold(),
+                device=device_target,
+                verbose=False,
+            )
         for batch_idx, result in enumerate(results or []):
             if batch_idx >= len(active_stream_indices):
                 break

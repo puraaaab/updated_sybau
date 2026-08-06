@@ -86,6 +86,7 @@ class ModelManager:
         self._models = {}
         self.vector_db = []
         self._lock = threading.Lock()
+        self.gpu_lock = threading.Lock()
         self._florence_lock = threading.RLock()
 
     def _is_demo(self):

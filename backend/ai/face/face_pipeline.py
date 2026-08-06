@@ -67,7 +67,7 @@ def process_faces(frame: np.ndarray, detections: list):
         for idx, person in enumerate(people):
             if (person["track_id"] + idx) % 3 == 0:
                 face_id = str(uuid.uuid4())
-                mock_embedding = np.random.normal(0, 1, 512).tolist()
+                mock_embedding = np.random.normal(0, 1, 128).tolist()
                 faces_detected.append({
                     "track_uuid": person.get("track_uuid") or f"TRK_{person.get('camera_id', 'cam1')}_{person['track_id']}",
                     "face_bbox": [
@@ -120,8 +120,6 @@ def process_faces(frame: np.ndarray, detections: list):
                     embedding_feats = recognizer.feature(aligned_face) # shape: (1, 128)
                 
                 embedding_list = embedding_feats[0].tolist()
-                # Pad to 512 dimensions to satisfy database model constraint
-                padded_embedding = embedding_list + [0.0] * (512 - len(embedding_list))
                 
                 # Geometric distance mapping to match face to closest person track
                 best_track_uuid = None
@@ -144,7 +142,7 @@ def process_faces(frame: np.ndarray, detections: list):
                         "track_uuid": best_track_uuid,
                         "face_bbox": [xmin, ymin, xmin + width, ymin + height],
                         "confidence": confidence,
-                        "embedding": padded_embedding,
+                        "embedding": embedding_list,
                         "embedding_id": face_id,
                         "label": "Unknown"
                     })

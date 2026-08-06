@@ -20,7 +20,9 @@ import {
   Pagination,
   FormControl,
   Select,
-  MenuItem
+  MenuItem,
+  Dialog,
+  DialogContent
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -30,6 +32,9 @@ import DirectionsCarIcon from '@mui/icons-material/DirectionsCar';
 import ConfirmationNumberIcon from '@mui/icons-material/ConfirmationNumber';
 import SubtitlesIcon from '@mui/icons-material/Subtitles';
 import SortIcon from '@mui/icons-material/Sort';
+import CloseIcon from '@mui/icons-material/Close';
+import CameraAltIcon from '@mui/icons-material/CameraAlt';
+
 
 export default function RecordsConsole({ token }) {
   const [activeTab, setActiveTab] = useState(0);
@@ -50,7 +55,9 @@ export default function RecordsConsole({ token }) {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [page, setPage] = useState(1);
+  const [previewImage, setPreviewImage] = useState(null);
   const limit = 20;
+
 
   const authHeaders = token ? { 'Authorization': `Bearer ${token}` } : {};
 
@@ -108,33 +115,60 @@ export default function RecordsConsole({ token }) {
     fetchTabData();
   };
 
-  const handleExportCSV = () => {
-    let csvContent = "data:text/csv;charset=utf-8,";
+  const handleExportCSV = async () => {
+    setLoading(true);
+    const qParam = searchQuery ? `&search=${encodeURIComponent(searchQuery)}` : '';
+    const sParam = `&sort=${sortOrder}`;
+
+    let endpoint = '';
+    if (activeTab === 0) endpoint = '/api/v1/records/faces';
+    else if (activeTab === 1) endpoint = '/api/v1/records/vehicles';
+    else if (activeTab === 2) endpoint = '/api/v1/records/plates';
+    else if (activeTab === 3) endpoint = '/api/v1/records/captions';
+
+    let itemsToExport = [];
+    try {
+      const res = await fetch(`${endpoint}?limit=50000&offset=0${qParam}${sParam}`, { headers: authHeaders });
+      if (res.ok) {
+        const data = await res.json();
+        itemsToExport = data.items || [];
+      }
+    } catch (err) {
+      console.error("Export fetch error:", err);
+    } finally {
+      setLoading(false);
+    }
+
+    if (!itemsToExport.length) return;
+
+    let csvLines = [];
     if (activeTab === 0) {
-      csvContent += "ID,Track UUID,Label,Confidence,Timestamp\n";
-      facesData.items.forEach(item => {
-        csvContent += `${item.id},${item.track_uuid},${item.label},${item.confidence},${item.timestamp}\n`;
+      csvLines.push("ID,Track UUID,Label,Confidence,Timestamp,Snapshot URL");
+      itemsToExport.forEach(item => {
+        csvLines.push(`${item.id},${item.track_uuid},"${item.label}",${item.confidence},${item.timestamp},"${item.snapshot_url || ''}"`);
       });
     } else if (activeTab === 1) {
-      csvContent += "ID,Camera ID,Track UUID,Type,Color,Plate,Timestamp\n";
-      vehiclesData.items.forEach(item => {
-        csvContent += `${item.id},${item.camera_id},${item.track_uuid},${item.vehicle_type},${item.vehicle_color},${item.license_plate || 'N/A'},${item.timestamp}\n`;
+      csvLines.push("ID,Camera ID,Track UUID,Type,Color,Plate,Timestamp,Snapshot URL");
+      itemsToExport.forEach(item => {
+        csvLines.push(`${item.id},${item.camera_id},${item.track_uuid},${item.vehicle_type},${item.vehicle_color},${item.license_plate || 'N/A'},${item.timestamp},"${item.snapshot_url || ''}"`);
       });
     } else if (activeTab === 2) {
-      csvContent += "ID,Camera ID,License Plate,Confidence,Vehicle Type,Timestamp\n";
-      platesData.items.forEach(item => {
-        csvContent += `${item.id},${item.camera_id},${item.license_plate},${item.ocr_confidence},${item.vehicle_type || 'car'},${item.timestamp}\n`;
+      csvLines.push("ID,Camera ID,License Plate,Confidence,Vehicle Type,Timestamp,Snapshot URL");
+      itemsToExport.forEach(item => {
+        csvLines.push(`${item.id},${item.camera_id},${item.license_plate},${item.ocr_confidence},${item.vehicle_type || 'car'},${item.timestamp},"${item.snapshot_url || ''}"`);
       });
     } else if (activeTab === 3) {
-      csvContent += "ID,Camera ID,Generated Scene Caption,Timestamp\n";
-      captionsData.items.forEach(item => {
-        csvContent += `${item.id},${item.camera_id},"${item.caption.replace(/"/g, '""')}",${item.timestamp}\n`;
+      csvLines.push("ID,Camera ID,Generated Scene Caption,Timestamp,Snapshot URL");
+      itemsToExport.forEach(item => {
+        csvLines.push(`${item.id},${item.camera_id},"${(item.caption || '').replace(/"/g, '""')}",${item.timestamp},"${item.snapshot_url || ''}"`);
       });
     }
-    const encodedUri = encodeURI(csvContent);
+
+    const blob = new Blob([csvLines.join("\n")], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `VMS_Records_Export_Tab_${activeTab}.csv`);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `VMS_Full_Records_Export_Tab_${activeTab}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -175,7 +209,7 @@ export default function RecordsConsole({ token }) {
 
       {/* Top Metric Cards */}
       <Grid container spacing={2} sx={{ mb: 3 }}>
-        <Grid item xs={12} sm={6} md={3}>
+        <Grid xs={12} sm={6} md={3}>
           <Paper sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 2, borderLeft: '4px solid #00e676' }}>
             <FaceIcon sx={{ fontSize: 36, color: '#00e676' }} />
             <Box>
@@ -189,7 +223,7 @@ export default function RecordsConsole({ token }) {
           </Paper>
         </Grid>
 
-        <Grid item xs={12} sm={6} md={3}>
+        <Grid xs={12} sm={6} md={3}>
           <Paper sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 2, borderLeft: '4px solid #29b6f6' }}>
             <DirectionsCarIcon sx={{ fontSize: 36, color: '#29b6f6' }} />
             <Box>
@@ -203,7 +237,7 @@ export default function RecordsConsole({ token }) {
           </Paper>
         </Grid>
 
-        <Grid item xs={12} sm={6} md={3}>
+        <Grid xs={12} sm={6} md={3}>
           <Paper sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 2, borderLeft: '4px solid #ab47bc' }}>
             <ConfirmationNumberIcon sx={{ fontSize: 36, color: '#ab47bc' }} />
             <Box>
@@ -217,7 +251,7 @@ export default function RecordsConsole({ token }) {
           </Paper>
         </Grid>
 
-        <Grid item xs={12} sm={6} md={3}>
+        <Grid xs={12} sm={6} md={3}>
           <Paper sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 2, borderLeft: '4px solid #ff7043' }}>
             <SubtitlesIcon sx={{ fontSize: 36, color: '#ff7043' }} />
             <Box>
@@ -266,16 +300,19 @@ export default function RecordsConsole({ token }) {
               placeholder="Search records..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              InputProps={{
-                endAdornment: (
-                  <IconButton size="small" type="submit">
-                    <SearchIcon fontSize="small" />
-                  </IconButton>
-                )
+              slotProps={{
+                input: {
+                  endAdornment: (
+                    <IconButton size="small" type="submit">
+                      <SearchIcon fontSize="small" />
+                    </IconButton>
+                  )
+                }
               }}
             />
           </Box>
         </Box>
+
 
         {loading ? (
           <Box sx={{ p: 4, textAlign: 'center' }}>
@@ -335,6 +372,7 @@ export default function RecordsConsole({ token }) {
                 <Table size="small">
                   <TableHead>
                     <TableRow>
+                      <TableCell sx={{ fontWeight: 'bold', width: '90px' }}>Snapshot</TableCell>
                       <TableCell sx={{ fontWeight: 'bold' }}>Camera ID</TableCell>
                       <TableCell sx={{ fontWeight: 'bold' }}>Track UUID</TableCell>
                       <TableCell sx={{ fontWeight: 'bold' }}>Vehicle Type</TableCell>
@@ -345,10 +383,34 @@ export default function RecordsConsole({ token }) {
                   </TableHead>
                   <TableBody>
                     {vehiclesData.items.length === 0 ? (
-                      <TableRow><TableCell colSpan={6} align="center">No vehicle detection records found.</TableCell></TableRow>
+                      <TableRow><TableCell colSpan={7} align="center">No vehicle detection records found.</TableCell></TableRow>
                     ) : (
                       vehiclesData.items.map((row) => (
                         <TableRow key={row.id} hover>
+                          <TableCell>
+                            {row.snapshot_url ? (
+                              <Box
+                                component="img"
+                                src={row.snapshot_url}
+                                alt="Vehicle Snapshot"
+                                onClick={() => setPreviewImage(row.snapshot_url)}
+                                sx={{
+                                  width: 72,
+                                  height: 48,
+                                  objectFit: 'cover',
+                                  borderRadius: 1,
+                                  border: '1px solid rgba(255,255,255,0.2)',
+                                  cursor: 'pointer',
+                                  transition: 'transform 0.15s ease-in-out',
+                                  '&:hover': { transform: 'scale(1.1)', borderColor: 'primary.main' }
+                                }}
+                              />
+                            ) : (
+                              <Box sx={{ width: 72, height: 48, borderRadius: 1, bgcolor: 'action.disabledBackground', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                <CameraAltIcon sx={{ fontSize: 20, opacity: 0.5 }} />
+                              </Box>
+                            )}
+                          </TableCell>
                           <TableCell sx={{ fontWeight: 600 }}>{row.camera_id}</TableCell>
                           <TableCell><Chip label={row.track_uuid} size="small" variant="outlined" /></TableCell>
                           <TableCell sx={{ textTransform: 'capitalize' }}>{row.vehicle_type}</TableCell>
@@ -384,6 +446,7 @@ export default function RecordsConsole({ token }) {
                 <Table size="small">
                   <TableHead>
                     <TableRow>
+                      <TableCell sx={{ fontWeight: 'bold', width: '90px' }}>Snapshot</TableCell>
                       <TableCell sx={{ fontWeight: 'bold' }}>License Plate</TableCell>
                       <TableCell sx={{ fontWeight: 'bold' }}>Camera ID</TableCell>
                       <TableCell sx={{ fontWeight: 'bold' }}>Track UUID</TableCell>
@@ -393,10 +456,34 @@ export default function RecordsConsole({ token }) {
                   </TableHead>
                   <TableBody>
                     {platesData.items.length === 0 ? (
-                      <TableRow><TableCell colSpan={5} align="center">No license plate OCR records found.</TableCell></TableRow>
+                      <TableRow><TableCell colSpan={6} align="center">No license plate OCR records found.</TableCell></TableRow>
                     ) : (
                       platesData.items.map((row) => (
                         <TableRow key={row.id} hover>
+                          <TableCell>
+                            {row.snapshot_url ? (
+                              <Box
+                                component="img"
+                                src={row.snapshot_url}
+                                alt="Plate Snapshot"
+                                onClick={() => setPreviewImage(row.snapshot_url)}
+                                sx={{
+                                  width: 72,
+                                  height: 48,
+                                  objectFit: 'cover',
+                                  borderRadius: 1,
+                                  border: '1px solid rgba(255,255,255,0.2)',
+                                  cursor: 'pointer',
+                                  transition: 'transform 0.15s ease-in-out',
+                                  '&:hover': { transform: 'scale(1.1)', borderColor: 'primary.main' }
+                                }}
+                              />
+                            ) : (
+                              <Box sx={{ width: 72, height: 48, borderRadius: 1, bgcolor: 'action.disabledBackground', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                <CameraAltIcon sx={{ fontSize: 20, opacity: 0.5 }} />
+                              </Box>
+                            )}
+                          </TableCell>
                           <TableCell>
                             <Chip
                               label={row.license_plate}
@@ -422,6 +509,7 @@ export default function RecordsConsole({ token }) {
                 <Table size="small">
                   <TableHead>
                     <TableRow>
+                      <TableCell sx={{ fontWeight: 'bold', width: '90px' }}>Snapshot</TableCell>
                       <TableCell sx={{ fontWeight: 'bold', width: '120px' }}>Camera ID</TableCell>
                       <TableCell sx={{ fontWeight: 'bold' }}>Generated AI Scene Caption</TableCell>
                       <TableCell sx={{ fontWeight: 'bold', width: '180px' }}>Timestamp</TableCell>
@@ -429,13 +517,47 @@ export default function RecordsConsole({ token }) {
                   </TableHead>
                   <TableBody>
                     {captionsData.items.length === 0 ? (
-                      <TableRow><TableCell colSpan={3} align="center">No generated scene captions logged yet.</TableCell></TableRow>
+                      <TableRow><TableCell colSpan={4} align="center">No generated scene captions logged yet.</TableCell></TableRow>
                     ) : (
                       captionsData.items.map((row) => (
                         <TableRow key={row.id} hover>
+                          <TableCell>
+                            {row.snapshot_url ? (
+                              <Box
+                                component="img"
+                                src={row.snapshot_url}
+                                alt="AI Scene Frame"
+                                onClick={() => setPreviewImage({ url: row.snapshot_url, caption: row.caption, camera_id: row.camera_id, timestamp: row.timestamp })}
+                                sx={{
+                                  width: 64,
+                                  height: 44,
+                                  borderRadius: 1,
+                                  objectFit: 'cover',
+                                  border: '1px solid #38bdf8',
+                                  cursor: 'pointer',
+                                  transition: 'transform 0.2s',
+                                  '&:hover': { transform: 'scale(1.08)', boxShadow: '0 0 8px rgba(56, 189, 248, 0.6)' }
+                                }}
+                              />
+                            ) : (
+                              <CameraAltIcon color="action" />
+                            )}
+                          </TableCell>
                           <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{row.camera_id}</TableCell>
                           <TableCell>
-                            <Typography variant="body2" sx={{ fontFamily: 'monospace', color: '#e0e0e0', backgroundColor: 'rgba(0,0,0,0.3)', p: 1, borderRadius: 1 }}>
+                            <Typography
+                              variant="body2"
+                              onClick={() => row.snapshot_url && setPreviewImage({ url: row.snapshot_url, caption: row.caption, camera_id: row.camera_id, timestamp: row.timestamp })}
+                              sx={{
+                                fontFamily: 'monospace',
+                                color: '#e0e0e0',
+                                backgroundColor: 'rgba(0,0,0,0.3)',
+                                p: 1,
+                                borderRadius: 1,
+                                cursor: row.snapshot_url ? 'pointer' : 'default',
+                                '&:hover': row.snapshot_url ? { backgroundColor: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8' } : {}
+                              }}
+                            >
                               {row.caption}
                             </Typography>
                           </TableCell>
@@ -447,6 +569,40 @@ export default function RecordsConsole({ token }) {
                 </Table>
               </TableContainer>
             )}
+
+            {/* Snapshot Preview Dialog */}
+            <Dialog
+              open={Boolean(previewImage)}
+              onClose={() => setPreviewImage(null)}
+              maxWidth="lg"
+              fullWidth
+              PaperProps={{
+                sx: { backgroundColor: '#0f172a', color: '#fff', border: '1px solid #334155' }
+              }}
+            >
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', p: 2, borderBottom: '1px solid #334155' }}>
+                <Typography variant="h6" fontWeight="bold" color="primary.main">
+                  AI Caption Snapshot — {previewImage?.camera_id} ({previewImage?.timestamp})
+                </Typography>
+                <IconButton onClick={() => setPreviewImage(null)} sx={{ color: '#94a3b8' }}>
+                  <CloseIcon />
+                </IconButton>
+              </Box>
+              <DialogContent sx={{ p: 2, textAlign: 'center' }}>
+                {previewImage?.url && (
+                  <Box
+                    component="img"
+                    src={previewImage.url}
+                    alt="Full AI Snapshot"
+                    sx={{ width: '100%', maxHeight: '70vh', objectFit: 'contain', borderRadius: 1, border: '1px solid #334155', mb: 2 }}
+                  />
+                )}
+                <Typography variant="body1" sx={{ fontFamily: 'monospace', backgroundColor: 'rgba(0,0,0,0.5)', p: 2, borderRadius: 1, color: '#38bdf8', textAlign: 'left' }}>
+                  {previewImage?.caption}
+                </Typography>
+              </DialogContent>
+            </Dialog>
+
 
             {/* Pagination Controls */}
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>

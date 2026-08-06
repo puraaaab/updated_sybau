@@ -23,9 +23,18 @@ from ..search.qdrant_utils import qdrant_client_with_timeout, get_qdrant_client
 # Shared ThreadPoolExecutor for writing snapshots asynchronously without blocking AI loop
 _snapshot_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="SnapshotWriter")
 
+def _on_snapshot_saved(future):
+    try:
+        exc = future.exception()
+        if exc:
+            logger.error(f"[SnapshotWriter] Async snapshot write failed: {exc}")
+    except Exception as e:
+        logger.error(f"[SnapshotWriter] Error checking snapshot future status: {e}")
+
 def save_snapshot_async(snap_path: str, frame: np.ndarray):
-    """Submits cv2.imwrite task to thread pool."""
-    _snapshot_executor.submit(cv2.imwrite, snap_path, frame.copy())
+    """Submits cv2.imwrite task to thread pool with error monitoring."""
+    fut = _snapshot_executor.submit(cv2.imwrite, snap_path, frame.copy())
+    fut.add_done_callback(_on_snapshot_saved)
 
 # ── Plate storage logger ────────────────────────────────────────────────────
 _plates_log_path = os.path.join(
@@ -42,7 +51,24 @@ if not _plates_logger.handlers:
     _plates_logger.propagate = False
 
 
-latest_telemetry = {} # camera_id -> list of active tracks
+_telemetry_lock = threading.Lock()
+latest_telemetry = {} # camera_id -> dict of telemetry status
+
+def set_latest_telemetry(camera_id: str, data: dict):
+    with _telemetry_lock:
+        latest_telemetry[camera_id] = data
+
+def get_latest_telemetry(camera_id: str | None = None):
+    with _telemetry_lock:
+        if camera_id is not None:
+            val = latest_telemetry.get(camera_id)
+            return val.copy() if isinstance(val, dict) else val
+        return {k: (v.copy() if isinstance(v, dict) else v) for k, v in latest_telemetry.items()}
+
+def remove_latest_telemetry(camera_id: str):
+    with _telemetry_lock:
+        latest_telemetry.pop(camera_id, None)
+
 
 MAX_VECTOR_DB_FALLBACK_SIZE = 1000
 
@@ -103,6 +129,7 @@ class CameraAIWorker:
         self.running = False
         if self.thread:
             self.thread.join(timeout=5)
+        remove_latest_telemetry(self.camera_id)
         try:
             from ..ai.captioning.captioner import unregister_florence_camera
             unregister_florence_camera(self.camera_id)
@@ -128,12 +155,22 @@ class CameraAIWorker:
             db_cfg = db.query(AlertConfig).filter(AlertConfig.camera_id == self.camera_id).first()
             if db_cfg:
                 self._cached_alerts_cfg = {
-                    "loitering": { "time_threshold_seconds": db_cfg.loitering_seconds },
-                    "running": { "speed_threshold_pixels_per_second": db_cfg.running_speed_threshold },
-                    "crowd": { "density_threshold": db_cfg.crowd_density_threshold }
+                    "loitering": { "enabled": True, "time_threshold_seconds": db_cfg.loitering_seconds },
+                    "running": { "enabled": True, "speed_threshold_pixels_per_second": db_cfg.running_speed_threshold },
+                    "crowd": { "enabled": True, "density_threshold": db_cfg.crowd_density_threshold },
+                    "restricted": { "enabled": True },
+                    "wrong_direction": { "enabled": True },
+                    "abandoned": { "enabled": True }
                 }
             else:
-                self._cached_alerts_cfg = {}
+                self._cached_alerts_cfg = {
+                    "loitering": { "enabled": True, "time_threshold_seconds": 10.0 },
+                    "running": { "enabled": True, "speed_threshold_pixels_per_second": 150.0 },
+                    "crowd": { "enabled": True, "density_threshold": 5 },
+                    "restricted": { "enabled": True },
+                    "wrong_direction": { "enabled": True },
+                    "abandoned": { "enabled": True }
+                }
 
             # Fetch active dynamic custom rules
             db_rules = db.query(CustomAlertRule).filter(CustomAlertRule.is_active == True).all()
@@ -194,7 +231,7 @@ class CameraAIWorker:
         except Exception as cam_init_err:
             logger.warning(f"[{self.camera_id}] Camera registration check note: {cam_init_err}")
 
-        interval = 0.2  # High Precision 5 FPS (0.2s sampling cadence)
+        interval = 0.5  # 2 FPS sampling cadence (0.5s interval per camera stream)
         frame_idx = 0
         last_frame_ts = 0.0
         snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
@@ -271,7 +308,7 @@ class CameraAIWorker:
                                     clean_tr[k] = v
                             clean_tracks.append(clean_tr)
 
-                        latest_telemetry[self.camera_id] = {
+                        set_latest_telemetry(self.camera_id, {
                             "tracks": clean_tracks,
                             "faces_count": len(results.get("faces", [])),
                             "vehicles_count": len(results.get("vehicles", [])),
@@ -280,7 +317,7 @@ class CameraAIWorker:
                             "motion_status": motion_status,
                             "fps": current_fps,
                             "timestamp": datetime.datetime.now(_IST).isoformat()
-                        }
+                        })
 
                         from ..services.identity import GlobalIdentityManager
 
@@ -302,6 +339,7 @@ class CameraAIWorker:
                                 for t in db.query(Track).filter(Track.track_uuid.in_(t_uuids)).all()
                             }
 
+                            new_db_tracks = []
                             for tr, t_uuid in t_tuples:
                                 path_coords = []
                                 if tr.get("path"):
@@ -311,7 +349,6 @@ class CameraAIWorker:
                                         path_coords = []
                                 path_json = json.dumps(path_coords)
 
-                                # AI-04 FIX: Compute normalized bbox center from real detection box
                                 bbox = tr.get("box", None)
                                 if bbox and len(bbox) >= 4:
                                     x1, y1, x2, y2 = bbox[:4]
@@ -328,7 +365,7 @@ class CameraAIWorker:
                                 speed_val = float(tr.get("speed", 0.0))
                                 if np.isnan(speed_val) or np.isinf(speed_val): speed_val = 0.0
 
-                                _now = datetime.datetime.now(_IST)  # IST timezone
+                                _now = datetime.datetime.now(_IST)
                                 existing_tr = existing_tracks.get(t_uuid)
                                 if not existing_tr:
                                     db_track = Track(
@@ -342,7 +379,7 @@ class CameraAIWorker:
                                         last_bbox_x=round(float(bbox_cx), 4),
                                         last_bbox_y=round(float(bbox_cy), 4),
                                     )
-                                    db.add(db_track)
+                                    new_db_tracks.append(db_track)
                                 else:
                                     existing_tr.last_seen = _now
                                     existing_tr.speed = speed_val
@@ -350,7 +387,11 @@ class CameraAIWorker:
                                     existing_tr.last_bbox_x = round(float(bbox_cx), 4)
                                     existing_tr.last_bbox_y = round(float(bbox_cy), 4)
 
+                            if new_db_tracks:
+                                db.add_all(new_db_tracks)
+
                             # Batch faces
+                            new_db_faces = []
                             for face in results.get("faces", []):
                                 resolved_identity = GlobalIdentityManager.get_or_create_face_identity(
                                     face["track_uuid"], self.camera_id, face["embedding"]
@@ -361,7 +402,7 @@ class CameraAIWorker:
                                     embedding_id=face["embedding_id"],
                                     timestamp=datetime.datetime.now(_IST)
                                 )
-                                db.add(db_face)
+                                new_db_faces.append(db_face)
 
                                 snap_path = os.path.join(snap_dir, f"{face['embedding_id']}.jpg")
                                 pending_snapshot_writes.append((snap_path, frame))
@@ -378,6 +419,8 @@ class CameraAIWorker:
                                         "timestamp": datetime.datetime.now(_IST).isoformat(),
                                     }
                                 ))
+                            if new_db_faces:
+                                db.add_all(new_db_faces)
 
                             # Batch person crops for OpenCLIP attribute search
                             for p_crop in results.get("person_crops", []):
@@ -400,10 +443,19 @@ class CameraAIWorker:
                                 ))
 
                             # Batch vehicles
+                            new_db_vehs = []
                             for veh in results.get("vehicles", []):
                                 resolved_identity = GlobalIdentityManager.get_or_create_vehicle_identity(
                                     veh["track_uuid"], self.camera_id, veh["reid_vector"], veh["license_plate"]
                                 )
+                                plate_str = veh.get("license_plate")
+                                if plate_str and str(plate_str).strip():
+                                    clean_p = str(plate_str).strip().upper().replace(" ", "")
+                                    v_snap_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"VEHICLE_{clean_p}"))
+                                else:
+                                    v_snap_id = veh.get("track_uuid") or str(uuid.uuid4())
+                                v_snap_url = f"/api/v1/playback/snapshot/{v_snap_id}"
+
                                 db_veh = Vehicle(
                                     track_uuid=veh["track_uuid"],
                                     camera_id=self.camera_id,
@@ -411,9 +463,12 @@ class CameraAIWorker:
                                     ocr_confidence=veh["ocr_confidence"],
                                     vehicle_type=veh["vehicle_type"],
                                     vehicle_color=veh.get("vehicle_color", "unknown"),
+                                    snapshot_url=v_snap_url,
                                     timestamp=datetime.datetime.now(_IST)
                                 )
-                                db.add(db_veh)
+                                new_db_vehs.append(db_veh)
+                            if new_db_vehs:
+                                db.add_all(new_db_vehs)
 
                                 if veh["license_plate"]:
                                     _plates_logger.info(
@@ -448,16 +503,14 @@ class CameraAIWorker:
                                     }
                                 ))
 
-                            # Save detailed YOLO caption periodically and whenever Florence is disabled/not queued
-                            florence_enabled = get_models().get("florence", {}).get("enabled", True)
-                            florence_queued = results.get("florence_queued", False)
-                            has_alerts = len(results.get("alerts", [])) > 0
+                            # Save standalone YOLO caption ONLY when VLM models (Florence & Moondream) are disabled
+                            models_cfg = get_models()
+                            florence_enabled = models_cfg.get("florence", {}).get("enabled", False)
+                            moondream_enabled = models_cfg.get("moondream", {}).get("enabled", False)
+                            vlm_active = florence_enabled or moondream_enabled
 
-                            should_save_caption = (
-                                (not florence_enabled) or
-                                (not florence_queued) or
-                                has_alerts
-                            )
+                            should_save_caption = not vlm_active
+
 
                             if should_save_caption and results.get("caption") and results.get("embedding"):
                                 vid = str(uuid.uuid4())

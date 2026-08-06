@@ -1,3 +1,4 @@
+import time
 from .restricted import RestrictedAreaDetector
 from .loitering import LoiteringDetector
 from .running import RunningDetector
@@ -6,13 +7,34 @@ from .wrong_direction import WrongDirectionDetector
 from .abandoned_object import AbandonedObjectDetector
 
 class BehaviorEngine:
-    def __init__(self):
+    def __init__(self, default_cooldown_seconds: float = 30.0):
         self.restricted_detector = RestrictedAreaDetector()
         self.loitering_detector = LoiteringDetector()
         self.running_detector = RunningDetector()
         self.crowd_detector = CrowdDensityDetector()
         self.wrong_direction_detector = WrongDirectionDetector()
         self.abandoned_detector = AbandonedObjectDetector()
+        self.default_cooldown_seconds = default_cooldown_seconds
+        self._alert_cooldown_history = {} # (track_id, alert_type, key) -> timestamp
+
+    def _should_emit_alert(self, track_id: int | str, alert_type: str, sub_key: str, cooldown_seconds: float) -> bool:
+        """Enforces a sliding window cooldown per (track_id, alert_type, sub_key) to eliminate alert storms."""
+        now = time.time()
+        dedup_key = (str(track_id), alert_type, str(sub_key))
+        
+        # Periodic pruning of stale history entries (>10 mins)
+        if len(self._alert_cooldown_history) > 500:
+            self._alert_cooldown_history = {
+                k: ts for k, ts in self._alert_cooldown_history.items()
+                if (now - ts) < 600.0
+            }
+
+        last_ts = self._alert_cooldown_history.get(dedup_key, 0.0)
+        if (now - last_ts) < cooldown_seconds:
+            return False
+
+        self._alert_cooldown_history[dedup_key] = now
+        return True
 
     def check_behaviors(self, tracks: list, zones: list, alerts_cfg: dict, frame_width: float = 1920.0, frame_height: float = 1080.0) -> list:
         """
@@ -27,13 +49,15 @@ class BehaviorEngine:
             frame_height: Pixel height of the source frame (for coord normalization).
 
         Returns:
-            List of dicts representing triggered alerts.
+            List of dicts representing triggered alerts after deduplication cooldown.
         """
         triggered_alerts = []
         active_track_ids = [t["track_id"] for t in tracks]
 
         # Cleanup loitering stale tracks
         self.loitering_detector.cleanup_stale_tracks(active_track_ids)
+
+        cooldown_sec = alerts_cfg.get("cooldown_seconds", self.default_cooldown_seconds) if isinstance(alerts_cfg, dict) else self.default_cooldown_seconds
 
         loitering_cfg  = alerts_cfg.get("loitering", {})  if isinstance(alerts_cfg, dict) else {}
         running_cfg    = alerts_cfg.get("running", {})    if isinstance(alerts_cfg, dict) else {}
@@ -55,10 +79,12 @@ class BehaviorEngine:
 
         # Run individual track checks
         for track in tracks:
+            t_id = track.get("track_id", "unknown")
+
             # A. Restricted Area Check
             if restricted_enabled:
                 res_trigger, res_msg = self.restricted_detector.check(track, zones, frame_width, frame_height)
-                if res_trigger:
+                if res_trigger and self._should_emit_alert(t_id, "restricted", res_msg, cooldown_sec):
                     triggered_alerts.append({
                         "type": "restricted",
                         "message": res_msg,
@@ -68,7 +94,7 @@ class BehaviorEngine:
             # B. Loitering Area Check
             if loitering_enabled:
                 loit_trigger, loit_msg = self.loitering_detector.check(track, zones, loitering_sec, frame_width, frame_height)
-                if loit_trigger:
+                if loit_trigger and self._should_emit_alert(t_id, "loitering", loit_msg, cooldown_sec):
                     triggered_alerts.append({
                         "type": "loitering",
                         "message": loit_msg,
@@ -78,7 +104,7 @@ class BehaviorEngine:
             # C. Running Check
             if running_enabled:
                 run_trigger, run_msg = self.running_detector.check(track, running_speed)
-                if run_trigger:
+                if run_trigger and self._should_emit_alert(t_id, "running", run_msg, cooldown_sec):
                     triggered_alerts.append({
                         "type": "running",
                         "message": run_msg,
@@ -88,7 +114,7 @@ class BehaviorEngine:
             # D. Wrong Direction Line Crossing Check
             if wdir_enabled:
                 wdir_trigger, wdir_msg = self.wrong_direction_detector.check(track, zones)
-                if wdir_trigger:
+                if wdir_trigger and self._should_emit_alert(t_id, "wrong_direction", wdir_msg, cooldown_sec):
                     triggered_alerts.append({
                         "type": "wrong_direction",
                         "message": wdir_msg,
@@ -99,7 +125,7 @@ class BehaviorEngine:
         if crowd_enabled:
             crowd_alerts = self.crowd_detector.check(tracks, zones, crowd_limit, frame_width, frame_height)
             for trig, msg in crowd_alerts:
-                if trig:
+                if trig and self._should_emit_alert("global", "crowd", msg, cooldown_sec):
                     triggered_alerts.append({
                         "type": "crowd",
                         "message": msg,
@@ -109,7 +135,7 @@ class BehaviorEngine:
         # 5. Abandoned Object Check
         if abandoned_enabled:
             ab_trig, ab_msg = self.abandoned_detector.check(tracks)
-            if ab_trig:
+            if ab_trig and self._should_emit_alert("global", "abandoned", ab_msg, cooldown_sec):
                 triggered_alerts.append({
                     "type": "abandoned",
                     "message": ab_msg,
@@ -120,3 +146,4 @@ class BehaviorEngine:
 
 # Global Engine Instance
 behavior_engine = BehaviorEngine()
+

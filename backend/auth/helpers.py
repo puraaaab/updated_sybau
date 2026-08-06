@@ -13,16 +13,24 @@ from ..database.models import User
 # Security Configuration
 # ---------------------------------------------------------------------------
 
-SECRET_KEY = os.getenv("VMS_SECRET_KEY", "vms_dev_secret_key_CHANGE_ME_IN_PRODUCTION")
-if os.getenv("APP_ENV") == "production" and SECRET_KEY in (
-    "vms_dev_secret_key_CHANGE_ME_IN_PRODUCTION",
-    "dev_secret_key_sybau_vms_2026",
-    "",
-):
-    raise RuntimeError(
-        "FATAL: VMS_SECRET_KEY must be set to a strong unique secret in production mode! "
-        "Current value is a known-weak/default key."
-    )
+import secrets
+import logging
+
+logger = logging.getLogger(__name__)
+
+_raw_secret = os.getenv("VMS_SECRET_KEY")
+if not _raw_secret:
+    if os.getenv("APP_ENV") == "production":
+        raise RuntimeError("FATAL: VMS_SECRET_KEY environment variable MUST be explicitly set in production mode!")
+    SECRET_KEY = secrets.token_urlsafe(32)
+    logger.warning("SECURITY WARNING: VMS_SECRET_KEY is not set. Generated ephemeral 256-bit random key for this session.")
+else:
+    SECRET_KEY = _raw_secret
+    if os.getenv("APP_ENV") == "production" and SECRET_KEY in (
+        "vms_dev_secret_key_CHANGE_ME_IN_PRODUCTION",
+        "dev_secret_key_sybau_vms_2026",
+    ):
+        raise RuntimeError("FATAL: VMS_SECRET_KEY is set to a known weak default string in production mode!")
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "480"))

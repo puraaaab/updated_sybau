@@ -33,8 +33,13 @@ class WrongDirectionDetector:
                 if len(points) < 2:
                     continue
                     
-                A = points[0]
-                B = points[1]
+                def _to_dict(pt):
+                    if isinstance(pt, dict):
+                        return pt
+                    return {"x": float(pt[0]), "y": float(pt[1])}
+
+                A = _to_dict(points[0])
+                B = _to_dict(points[1])
                 
                 # Check segment intersection
                 if intersect(A, B, C, D):

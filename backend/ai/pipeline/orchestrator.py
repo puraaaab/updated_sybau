@@ -7,6 +7,7 @@ from ..face.face_pipeline import process_faces
 from ..vehicle.vehicle_reid import process_vehicles
 from ..behavior.behavior_engine import behavior_engine
 from ..captioning.captioner import generate_scene_caption, submit_async_scene_caption
+from ..captioning.moondream_captioner import submit_moondream_caption
 from ..embeddings.embedder import get_text_embedding
 from ...config.service import get_models
 
@@ -100,6 +101,18 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
         for v in vehicles:
             v_color = v.get("vehicle_color", "")
             v_type = v.get("vehicle_type", "car")
+            
+            # Map Indian 3-wheeler geometry (COCO truck/car fallback to auto-rickshaw)
+            if v_type in ("auto_rickshaw", "rickshaw", "tuktuk", "three_wheeler"):
+                v_type = "auto-rickshaw"
+            elif v_type == "truck":
+                # Check bounding box aspect ratio: 3-wheelers are upright (w/h between 0.85 and 1.4)
+                bbox = v.get("bbox") or [0, 0, 100, 100]
+                bw, bh = max(1, bbox[2] - bbox[0]), max(1, bbox[3] - bbox[1])
+                aspect = bw / float(bh)
+                if 0.75 <= aspect <= 1.45 and bw < (frame_width * 0.4):
+                    v_type = "auto-rickshaw"
+
             label = f"{v_color} {v_type}".strip() if v_color and v_color != "unknown" else v_type
             veh_counts[label] = veh_counts.get(label, 0) + 1
         for label, cnt in veh_counts.items():
@@ -159,15 +172,49 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     caption = f"[YOLO]: {yolo_summary} | camera {camera_id}"
     embedding = None
 
-    # Dispatch Florence AFTER YOLO summary — persister receives merged caption
-    if should_invoke_florence:
-        corr_id = uuid.uuid4().hex[:8]
-        try:
-            florence_queued = submit_async_scene_caption(
-                frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id
-            )
-        except Exception as e:
-            logger.warning(f"[Florence Async] Dispatch error on {camera_id}: {e}")
+    # Dispatch captioner (Interleaved round-robin: Moondream on even frames, Florence-2 on odd frames)
+    moondream_cfg     = cfg.get("moondream", {})
+    moondream_enabled = moondream_cfg.get("enabled", False)
+
+    if moondream_enabled and florence_enabled:
+        # 1-second alternating cadence (00:01 Moondream -> 00:02 Florence-2 -> 00:03 Moondream -> 00:04 Florence-2)
+        if frame_idx % 4 == 0:
+            corr_id = uuid.uuid4().hex[:8]
+            try:
+                submit_moondream_caption(
+                    frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id
+                )
+            except Exception as e:
+                logger.warning(f"[Moondream] 1s dispatch error on {camera_id}: {e}")
+        elif frame_idx % 4 == 2:
+            corr_id = uuid.uuid4().hex[:8]
+            try:
+                florence_queued = submit_async_scene_caption(
+                    frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id
+                )
+            except Exception as e:
+                logger.warning(f"[Florence Async] 1s dispatch error on {camera_id}: {e}")
+    else:
+        md_n_frames      = moondream_cfg.get("invoke_every_n_frames", n_frames)
+        should_invoke_md = moondream_enabled and (md_n_frames <= 1 or frame_idx % md_n_frames == 0)
+
+        if should_invoke_md:
+            corr_id = uuid.uuid4().hex[:8]
+            try:
+                submit_moondream_caption(
+                    frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id
+                )
+            except Exception as e:
+                logger.warning(f"[Moondream] Dispatch error on {camera_id}: {e}")
+
+        if should_invoke_florence:
+            corr_id = uuid.uuid4().hex[:8]
+            try:
+                florence_queued = submit_async_scene_caption(
+                    frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id
+                )
+            except Exception as e:
+                logger.warning(f"[Florence Async] Dispatch error on {camera_id}: {e}")
 
 
     # Instant text embedding for YOLO summary

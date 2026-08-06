@@ -28,7 +28,11 @@ MOCK_DESCRIPTIONS = [
     "An operator walking past the camera range."
 ]
 
-CAPTION_PROMPT = "<MORE_DETAILED_CAPTION>"
+CAPTION_PROMPT = (
+    "<MORE_DETAILED_CAPTION> Analyze this traffic surveillance frame. Count every visible object accurately. "
+    "Include total vehicle count, vehicle type, color, location, motion status, pedestrians, clothing colors, traffic conditions, "
+    "road markings, barriers, exact readable license plate text, and environmental conditions. Do not speculate about hidden objects or unobservable events."
+)
 
 
 def _florence_dispatch_interval_seconds() -> float:
@@ -164,7 +168,7 @@ class FlorenceRoundRobinScheduler:
     def _count_pending_locked(self) -> int:
         try:
             from ...workers.ai_worker import active_ai_workers
-            active_ids = set(active_ai_workers.keys())
+            active_ids = set(active_ai_workers.keys()) if active_ai_workers else set(self._slots.keys())
         except Exception:
             active_ids = set(self._slots.keys())
         return sum(1 for camera_id, slot in self._slots.items() if camera_id in active_ids and slot.pending)
@@ -172,7 +176,10 @@ class FlorenceRoundRobinScheduler:
     def _active_camera_ids(self) -> list[str]:
         try:
             from ...workers.ai_worker import active_ai_workers
-            return sorted(active_ai_workers.keys())
+            active_ids = set(active_ai_workers.keys())
+            if not active_ids:
+                active_ids = set(self._slots.keys())
+            return sorted(active_ids)
         except Exception:
             return sorted(self._slots.keys())
 
@@ -475,7 +482,7 @@ def _async_caption_persister(florence_cap: str, metadata: dict):
             logger.warning(f"[{camera_id}] Async embedding error: {e}")
 
         vid = str(uuid.uuid4())
-        snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
+        snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage", "snapshots"))
         os.makedirs(snap_dir, exist_ok=True)
         snap_url = f"/api/v1/playback/snapshot/{vid}"
 
@@ -550,7 +557,8 @@ def submit_async_scene_caption(frame: np.ndarray, camera_id: str, yolo_summary: 
     metadata = {
         "camera_id": camera_id,
         "yolo_summary": yolo_summary,
-        "corr_id": corr_id
+        "corr_id": corr_id,
+        "frame": frame.copy() if frame is not None else None
     }
     return _round_robin_scheduler.register_pending_frame(camera_id, frame, metadata)
 

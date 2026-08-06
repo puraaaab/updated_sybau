@@ -1,4 +1,5 @@
 import os
+import json
 import uuid
 import datetime
 import shutil
@@ -6,10 +7,13 @@ import zipfile
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+
 from ..database.connection import get_db
 from ..database.models import Alert, AuditLog, Camera
 from ..auth.helpers import verify_operator, verify_viewer
 from .event_export import compute_sha256
+from ..utils.audit import log_audit_event
+from ..utils.security import safe_join_path
 
 router = APIRouter(prefix="/forensics", tags=["Forensics"])
 
@@ -93,7 +97,6 @@ def create_forensic_export(
             sha_hash = compute_sha256(target_video)
             
         with open(os.path.join(temp_dir, "metadata.json"), "w") as f:
-            import json
             json.dump({
                 "camera_id": camera_id,
                 "camera_name": cam_name,
@@ -112,7 +115,6 @@ def create_forensic_export(
             shutil.rmtree(temp_dir)
             
     # Write audit log
-    from ..utils.audit import log_audit_event
     ip = getattr(user, "_client_ip", None)
     log_audit_event(
         db,
@@ -131,7 +133,6 @@ def create_forensic_export(
 
 @router.get("/download/{filename}")
 def download_forensic_file(filename: str, user=Depends(verify_viewer)):
-    from ..utils.security import safe_join_path
     file_path = safe_join_path(EXPORT_DIR, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Export file not found.")

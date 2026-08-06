@@ -66,7 +66,7 @@ def get_qdrant_client(timeout: float = 10.0):
                             client.create_collection(
                                 collection_name="vms_embeddings",
                                 vectors_config={
-                                    "face": qmodels.VectorParams(size=512, distance=qmodels.Distance.COSINE),
+                                    "face": qmodels.VectorParams(size=128, distance=qmodels.Distance.COSINE),
                                     "scene": qmodels.VectorParams(size=1024, distance=qmodels.Distance.COSINE),
                                     "vehicle": qmodels.VectorParams(size=576, distance=qmodels.Distance.COSINE),
                                     "person_crop": qmodels.VectorParams(size=768, distance=qmodels.Distance.COSINE)
@@ -111,7 +111,7 @@ def enqueue_qdrant_point(vector_id: str, vector: list, payload: dict):
     p_type = payload.get("type") if isinstance(payload, dict) else None
     if p_type == "person_crop" or len(vector) == 768:
         vec_name = "person_crop"
-    elif p_type == "face" or (len(vector) == 512 and p_type != "person_crop"):
+    elif p_type == "face" or (len(vector) == 128 and p_type != "person_crop"):
         vec_name = "face"
     elif p_type == "vehicle" or len(vector) == 576:
         vec_name = "vehicle"
@@ -174,7 +174,7 @@ def _qdrant_batch_worker():
 
         EXPECTED_DIMS = {
             "scene": 1024,
-            "face": 512,
+            "face": 128,
             "vehicle": 576,
             "person_crop": 768,
         }

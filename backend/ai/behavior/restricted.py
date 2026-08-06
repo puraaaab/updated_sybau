@@ -1,3 +1,10 @@
+def _get_pt(pt):
+    if isinstance(pt, dict):
+        return float(pt["x"]), float(pt["y"])
+    elif isinstance(pt, (list, tuple)):
+        return float(pt[0]), float(pt[1])
+    return 0.0, 0.0
+
 def is_point_in_polygon(
     x: float,
     y: float,
@@ -7,24 +14,19 @@ def is_point_in_polygon(
 ) -> bool:
     """
     Ray-casting algorithm to determine if point (x, y) is inside a polygon.
-
-    Zone points in configs/zones.json are stored as NORMALIZED coordinates
-    (0.0–1.0 relative to frame size).  Bounding-box coordinates from the
-    detector are raw PIXEL values.  This function normalizes the test point
-    before comparison so both systems are consistent.
+    Handles points stored as dicts {"x":..., "y":...} or lists [x, y].
     """
     n = len(polygon)
     inside = False
     if n < 3:
         return False
 
-    # Normalize the test point to the same 0-1 space as the zone polygons
-    nx = x / frame_width
-    ny = y / frame_height
+    nx = x / frame_width if frame_width > 0 else x
+    ny = y / frame_height if frame_height > 0 else y
 
-    p1x, p1y = polygon[0]["x"], polygon[0]["y"]
+    p1x, p1y = _get_pt(polygon[0])
     for i in range(n + 1):
-        p2x, p2y = polygon[i % n]["x"], polygon[i % n]["y"]
+        p2x, p2y = _get_pt(polygon[i % n])
         if ny > min(p1y, p2y):
             if ny <= max(p1y, p2y):
                 if nx <= max(p1x, p2x):

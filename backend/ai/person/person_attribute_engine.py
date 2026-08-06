@@ -16,13 +16,15 @@ _person_cache_lock = threading.Lock()
 
 COLOR_MAP = {
     "red": ([0, 70, 50], [10, 255, 255]),
-    "red2": ([165, 70, 50], [180, 255, 255]),
-    "blue": ([90, 50, 50], [135, 255, 255]),
-    "green": ([35, 50, 50], [85, 255, 255]),
-    "yellow": ([15, 70, 70], [35, 255, 255]),
-    "white": ([0, 0, 180], [180, 45, 255]),
-    "black": ([0, 0, 0], [180, 255, 60]),
-    "gray": ([0, 0, 60], [180, 45, 180])
+    "red2": ([156, 70, 50], [180, 255, 255]),
+    "orange": ([11, 70, 50], [25, 255, 255]),
+    "yellow": ([26, 70, 50], [35, 255, 255]),
+    "green": ([36, 50, 50], [85, 255, 255]),
+    "blue": ([86, 50, 50], [130, 255, 255]),
+    "purple": ([131, 50, 50], [155, 255, 255]),
+    "white": ([0, 0, 190], [180, 30, 255]),
+    "black": ([0, 0, 0], [180, 255, 50]),
+    "gray": ([0, 0, 51], [180, 45, 189])
 }
 
 
@@ -48,7 +50,7 @@ def _get_clip_model():
                         _clip_model.half()
                     except Exception:
                         pass
-            except Exception as e:
+            except BaseException as e:
                 logger.warning(f"Could not load SentenceTransformer clip-ViT-L-14: {e}")
                 _clip_model = None
 

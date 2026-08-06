@@ -224,6 +224,8 @@ class StreamManager:
             if camera_id in self._streams:
                 stream = self._streams[camera_id]
                 stream.remove_consumer()
+                if stream.ref_count == 0:
+                    del self._streams[camera_id]
 
     def stop_all(self):
         with self._lock:
