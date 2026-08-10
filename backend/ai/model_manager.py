@@ -111,7 +111,7 @@ class ModelManager:
             from ultralytics import YOLO
             import os as _os
             cfg = get_models().get("yolo", {})
-            model_path = cfg.get("model_path", "yolo26m.pt")
+            model_path = cfg.get("model_path", "yolo26l.pt")
             if not _os.path.isabs(model_path):
                 project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
                 candidate_path = _os.path.join(project_root, model_path)

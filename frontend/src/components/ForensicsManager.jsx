@@ -1,18 +1,31 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Box, Typography, Grid, Paper, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Select, MenuItem, InputLabel, FormControl, Slider, Alert
+  Box, Typography, Grid, Paper, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Select, MenuItem, InputLabel, FormControl, TextField, Alert, Checkbox, FormControlLabel, Tooltip
 } from '@mui/material';
 import VideocamIcon from '@mui/icons-material/Videocam';
 import ShieldIcon from '@mui/icons-material/Shield';
 import DownloadIcon from '@mui/icons-material/Download';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutlineOutlined';
 import SyncIcon from '@mui/icons-material/Sync';
+import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
+import DescriptionIcon from '@mui/icons-material/Description';
 
 export default function ForensicsManager({ role, token }) {
   const [cameras, setCameras] = useState([]);
   const [exportsList, setExportsList] = useState([]);
   const [selectedCamId, setSelectedCamId] = useState('');
-  const [duration, setDuration] = useState(10);
+  
+  const getNowStr = (hoursAgo = 0) => {
+    const d = new Date(Date.now() - hoursAgo * 3600 * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
+
+  const [startTime, setStartTime] = useState(getNowStr(1));
+  const [endTime, setEndTime] = useState(getNowStr(0));
+  const [incMp4, setIncMp4] = useState(true);
+  const [incSnapshots, setIncSnapshots] = useState(true);
+  const [incFir, setIncFir] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState('');
 
@@ -25,7 +38,9 @@ export default function ForensicsManager({ role, token }) {
       .then(res => res.json())
       .then(data => {
         setCameras(Array.isArray(data) ? data : []);
-        if (Array.isArray(data) && data.length > 0) setSelectedCamId(data[0].id);
+        if (Array.isArray(data) && data.length > 0 && !selectedCamId) {
+          setSelectedCamId(data[0].id);
+        }
       })
       .catch(err => console.error("Error loading cameras:", err));
 
@@ -44,6 +59,16 @@ export default function ForensicsManager({ role, token }) {
     loadData();
   }, [loadData]);
 
+  const handleClearHistory = () => {
+    if (!token) return;
+    fetch('/api/v1/forensics/exports/clear', {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+      .then(res => res.ok ? loadData() : alert("Failed to clear ledger"))
+      .catch(err => console.error("Error clearing exports:", err));
+  };
+
   const handleTriggerExport = (e) => {
     e.preventDefault();
     if (!selectedCamId) return;
@@ -51,7 +76,13 @@ export default function ForensicsManager({ role, token }) {
     setExporting(true);
     setExportError('');
 
-    fetch(`/api/v1/forensics/export?camera_id=${selectedCamId}&duration_seconds=${duration}`, {
+    const queryParams = new URLSearchParams({
+      camera_id: selectedCamId,
+      start_time: startTime ? new Date(startTime).toISOString() : '',
+      end_time: endTime ? new Date(endTime).toISOString() : ''
+    });
+
+    fetch(`/api/v1/forensics/export?${queryParams.toString()}`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${token}` }
     })
@@ -86,13 +117,13 @@ export default function ForensicsManager({ role, token }) {
               COMPILE NEW EVIDENCE CLIP
             </Typography>
 
-            <Box component="form" onSubmit={handleTriggerExport} sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <Box component="form" onSubmit={handleTriggerExport} sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               <FormControl size="small" fullWidth>
-                <InputLabel id="camera-select-label">Select Target Channel</InputLabel>
+                <InputLabel id="camera-select-label">Select Target CCTV Channel</InputLabel>
                 <Select
                   labelId="camera-select-label"
                   value={selectedCamId}
-                  label="Select Target Channel"
+                  label="Select Target CCTV Channel"
                   onChange={(e) => setSelectedCamId(e.target.value)}
                   disabled={exporting}
                 >
@@ -104,25 +135,47 @@ export default function ForensicsManager({ role, token }) {
                 </Select>
               </FormControl>
 
-              <Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
-                  <Typography variant="body2" color="text.secondary">Clip Duration (Seconds)</Typography>
-                  <Typography variant="body2" fontWeight="bold">{duration}s</Typography>
-                </Box>
-                <Slider
-                  value={duration}
-                  min={5}
-                  max={30}
-                  step={1}
-                  onChange={(e, val) => setDuration(val)}
-                  disabled={exporting}
-                  valueLabelDisplay="auto"
+              <TextField
+                label="From (Start Time)"
+                type="datetime-local"
+                size="small"
+                fullWidth
+                value={startTime}
+                onChange={(e) => setStartTime(e.target.value)}
+                slotProps={{ inputLabel: { shrink: true }, htmlInput: { step: 1 } }}
+                disabled={exporting}
+              />
+
+              <TextField
+                label="To (End Time)"
+                type="datetime-local"
+                size="small"
+                fullWidth
+                value={endTime}
+                onChange={(e) => setEndTime(e.target.value)}
+                slotProps={{ inputLabel: { shrink: true }, htmlInput: { step: 1 } }}
+                disabled={exporting}
+              />
+
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                <Typography variant="caption" color="text.secondary" fontWeight="bold">PACKAGE CONTENT OPTIONS:</Typography>
+                <FormControlLabel
+                  control={<Checkbox size="small" checked={incMp4} onChange={(e) => setIncMp4(e.target.checked)} />}
+                  label={<Typography variant="caption">🎥 Video Clip Segment (.mp4)</Typography>}
+                />
+                <FormControlLabel
+                  control={<Checkbox size="small" checked={incSnapshots} onChange={(e) => setIncSnapshots(e.target.checked)} />}
+                  label={<Typography variant="caption">📸 High-Res Frame Keyframes</Typography>}
+                />
+                <FormControlLabel
+                  control={<Checkbox size="small" checked={incFir} onChange={(e) => setIncFir(e.target.checked)} />}
+                  label={<Typography variant="caption">📜 Official Police FIR Evidence Annexure</Typography>}
                 />
               </Box>
 
               {exporting && (
                 <Alert severity="info" icon={<SyncIcon sx={{ animation: 'spin 2s linear infinite' }} />}>
-                  Compiling clip & computing SHA-256 evidence package... (~5-10s)
+                  Compiling clip & computing SHA-256 evidence package... (~3-5s)
                 </Alert>
               )}
 
@@ -132,7 +185,7 @@ export default function ForensicsManager({ role, token }) {
                 disabled={exporting || !selectedCamId}
                 startIcon={exporting ? <SyncIcon sx={{ animation: 'spin 2s linear infinite' }} /> : <VideocamIcon />}
               >
-                {exporting ? 'Compiling Clip...' : 'Compile Evidence'}
+                {exporting ? 'Compiling Evidence...' : 'Compile Custom Evidence'}
               </Button>
             </Box>
 
@@ -144,13 +197,13 @@ export default function ForensicsManager({ role, token }) {
                 <strong>CRYPTOGRAPHY:</strong> SHA-256 hash computed immediately post-capture.
               </Typography>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                <strong>TRUSTED TIME:</strong> Queried from DigiCert public timestamp servers.
+                <strong>TRUSTED TIME:</strong> NTP-synced UTC timestamping server.
               </Typography>
             </Box>
 
             {exportError && (
               <Alert severity="error" icon={<ErrorOutlineIcon />}>
-                <strong>EXPORT_ERROR_403:</strong> {exportError}
+                <strong>EXPORT_ERROR:</strong> {exportError}
               </Alert>
             )}
           </Paper>
@@ -158,45 +211,52 @@ export default function ForensicsManager({ role, token }) {
 
         <Grid size={{ xs: 12, md: 8 }}>
           <Paper variant="outlined" sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
-            <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
-              FORENSIC EXPORTS LEDGER
-            </Typography>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1 }}>
+              <Typography variant="subtitle2" fontWeight="bold">
+                FORENSIC EXPORTS LEDGER
+              </Typography>
+              {exportsList.length > 0 && (
+                <Button
+                  size="small"
+                  color="error"
+                  variant="outlined"
+                  startIcon={<DeleteSweepIcon />}
+                  onClick={handleClearHistory}
+                >
+                  Clear History
+                </Button>
+              )}
+            </Box>
 
             <TableContainer sx={{ flexGrow: 1, overflowY: 'auto' }}>
               <Table size="small">
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ fontWeight: 'bold' }}>TIME</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold' }}>TIME / RANGE</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>CAM NAME</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>OPERATOR</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>SHA-256 HASH</TableCell>
-                    <TableCell align="center" sx={{ fontWeight: 'bold' }}>TSA STATUS</TableCell>
                     <TableCell align="center" sx={{ fontWeight: 'bold' }}>RECOVERY</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {exportsList.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={6} align="center" sx={{ py: 6, color: 'text.secondary' }}>
+                      <TableCell colSpan={5} align="center" sx={{ py: 6, color: 'text.secondary' }}>
                         [ NO FORMS OF EVIDENCE RECORDED IN DATABASE ]
                       </TableCell>
                     </TableRow>
                   ) : (
                     exportsList.map((item, idx) => {
-                      const isDigiCert = item.timestamp_authority === "DigiCert Public TSA";
                       return (
                         <TableRow key={idx} hover>
-                          <TableCell>{item.timestamp.split('T')[1]?.split('.')[0] || "00:00:00"}</TableCell>
-                          <TableCell>{item.camera_name.toUpperCase()}</TableCell>
+                          <TableCell sx={{ fontSize: '0.8rem' }}>
+                            {item.timestamp.split('T')[1]?.split('.')[0] || "00:00:00"}
+                          </TableCell>
+                          <TableCell sx={{ fontWeight: 'bold' }}>{item.camera_name.toUpperCase()}</TableCell>
                           <TableCell>{item.username}</TableCell>
                           <TableCell sx={{ color: 'text.secondary', fontFamily: 'monospace' }}>
                             sha256:<strong style={{ color: 'inherit' }}>{item.sha256_hash.substring(0, 10)}</strong>...
-                          </TableCell>
-                          <TableCell align="center">
-                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
-                              <ShieldIcon fontSize="small" color={isDigiCert ? "primary" : "action"} />
-                              <Typography variant="caption" fontWeight="bold">{isDigiCert ? 'TSA OK' : 'LOCAL OK'}</Typography>
-                            </Box>
                           </TableCell>
                           <TableCell align="center">
                             <Box sx={{ display: 'flex', justifyContent: 'center', gap: 1 }}>
@@ -218,9 +278,10 @@ export default function ForensicsManager({ role, token }) {
                                 size="small"
                                 variant="contained"
                                 color="secondary"
+                                startIcon={<DescriptionIcon />}
                                 sx={{ textTransform: 'none', px: 1, py: 0.5, fontSize: '0.7rem' }}
                               >
-                                📜 FIR Report
+                                FIR Report
                               </Button>
                             </Box>
                           </TableCell>

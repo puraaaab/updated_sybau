@@ -78,12 +78,27 @@ class CameraRecorder:
                 finally:
                     out.release()
 
-                # Delete empty segment files
+                # Delete empty segment files or launch background web-H264 conversion
                 if frames_written == 0:
                     try:
                         os.remove(filepath)
                     except OSError:
                         pass
+                else:
+                    def _convert_to_h264(src_path, cam_id, f_name):
+                        try:
+                            import subprocess
+                            c_dir = os.path.abspath(os.path.join(STORAGE_DIR, "..", "h264_cache", cam_id))
+                            os.makedirs(c_dir, exist_ok=True)
+                            out_h264 = os.path.join(c_dir, f"h264_{f_name}")
+                            subprocess.run([
+                                "ffmpeg", "-y", "-i", src_path,
+                                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                                "-movflags", "+faststart", out_h264
+                            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        except Exception:
+                            pass
+                    threading.Thread(target=_convert_to_h264, args=(filepath, self.camera_id, filename), daemon=True).start()
         finally:
             stream_manager.release_stream(self.camera_id)
 

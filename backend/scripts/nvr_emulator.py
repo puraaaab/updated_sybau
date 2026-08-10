@@ -108,7 +108,8 @@ def start_ffmpeg(video_path, rtsp_url, cam_id):
 
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-fflags", "+genpts+igndts",
+        "-fflags", "+genpts+igndts+nobuffer",
+        "-flags", "low_delay",
         "-err_detect", "ignore_err",
         "-re", "-stream_loop", "-1", "-i", video_path,
     ] + vcodec_args + [

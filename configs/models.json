@@ -9,15 +9,16 @@
     "enabled": true,
     "detector_path": "scrfd_500m.onnx",
     "recognizer_model": "buffalo_l",
-    "device": "cpu"
+    "device": "cuda"
   },
   "vehicle": {
     "enabled": true,
     "reid_model": "market1501",
-    "ocr_engine": "paddleocr"
+    "ocr_engine": "paddleocr",
+    "device": "cuda"
   },
   "person": {
-    "device": "cpu"
+    "device": "cuda"
   },
   "florence": {
     "enabled": true,
@@ -25,7 +26,7 @@
     "device": "cuda",
     "invoke_every_n_frames": 4,
     "dispatch_interval_seconds": 0.5,
-    "caption_batch_size": 9,
+    "caption_batch_size": 1,
     "max_new_tokens": 1024
   },
   "moondream": {
@@ -35,6 +36,6 @@
   },
   "embeddings": {
     "model_name": "BAAI/bge-large-en-v1.5",
-    "device": "cpu"
+    "device": "cuda"
   }
 }

@@ -30,11 +30,16 @@ def get_ai_status(user=Depends(verify_viewer)):
 
     all_ready = yolo_loaded and embedder_loaded
 
+    import os
+    yolo_cfg = get_models().get("yolo", {})
+    yolo_model_path = yolo_cfg.get("model_path", "yolo26l.pt")
+    yolo_name = os.path.basename(yolo_model_path).replace(".pt", "").upper()
+
     return {
         "status": "READY" if all_ready else "PREWARMING",
         "all_ready": all_ready,
         "models": {
-            "YOLO26m": "LOADED" if yolo_loaded else "LOADING",
+            yolo_name: "LOADED" if yolo_loaded else "LOADING",
             "OCR": "LOADED" if ocr_loaded else "LOADING",
             "Embedder": "LOADED" if embedder_loaded else "LOADING",
             "Florence": "LOADED" if florence_loaded else "LOADING"

@@ -52,11 +52,11 @@ class KafkaEventClient:
             logger.info(f"Kafka unavailable ({e}). Falling back to internal MemoryEventBus.")
 
     def publish_event(self, topic: str, data: dict, partition_key: str = None):
-        # Format payload with standardized event schema
+        from ..utils.timezone import get_ist_now_iso
         schema_data = {
             "schema_version": "1.0.0",
             "event_id": str(uuid.uuid4()),
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "timestamp": get_ist_now_iso(),
             "camera_id": data.get("camera_id", "system"),
             "payload": data
         }

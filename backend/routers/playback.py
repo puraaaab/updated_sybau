@@ -49,11 +49,41 @@ def serve_snapshot(snap_id: str, user=Depends(verify_media_access)):
         candidates.append(safe_join_path(snap_dir, f"{snap_id}.png"))
         
     for p in candidates:
-        if os.path.exists(p):
+        if p and os.path.exists(p):
             return FileResponse(p, media_type="image/jpeg")
-            
-    raise HTTPException(status_code=404, detail="Snapshot not found")
 
+    # Special handling for full scene frame requests (full_*)
+    if snap_id.startswith("full_"):
+        if os.path.exists(snap_dir):
+            for f in os.listdir(snap_dir):
+                if (f.startswith("full_cam_") or f.startswith("full_frame_")) and f.endswith(('.jpg', '.png')):
+                    return FileResponse(os.path.join(snap_dir, f), media_type="image/jpeg")
+
+    # Fallback to any snapshot file in storage matching camera/track prefix
+    try:
+        prefix = snap_id.split('_')[0] if '_' in snap_id else snap_id[:8]
+        if os.path.exists(snap_dir):
+            for f in os.listdir(snap_dir):
+                if not f.startswith("full_") and f.startswith(prefix) and f.endswith(('.jpg', '.png')):
+                    return FileResponse(os.path.join(snap_dir, f), media_type="image/jpeg")
+    except Exception:
+        pass
+            
+    # Return SVG placeholder response to prevent broken image icons on frontend
+    svg_placeholder = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80">'
+        '<rect width="120" height="80" fill="#1e293b"/>'
+        '<path d="M40 50 L55 32 L70 48 L80 38 L95 54 Z" fill="#475569"/>'
+        '<circle cx="45" cy="30" r="5" fill="#64748b"/>'
+        '<text x="60" y="68" fill="#94a3b8" font-size="9" text-anchor="middle" font-family="sans-serif">SNAPSHOT</text>'
+        '</svg>'
+    )
+    from fastapi import Response
+    return Response(content=svg_placeholder, media_type="image/svg+xml")
+
+
+import subprocess
+from fastapi import Request, Response
 
 @router.get("/playback/timeline/{camera_id}")
 def get_timeline_clips(camera_id: str, user=Depends(verify_viewer)):
@@ -61,14 +91,75 @@ def get_timeline_clips(camera_id: str, user=Depends(verify_viewer)):
     cam_rec_dir = safe_join_path(rec_base_dir, camera_id)
     if not os.path.exists(cam_rec_dir):
         return []
-    files = sorted(os.listdir(cam_rec_dir))
-    return [{"filename": f, "filepath": f"/api/v1/playback/video/{camera_id}/{f}"} for f in files if f.endswith(".mp4")]
+    files = sorted([f for f in os.listdir(cam_rec_dir) if f.endswith(".mp4")])
+    result = []
+    for idx, f in enumerate(files):
+        fpath = os.path.join(cam_rec_dir, f)
+        size = os.path.getsize(fpath) if os.path.exists(fpath) else 0
+        is_active = (idx == len(files) - 1)
+        result.append({
+            "filename": f,
+            "filepath": f"/api/v1/playback/video/{camera_id}/{f}",
+            "size_bytes": size,
+            "is_active": is_active
+        })
+    return result
 
 
 @router.get("/playback/video/{camera_id}/{clip_name}")
-def serve_video_clip(camera_id: str, clip_name: str, user=Depends(verify_media_access)):
+def serve_video_clip(camera_id: str, clip_name: str, request: Request, user=Depends(verify_media_access)):
     rec_base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "recordings"))
     video_path = safe_join_path(rec_base_dir, camera_id, clip_name)
     if not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail="Video clip not found")
-    return FileResponse(video_path, media_type="video/mp4")
+
+    target_file = video_path
+
+    # Standard HTML5 browsers (Chrome, Edge, Firefox, Safari) only decode H.264 (avc1) MP4s.
+    # Check/transcode mp4v recordings to web-native H.264 faststart MP4.
+    cache_dir = os.path.join(rec_base_dir, "h264_cache", camera_id)
+    os.makedirs(cache_dir, exist_ok=True)
+    h264_path = os.path.join(cache_dir, f"h264_{clip_name}")
+
+    if os.path.exists(h264_path) and os.path.getsize(h264_path) > 1000 and (os.path.getmtime(h264_path) >= os.path.getmtime(video_path)):
+        target_file = h264_path
+    else:
+        cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", h264_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0 and os.path.exists(h264_path) and os.path.getsize(h264_path) > 1000:
+            target_file = h264_path
+
+    file_size = os.path.getsize(target_file)
+    range_header = request.headers.get("range")
+
+    if not range_header:
+        return FileResponse(target_file, media_type="video/mp4")
+
+    try:
+        bytes_unit, byte_range = range_header.split("=")
+        if bytes_unit.strip() != "bytes":
+            return FileResponse(target_file, media_type="video/mp4")
+
+        start_str, end_str = byte_range.split("-")
+        start = int(start_str) if start_str else 0
+        end = int(end_str) if end_str else file_size - 1
+        end = min(end, file_size - 1)
+        chunk_size = (end - start) + 1
+
+        with open(target_file, "rb") as vf:
+            vf.seek(start)
+            data = vf.read(chunk_size)
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(chunk_size),
+            "Content-Type": "video/mp4",
+        }
+        return Response(content=data, status_code=206, headers=headers)
+    except Exception:
+        return FileResponse(target_file, media_type="video/mp4")

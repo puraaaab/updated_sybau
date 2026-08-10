@@ -116,6 +116,10 @@ class CameraStream:
             cap = cv2.VideoCapture(resolved_url)
 
         if cap and cap.isOpened():
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
             CameraStateMachine.update_state(self.camera_id, CameraStateMachine.ONLINE)
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
@@ -129,6 +133,30 @@ class CameraStream:
 
         if cap:
             cap.release()
+
+        # 4. Sub-Stream Failover Attempt (e.g. 101 -> 102 channel fallback)
+        sub_url = None
+        if "101" in resolved_url:
+            sub_url = resolved_url.replace("101", "102")
+        elif "main" in resolved_url:
+            sub_url = resolved_url.replace("main", "sub")
+        elif "subtype=0" in resolved_url:
+            sub_url = resolved_url.replace("subtype=0", "subtype=1")
+
+        if sub_url and sub_url != resolved_url:
+            logger.info(f"[StreamManager] Camera {self.camera_id} main stream failed. Attempting sub-stream failover: {sub_url}")
+            sub_cap = cv2.VideoCapture(sub_url)
+            if sub_cap and sub_cap.isOpened():
+                CameraStateMachine.update_state(self.camera_id, CameraStateMachine.ONLINE)
+                w = int(sub_cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+                h = int(sub_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+                with self._lock:
+                    self.frame_shape = (w, h)
+                    self.fps = 10.0
+                    self.is_online = True
+                logger.info(f"[StreamManager] Camera {self.camera_id} sub-stream failover active ({w}x{h}).")
+                return sub_cap
+
         CameraStateMachine.update_state(self.camera_id, CameraStateMachine.FAILED)
         return None
 
@@ -156,7 +184,16 @@ class CameraStream:
 
             while self.running:
                 loop_start = time.time()
-                ret, frame = cap.read()
+                try:
+                    ret, frame = cap.read()
+                except Exception as err:
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        print(f"[StreamManager] Camera {self.camera_id} — frame read exception ({err}), reconnecting")
+                        break
+                    time.sleep(0.05)
+                    continue
+
                 if not ret or frame is None:
                     # If reading from a local video clip file, loop back to frame 0
                     try:

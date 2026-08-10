@@ -1,5 +1,6 @@
 import logging
 import os
+import json
 
 import numpy as np
 
@@ -239,10 +240,38 @@ def _sql_text_matches(query_text: str, limit: int = 10, start_time: str = None, 
                         "vehicle_color": v.vehicle_color,
                         "identity_uuid": f"VEHICLE_{v.license_plate}" if v.license_plate else f"track_{v.track_uuid}",
                         "track_uuid": v.track_uuid,
-                        "snapshot_url": f"/api/v1/playback/snapshot/veh_{v.id}",
-                        "timestamp": v.timestamp.isoformat() if v.timestamp else ""
+                        "snapshot_url": v.snapshot_url or (f"/api/v1/playback/snapshot/{v.track_uuid}" if v.track_uuid else None),
+                        "timestamp": v.timestamp.isoformat() if v.timestamp else "",
+                        "bbox": json.loads(v.bbox) if (v.bbox and v.bbox != "[]") else None
                     }
                 })
+
+            # 3. Search GlobalIdentities & Faces by person name / label / identity_uuid
+            from ..database.models import GlobalIdentity, Face, Track
+            gi_list = db.query(GlobalIdentity).filter(
+                or_(*[GlobalIdentity.name.ilike(f"%{w}%") for w in q_words] + [GlobalIdentity.identity_uuid.ilike(f"%{w}%") for w in q_words])
+            ).limit(limit).all()
+
+            for gi in gi_list:
+                matched_faces = db.query(Face).filter(
+                    or_(Face.label == gi.identity_uuid, Face.label == gi.name)
+                ).order_by(Face.timestamp.desc()).limit(5).all()
+
+                for f in matched_faces:
+                    tr = db.query(Track).filter(Track.track_uuid == f.track_uuid).first() if f.track_uuid else None
+                    cam_id = tr.camera_id if tr else "cam_1"
+                    results.append({
+                        "score": 0.98,
+                        "payload": {
+                            "type": "face",
+                            "camera_id": cam_id,
+                            "label": gi.name,
+                            "identity_uuid": gi.identity_uuid,
+                            "caption": f"Identified Person: {gi.name} ({gi.identity_uuid})",
+                            "snapshot_url": f"/api/v1/watchlist/{gi.identity_uuid}/snapshot",
+                            "timestamp": f.timestamp.isoformat() if f.timestamp else ""
+                        }
+                    })
 
         return sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
     except Exception as e:
@@ -265,8 +294,18 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
 
     try:
         from .qdrant_utils import qdrant_client_with_timeout
-        from ..ai.person.person_attribute_engine import get_clip_text_embedding
-        clip_query_vec = get_clip_text_embedding(query_text)
+
+        # Only invoke OpenCLIP text encoder when query targets person attributes
+        q_lower = query_text.lower()
+        needs_person_clip = any(w in q_lower for w in ["person", "man", "woman", "shirt", "jacket", "dress", "guy", "lady", "boy", "girl", "wearing", "clothes", "backpack", "bag"])
+
+        clip_query_vec = None
+        if needs_person_clip:
+            try:
+                from ..ai.person.person_attribute_engine import get_clip_text_embedding
+                clip_query_vec = get_clip_text_embedding(query_text)
+            except Exception as clip_e:
+                logger.debug(f"OpenCLIP text embedding skipped: {clip_e}")
 
         qd_results = []
         with qdrant_client_with_timeout(1.5) as client:
@@ -285,20 +324,21 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
             except Exception as e:
                 logger.debug(f"Qdrant scene query note: {e}")
 
-            # 2. Search OpenCLIP person crops
-            try:
-                crop_res = client.query_points(
-                    collection_name="vms_embeddings",
-                    query=clip_query_vec,
-                    using="person_crop",
-                    query_filter=query_filter,
-                    limit=limit,
-                    with_payload=True
-                ).points
-                if crop_res:
-                    qd_results.extend(crop_res)
-            except Exception as e:
-                logger.debug(f"Qdrant person_crop query note: {e}")
+            # 2. Search OpenCLIP person crops (only when clip_query_vec is computed)
+            if clip_query_vec:
+                try:
+                    crop_res = client.query_points(
+                        collection_name="vms_embeddings",
+                        query=clip_query_vec,
+                        using="person_crop",
+                        query_filter=query_filter,
+                        limit=limit,
+                        with_payload=True
+                    ).points
+                    if crop_res:
+                        qd_results.extend(crop_res)
+                except Exception as e:
+                    logger.debug(f"Qdrant person_crop query note: {e}")
 
             # 3. Search Vehicle Re-ID / attribute vectors
             try:
@@ -319,19 +359,27 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
             results = []
             seen_snapshots = set()
             snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
+            existing_snaps = set(os.listdir(snap_dir)) if os.path.exists(snap_dir) else set()
 
             for r in qd_results:
                 snap_url = r.payload.get("snapshot_url") or ""
-                if snap_url:
-                    if snap_url in seen_snapshots:
-                        continue
-                    seen_snapshots.add(snap_url)
+                cam_id = r.payload.get("camera_id") or ""
+                snap_id = snap_url.split("/")[-1] if snap_url else ""
 
-                    snap_id = snap_url.split("/")[-1]
-                    snap_path = os.path.join(snap_dir, f"{snap_id}.jpg")
-                    raw_path = os.path.join(snap_dir, snap_id)
-                    if not (os.path.exists(snap_path) or os.path.exists(raw_path)):
-                        continue  # Skip records whose snapshot image files no longer exist on disk
+                if snap_id:
+                    if snap_id in seen_snapshots:
+                        continue
+                    seen_snapshots.add(snap_id)
+
+                    # Fast O(1) set lookup for file existence
+                    has_file = (
+                        f"{snap_id}.jpg" in existing_snaps or 
+                        snap_id in existing_snaps or 
+                        (cam_id and f"full_cam_{cam_id}.jpg" in existing_snaps) or
+                        f"full_{snap_id}.jpg" in existing_snaps
+                    )
+                    if not has_file:
+                        continue
 
                 score = float(r.score)
                 text_to_compare = " ".join(filter(None, [
@@ -344,7 +392,15 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
                 ])).strip()
                 score += _keyword_boost(query_text, text_to_compare)
                 score = min(score, 0.99)  # Cap score at 0.99 so UI doesn't exceed 99%
-                results.append({"score": score, "payload": r.payload})
+
+                payload = dict(r.payload)
+                cam_id = payload.get("camera_id")
+                if cam_id:
+                    payload["full_snapshot_url"] = f"/api/v1/playback/snapshot/full_cam_{cam_id}"
+                elif snap_url:
+                    payload["full_snapshot_url"] = f"/api/v1/playback/snapshot/full_{snap_id}"
+
+                results.append({"score": score, "payload": payload})
 
             if results:
                 return sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
@@ -365,10 +421,11 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
 def perform_face_search(face_embedding: list, limit: int = 10, start_time: str = None, end_time: str = None) -> list:
     """
     Performs vector similarity search matching query face embedding against indexed faces,
-    optionally filtered by time range.
+    optionally filtered by time range. Enforces a strict minimum similarity threshold (>= 0.45).
     """
     is_production = os.getenv("APP_ENV") == "production"
     query_filter = _build_qdrant_time_filter(start_time, end_time)
+    MIN_FACE_SCORE = 0.45
 
     try:
         from .qdrant_utils import qdrant_client_with_timeout
@@ -383,7 +440,13 @@ def perform_face_search(face_embedding: list, limit: int = 10, start_time: str =
             ).points
 
         if qd_results:
-            return [{"score": r.score, "payload": r.payload} for r in qd_results]
+            valid_results = [
+                {"score": float(r.score), "payload": r.payload} 
+                for r in qd_results 
+                if float(r.score) >= MIN_FACE_SCORE
+            ]
+            if valid_results:
+                return sorted(valid_results, key=lambda x: x["score"], reverse=True)
     except Exception as e:
         if is_production:
             raise RuntimeError(f"FATAL: Qdrant face search failed in production: {e}") from e
@@ -400,7 +463,8 @@ def perform_face_search(face_embedding: list, limit: int = 10, start_time: str =
                 if end_time and item_ts > end_time:
                     continue
             sim = cosine_similarity(face_embedding, item["vector"])
-            matches.append({"score": sim, "payload": item["payload"]})
+            if sim >= MIN_FACE_SCORE:
+                matches.append({"score": sim, "payload": item["payload"]})
 
     matches = sorted(matches, key=lambda x: x["score"], reverse=True)
     return matches[:limit]

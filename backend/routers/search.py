@@ -43,8 +43,11 @@ def search_license_plate(
     
     camera_map = {cam.id: cam.name for cam in db.query(Camera).all()}
     
-    return [
-        {
+    out = []
+    for vehicle in results:
+        snap_url = vehicle.snapshot_url or (f"/api/v1/playback/snapshot/{vehicle.track_uuid}" if vehicle.track_uuid else None)
+        bbox_val = vehicle.bbox
+        out.append({
             "id": vehicle.id,
             "license_plate": vehicle.license_plate,
             "ocr_confidence": vehicle.ocr_confidence,
@@ -52,9 +55,11 @@ def search_license_plate(
             "timestamp": vehicle.timestamp,
             "track_uuid": vehicle.track_uuid,
             "camera_id": vehicle.camera_id or "Unknown",
-            "camera_name": camera_map.get(vehicle.camera_id, "Unknown") if vehicle.camera_id else "Unknown"
-        } for vehicle in results
-    ]
+            "camera_name": camera_map.get(vehicle.camera_id, "Unknown") if vehicle.camera_id else "Unknown",
+            "snapshot_url": snap_url,
+            "bbox": bbox_val
+        })
+    return out
 
 
 @router.get("/debug")
@@ -103,3 +108,51 @@ async def search_face(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Face embedding pipeline error: {str(e)}")
+
+
+@router.post("/image-query")
+async def search_by_uploaded_image(
+    file: UploadFile = File(...),
+    limit: int = Query(default=25),
+    start_time: str = Query(default=None),
+    end_time: str = Query(default=None),
+    user=Depends(verify_viewer)
+):
+    """
+    Accepts an uploaded image file (e.g. green shirt man, black car, etc.),
+    runs Florence-2 GPU vision model to generate a rich detailed description in <1s,
+    and executes multi-vector similarity search to return matching snapshot captures.
+    """
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    nparr = np.frombuffer(contents, np.uint8)
+    bgr_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if bgr_img is None:
+        raise HTTPException(status_code=400, detail="Could not decode image file. Upload a valid JPG, PNG, or WEBP file.")
+
+    try:
+        from ..ai.captioning.captioner import generate_scene_captions
+        captions = generate_scene_captions([bgr_img])
+        raw_caption = captions[0] if (captions and captions[0]) else "Surveillance target object"
+
+        # Clean prompt prefixes if present
+        clean_prompt = raw_caption
+        if "[Florence]:" in clean_prompt:
+            clean_prompt = clean_prompt.split("[Florence]:")[-1].strip()
+        if "[YOLO]:" in clean_prompt:
+            clean_prompt = clean_prompt.replace("[YOLO]:", "").strip()
+
+        # Run vector similarity search using Florence-2 generated description
+        results = vector_search.perform_semantic_search(
+            clean_prompt, limit=limit, start_time=start_time, end_time=end_time
+        )
+
+        return {
+            "extracted_prompt": clean_prompt,
+            "raw_caption": raw_caption,
+            "results": results
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Image vision query failed: {str(exc)}")

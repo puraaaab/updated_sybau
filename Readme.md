@@ -39,7 +39,7 @@ Build an AI-powered Video Management System (VMS) capable of:
       ┌──────────────────┼──────────────────┐
       │                  │                  │
       ▼                  ▼                  ▼
-   YOLO26m          Face Pipeline     Vehicle Pipeline
+   YOLO26l          Face Pipeline     Vehicle Pipeline
       │                  │                  │
       └──────────────┬───┴──────────────────┘
                      ▼
@@ -87,7 +87,7 @@ The implementation should follow these principles:
 | Frontend         | React + Material UI                                          |
 | Streaming        | MediaMTX                                                     |
 | Video Processing | FFmpeg + GStreamer                                           |
-| Detection        | Ultralytics YOLO26m                                          |
+| Detection        | Ultralytics YOLO26l                                         |
 | Tracking         | ByteTrack                                                    |
 | Face Detection   | SCRFD                                                        |
 | Face Recognition | InsightFace (buffalo_l or buffalo_sc)                        |
@@ -139,7 +139,7 @@ Support multiple camera sources.
 
 ## Model
 
-Ultralytics YOLO26m
+Ultralytics YOLO26l
 
 Detect at minimum:
 
@@ -823,7 +823,7 @@ docs/
 * MediaMTX integration
 * Camera ingestion
 * Live dashboard
-* YOLO26m object detection
+* YOLO26l object detection
 
 ---
 

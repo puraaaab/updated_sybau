@@ -15,6 +15,7 @@ import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 export default function AlertsPanel({ alerts, token }) {
   const [selectedAlert, setSelectedAlert] = useState(null);
   const [activeTab, setActiveTab] = useState(0);
+  const [ruleToDelete, setRuleToDelete] = useState(null);
 
   // Dynamic Custom Rules State
   const [customRules, setCustomRules] = useState([]);
@@ -226,6 +227,7 @@ export default function AlertsPanel({ alerts, token }) {
       </Paper>
 
       {/* ── Active Custom Rules Bar ─────────────────────────────────────────── */}
+      {/* ── Active Custom Rules Bar ─────────────────────────────────────────── */}
       {customRules.length > 0 && (
         <Paper variant="outlined" sx={{ p: 1.5, backgroundColor: 'background.paper' }}>
           <Typography variant="caption" fontWeight="bold" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
@@ -238,7 +240,7 @@ export default function AlertsPanel({ alerts, token }) {
                 label={`${r.prompt} (${r.camera_id})`}
                 color={r.is_active ? (r.severity === 'high' ? 'error' : 'warning') : 'default'}
                 variant={r.is_active ? 'filled' : 'outlined'}
-                onDelete={() => handleDeleteRule(r.id)}
+                onDelete={() => setRuleToDelete(r)}
                 deleteIcon={<DeleteIcon fontSize="small" />}
                 onClick={() => handleToggleRule(r.id)}
                 clickable
@@ -279,8 +281,16 @@ export default function AlertsPanel({ alerts, token }) {
           <TableBody>
             {filteredAlerts.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} align="center" sx={{ py: 4, color: 'text.secondary' }}>
-                  [ NO ALERTS REGISTERED IN THIS CATEGORY ]
+                <TableCell colSpan={7} align="center" sx={{ py: 6 }}>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                    <NotificationsActiveIcon sx={{ fontSize: 40, color: 'text.secondary', opacity: 0.5 }} />
+                    <Typography variant="subtitle2" fontWeight="bold" color="text.secondary">
+                      No Alerts Registered in This Category
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Real-time triggers will automatically appear here as computer vision models flag detections.
+                    </Typography>
+                  </Box>
                 </TableCell>
               </TableRow>
             ) : (
@@ -330,7 +340,7 @@ export default function AlertsPanel({ alerts, token }) {
       <Dialog open={Boolean(selectedAlert)} onClose={() => setSelectedAlert(null)} maxWidth="md" fullWidth>
         <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Typography variant="subtitle1" fontWeight="bold">EVIDENCE SNAPSHOT // {selectedAlert?.type}</Typography>
-          <IconButton onClick={() => setSelectedAlert(null)} size="small">
+          <IconButton onClick={() => setSelectedAlert(null)} size="small" aria-label="Close snapshot preview">
             <CloseIcon />
           </IconButton>
         </DialogTitle>
@@ -345,6 +355,31 @@ export default function AlertsPanel({ alerts, token }) {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setSelectedAlert(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Deletion Confirmation Dialog (Issue 6) */}
+      <Dialog open={Boolean(ruleToDelete)} onClose={() => setRuleToDelete(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>Confirm Rule Deletion</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            Are you sure you want to remove the dynamic alert rule <strong>"{ruleToDelete?.prompt}"</strong>? Real-time GPU inference for this rule will stop immediately.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setRuleToDelete(null)} variant="outlined">Cancel</Button>
+          <Button
+            onClick={() => {
+              if (ruleToDelete) {
+                handleDeleteRule(ruleToDelete.id);
+                setRuleToDelete(null);
+              }
+            }}
+            color="error"
+            variant="contained"
+          >
+            Delete Rule
+          </Button>
         </DialogActions>
       </Dialog>
     </Box>

@@ -14,31 +14,25 @@ from ...config.service import get_models
 logger = logging.getLogger(__name__)
 
 def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: dict, frame_idx: int) -> dict:
-    """
-    Coordinates frame analysis across all AI sub-modules by submitting tasks
-    to the centralized Priority Queue Scheduler.
-
-    GPU Scheduling Discipline (RTX 4060 8GB VRAM):
-    ┌──────────────┬────────────────────────────────────┬──────────┐
-    │ Model        │ Trigger Condition                  │ Device   │
-    ├──────────────┼────────────────────────────────────┼──────────┤
-    │ YOLO         │ Every sampled frame                │ CUDA     │
-    │ Vehicle OCR  │ Only when vehicle class detected    │ CPU      │
-    │ Vehicle ReID │ Only when vehicle class detected    │ CPU      │
-    │ Face Det+Rec │ Only when person class detected     │ CPU      │
-    │ Florence-2   │ Every N frames (configurable)       │ CUDA     │
-    │ MiniLM Embed │ Only when caption is generated      │ CPU      │
-    └──────────────┴────────────────────────────────────┴──────────┘
-
-    This keeps YOLO and Florence-2 as the only GPU consumers, and they
-    never run simultaneously (Florence runs on every Nth frame only).
-    """
     from ..scheduler import inference_scheduler
+    from ..captioning.captioner import record_yolo_frame_summary, submit_async_scene_caption
     cfg = get_models()
 
+    florence_cfg = cfg.get("florence", {})
+    florence_enabled = florence_cfg.get("enabled", True)
+    n_frames = florence_cfg.get("invoke_every_n_frames", 1)
+
+    # 0. PARALLEL DISPATCH: Send frame immediately to Florence in parallel with unique corr_id
+    florence_queued = False
+    corr_id = f"img_{uuid.uuid4().hex[:12]}"
+    if florence_enabled and (n_frames <= 1 or frame_idx % n_frames == 0):
+        try:
+            florence_queued = submit_async_scene_caption(frame, camera_id=camera_id, corr_id=corr_id)
+        except Exception as e:
+            logger.warning(f"[{camera_id}] Parallel Florence dispatch error: {e}")
+
     # 1. Object detection & tracking (YOLO + ByteTrack) — batched GPU inference.
-    #    Routed through centralized InferenceScheduler to aggregate multi-camera frames
-    #    into dynamic 20ms GPU micro-batches, preventing CUDA thread lock contention.
+    #    Runs in parallel on the main thread for the same frame
     try:
         raw_detections = inference_scheduler.schedule_yolo_detection(camera_id, frame, frame_idx)
         tracks = trajectory_tracker.update_tracks(raw_detections, camera_id)
@@ -51,16 +45,9 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
             logger.warning(f"[{camera_id}] Fallback YOLO detection failed: {fallback_e}")
             tracks = []
     
-    # 1.5. Florence config read; dispatched AFTER YOLO summary is built below
     florence_cfg = cfg.get("florence", {})
     florence_enabled = florence_cfg.get("enabled", True)
     n_frames = florence_cfg.get("invoke_every_n_frames", 1)
-
-    florence_queued = False
-    should_invoke_florence = florence_enabled and (
-        n_frames <= 1 or
-        frame_idx % n_frames == 0
-    )
 
     # 2. Process faces & person crops for tracked people — ONLY when person detected
     faces = []
@@ -100,6 +87,8 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
         veh_counts: dict = {}
         for v in vehicles:
             v_color = v.get("vehicle_color", "")
+            if isinstance(v_color, (tuple, list)):
+                v_color = v_color[0]
             v_type = v.get("vehicle_type", "car")
             
             # Map Indian 3-wheeler geometry (COCO truck/car fallback to auto-rickshaw)
@@ -126,7 +115,9 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
         p_counts: dict = {}
         for p in person_crops:
             u_col = p.get("upper_color", "unknown")
+            if isinstance(u_col, (tuple, list)): u_col = u_col[0]
             l_col = p.get("lower_color", "unknown")
+            if isinstance(l_col, (tuple, list)): l_col = l_col[0]
             if u_col != "unknown" and l_col != "unknown":
                 p_label = f"person in {u_col} top and {l_col} bottom"
             elif u_col != "unknown":
@@ -160,6 +151,7 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
                     obj_crop = frame[y1:y2, x1:x2]
                     if obj_crop.size > 0:
                         color = detect_crop_color(obj_crop)
+                        if isinstance(color, (tuple, list)): color = color[0]
             label = f"{color} {cls}".strip() if color and color != "unknown" else cls
             obj_counts[label] = obj_counts.get(label, 0) + 1
         for label, cnt in obj_counts.items():
@@ -172,49 +164,25 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     caption = f"[YOLO]: {yolo_summary} | camera {camera_id}"
     embedding = None
 
-    # Dispatch captioner (Interleaved round-robin: Moondream on even frames, Florence-2 on odd frames)
+    # Record YOLO summary bound to this frame's correlation ID for parallel Florence
+    record_yolo_frame_summary(corr_id, yolo_summary)
+
+    # Dispatch Moondream captioner if enabled (interleaved on offset frames when both are active)
     moondream_cfg     = cfg.get("moondream", {})
-    moondream_enabled = moondream_cfg.get("enabled", False)
-
-    if moondream_enabled and florence_enabled:
-        # 1-second alternating cadence (00:01 Moondream -> 00:02 Florence-2 -> 00:03 Moondream -> 00:04 Florence-2)
-        if frame_idx % 4 == 0:
-            corr_id = uuid.uuid4().hex[:8]
-            try:
-                submit_moondream_caption(
-                    frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id
-                )
-            except Exception as e:
-                logger.warning(f"[Moondream] 1s dispatch error on {camera_id}: {e}")
-        elif frame_idx % 4 == 2:
-            corr_id = uuid.uuid4().hex[:8]
-            try:
-                florence_queued = submit_async_scene_caption(
-                    frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id
-                )
-            except Exception as e:
-                logger.warning(f"[Florence Async] 1s dispatch error on {camera_id}: {e}")
-    else:
-        md_n_frames      = moondream_cfg.get("invoke_every_n_frames", n_frames)
-        should_invoke_md = moondream_enabled and (md_n_frames <= 1 or frame_idx % md_n_frames == 0)
-
+    moondream_enabled = moondream_cfg.get("enabled", True)
+    if moondream_enabled:
+        md_n_frames      = moondream_cfg.get("invoke_every_n_frames", 4)
+        # Interleave Moondream on frame offset (e.g. frame_idx % 4 == 2) when Florence is also active
+        offset           = (md_n_frames // 2) if florence_enabled and md_n_frames > 1 else 0
+        should_invoke_md = md_n_frames <= 1 or (frame_idx % md_n_frames == offset)
         if should_invoke_md:
-            corr_id = uuid.uuid4().hex[:8]
+            md_corr_id = uuid.uuid4().hex[:8]
             try:
                 submit_moondream_caption(
-                    frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id
+                    frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=md_corr_id
                 )
             except Exception as e:
                 logger.warning(f"[Moondream] Dispatch error on {camera_id}: {e}")
-
-        if should_invoke_florence:
-            corr_id = uuid.uuid4().hex[:8]
-            try:
-                florence_queued = submit_async_scene_caption(
-                    frame, camera_id=camera_id, yolo_summary=yolo_summary, corr_id=corr_id
-                )
-            except Exception as e:
-                logger.warning(f"[Florence Async] Dispatch error on {camera_id}: {e}")
 
 
     # Instant text embedding for YOLO summary

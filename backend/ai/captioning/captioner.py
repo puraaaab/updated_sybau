@@ -28,11 +28,7 @@ MOCK_DESCRIPTIONS = [
     "An operator walking past the camera range."
 ]
 
-CAPTION_PROMPT = (
-    "<MORE_DETAILED_CAPTION> Analyze this traffic surveillance frame. Count every visible object accurately. "
-    "Include total vehicle count, vehicle type, color, location, motion status, pedestrians, clothing colors, traffic conditions, "
-    "road markings, barriers, exact readable license plate text, and environmental conditions. Do not speculate about hidden objects or unobservable events."
-)
+CAPTION_PROMPT = "<MORE_DETAILED_CAPTION>"
 
 
 def _florence_dispatch_interval_seconds() -> float:
@@ -366,17 +362,12 @@ def generate_scene_captions(frames: list[np.ndarray], corr_id: str | None = None
             return [None for _ in frames]
         model, processor = florence_res
 
-        logger.warning(f"[Florence-2 Debug] corr={corr_id} 2. Preprocessing {len(frames)} frame(s) (768px scale for color/detail)...")
+        logger.warning(f"[Florence-2 Debug] corr={corr_id} 2. Converting {len(frames)} frame(s) to RGB PIL Images...")
         pil_images = []
         for frame in frames:
             if frame is None or frame.size == 0:
                 pil_images.append(None)
                 continue
-            h, w = frame.shape[:2]
-            if max(h, w) > 768:
-                scale = 768.0 / max(h, w)
-                frame = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_LINEAR)
-
             rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_images.append(Image.fromarray(rgb_image))
 
@@ -396,15 +387,11 @@ def generate_scene_captions(frames: list[np.ndarray], corr_id: str | None = None
             input_ids = inputs["input_ids"].to(device)
             pixel_values = inputs["pixel_values"].to(device).to(dtype)
 
-            if hasattr(model, "generation_config"):
-                model.generation_config.early_stopping = False
-                model.generation_config.num_beams = 1
-
             logger.warning(f"[Florence-2 Debug] corr={corr_id} 5. Calling model.generate on CUDA...")
             t_gen0 = time.time()
             max_new_tokens = _florence_max_new_tokens()
-            eos_id = getattr(getattr(processor, "tokenizer", None), "eos_token_id", None)
-            pad_id = getattr(getattr(processor, "tokenizer", None), "pad_token_id", None)
+            eos_id = getattr(getattr(processor, "tokenizer", None), "eos_token_id", 2)
+            pad_id = getattr(getattr(processor, "tokenizer", None), "pad_token_id", 1)
             gen_kwargs = {
                 "input_ids": input_ids,
                 "pixel_values": pixel_values,
@@ -412,11 +399,9 @@ def generate_scene_captions(frames: list[np.ndarray], corr_id: str | None = None
                 "do_sample": False,
                 "num_beams": 1,
                 "use_cache": True,
+                "eos_token_id": eos_id,
+                "pad_token_id": pad_id
             }
-            if eos_id is not None:
-                gen_kwargs["eos_token_id"] = eos_id
-            if pad_id is not None:
-                gen_kwargs["pad_token_id"] = pad_id
 
             with torch.inference_mode():
                 generated_ids = model.generate(**gen_kwargs)
@@ -451,15 +436,48 @@ def get_florence_queue_stats() -> dict:
     return stats
 
 
+yolo_correlation_map: dict[str, str] = {}
+_yolo_lock = threading.Lock()
+
+def record_yolo_frame_summary(corr_id: str, yolo_summary: str):
+    """Stores YOLO summary for a given frame correlation ID so parallel Florence can bind with it."""
+    if not corr_id or not yolo_summary:
+        return
+    with _yolo_lock:
+        yolo_correlation_map[corr_id] = yolo_summary
+        if len(yolo_correlation_map) > 500:
+            oldest_keys = list(yolo_correlation_map.keys())[:200]
+            for k in oldest_keys:
+                yolo_correlation_map.pop(k, None)
+
+def get_yolo_frame_summary(corr_id: str) -> str:
+    if not corr_id:
+        return ""
+    with _yolo_lock:
+        return yolo_correlation_map.get(corr_id, "")
+
+
 def _async_caption_persister(florence_cap: str, metadata: dict):
     if not metadata:
         return
     corr_id = metadata.get("corr_id", "?") if metadata else "?"
     camera_id = metadata.get("camera_id", "cam_1")
-    logger.info(f"[FLORENCE-TRACE] corr={corr_id} PERSISTER ENTER "
-                f"cam={camera_id} caption={'<empty>' if not florence_cap else florence_cap[:60]!r}")
+    frame = metadata.get("frame")
+
+    from backend.ai.captioning.caption_integrity import caption_integrity_validator
+    is_valid, reason, envelope = caption_integrity_validator.validate_and_claim(
+        image_id=corr_id,
+        camera_id=camera_id,
+        frame=frame,
+        raw_caption=florence_cap
+    )
+
+    if not is_valid:
+        logger.error(f"[Florence INTEGRITY REJECTED] {reason}")
+        return
+
+    logger.info(f"[FLORENCE-TRACE] corr={corr_id} PERSISTER ENTER cam={camera_id}")
     try:
-        import uuid
         import os
         import datetime
         from ...database.connection import SessionLocal
@@ -467,7 +485,8 @@ def _async_caption_persister(florence_cap: str, metadata: dict):
         from ..embeddings.embedder import get_text_embedding
         from ...messaging.kafka_client import event_client
 
-        yolo_summary = metadata.get("yolo_summary", "")
+        # Retrieve bound YOLO summary for the exact frame correlation ID
+        yolo_summary = metadata.get("yolo_summary") or get_yolo_frame_summary(corr_id)
         f_text = florence_cap if florence_cap else "Active surveillance scene"
         
         if yolo_summary:
@@ -481,12 +500,11 @@ def _async_caption_persister(florence_cap: str, metadata: dict):
         except Exception as e:
             logger.warning(f"[{camera_id}] Async embedding error: {e}")
 
-        vid = str(uuid.uuid4())
+        vid = corr_id if corr_id else f"img_{uuid.uuid4().hex[:12]}"
         snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage", "snapshots"))
         os.makedirs(snap_dir, exist_ok=True)
         snap_url = f"/api/v1/playback/snapshot/{vid}"
 
-        frame = metadata.get("frame")
         if frame is not None:
             snap_path = os.path.join(snap_dir, f"{vid}.jpg")
             try:
@@ -547,17 +565,22 @@ def _async_caption_persister(florence_cap: str, metadata: dict):
 
 
 def submit_async_scene_caption(frame: np.ndarray, camera_id: str, yolo_summary: str = "", corr_id: str | None = None) -> bool:
-    if corr_id is None:
-        import uuid
-        corr_id = uuid.uuid4().hex[:8]
-    logger.info(f"[FLORENCE-TRACE] corr={corr_id} cam={camera_id} "
+    from backend.ai.captioning.caption_integrity import caption_integrity_validator
+    image_id, envelope = caption_integrity_validator.create_envelope(
+        frame=frame,
+        camera_id=camera_id,
+        yolo_summary=yolo_summary,
+        custom_id=corr_id
+    )
+
+    logger.info(f"[FLORENCE-TRACE] image_id={image_id} cam={camera_id} "
                 f"ENTER submit_async_scene_caption frame_shape="
                 f"{None if frame is None else frame.shape}")
     logger.warning(f"[Florence-2 Submitter] Submitting frame to async queue for camera {camera_id}")
     metadata = {
         "camera_id": camera_id,
         "yolo_summary": yolo_summary,
-        "corr_id": corr_id,
+        "corr_id": image_id,
         "frame": frame.copy() if frame is not None else None
     }
     return _round_robin_scheduler.register_pending_frame(camera_id, frame, metadata)

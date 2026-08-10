@@ -26,29 +26,49 @@ def download_face_models():
         url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
         urllib.request.urlretrieve(url, SFACE_PATH)
 
+def _get_cv2_backend_target(device: str):
+    has_cuda = (
+        device == "cuda" and 
+        hasattr(cv2, "cuda") and 
+        cv2.cuda.getCudaEnabledDeviceCount() > 0 and 
+        hasattr(cv2.dnn, "DNN_BACKEND_CUDA")
+    )
+    if has_cuda:
+        return cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA
+    return cv2.dnn.DNN_BACKEND_DEFAULT, cv2.dnn.DNN_TARGET_CPU
+
 def get_face_models(width=640, height=480):
     global _recognizer
     download_face_models()
+    cfg = get_models()
+    device = cfg.get("face", {}).get("device", "cuda")
+    backend_id, target_id = _get_cv2_backend_target(device)
+
     with face_lock:
         key = (width, height)
         if key not in _detectors:
-            print(f"[FacePipeline] Creating FaceDetectorYN instance for resolution: {width}x{height}")
-            det = cv2.FaceDetectorYN.create(
-                YUNET_PATH,
-                "",
-                (width, height),
-                0.6,
-                0.3,
-                100
-            )
+            try:
+                det = cv2.FaceDetectorYN.create(
+                    YUNET_PATH, "", (width, height), 0.6, 0.3, 100, backend_id, target_id
+                )
+            except Exception as e:
+                print(f"[FacePipeline] OpenCV CUDA backend failed ({e}). Falling back to CPU.")
+                det = cv2.FaceDetectorYN.create(
+                    YUNET_PATH, "", (width, height), 0.6, 0.3, 100, cv2.dnn.DNN_BACKEND_DEFAULT, cv2.dnn.DNN_TARGET_CPU
+                )
             _detectors[key] = det
         detector = _detectors[key]
             
         if _recognizer is None:
-            rec = cv2.FaceRecognizerSF.create(
-                SFACE_PATH,
-                ""
-            )
+            try:
+                rec = cv2.FaceRecognizerSF.create(
+                    SFACE_PATH, "", backend_id, target_id
+                )
+            except Exception as e:
+                print(f"[FacePipeline] OpenCV CUDA recognizer failed ({e}). Falling back to CPU.")
+                rec = cv2.FaceRecognizerSF.create(
+                    SFACE_PATH, "", cv2.dnn.DNN_BACKEND_DEFAULT, cv2.dnn.DNN_TARGET_CPU
+                )
             _recognizer = rec
         return detector, _recognizer
 
@@ -144,7 +164,8 @@ def process_faces(frame: np.ndarray, detections: list):
                         "confidence": confidence,
                         "embedding": embedding_list,
                         "embedding_id": face_id,
-                        "label": "Unknown"
+                        "label": "Unknown",
+                        "face_crop": aligned_face
                     })
     except Exception as e:
         print(f"[FacePipeline] Error executing real face recognition: {e}")

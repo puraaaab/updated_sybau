@@ -26,10 +26,14 @@ def test_bwc_upload_ingest():
         assert res["officer_id"] == "OFF-9042"
         assert os.path.exists(res["saved_path"])
 
-        # Clean up created file
+        # Clean up created file and DB record
         if os.path.exists(res["saved_path"]):
             os.remove(res["saved_path"])
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+            
+        from backend.database.models import Camera
+        db.query(Camera).filter(Camera.id == "bwc_sn-bwc-99").delete()
+        db.commit()
     finally:
         db.close()

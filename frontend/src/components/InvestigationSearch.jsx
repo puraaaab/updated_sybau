@@ -1,11 +1,36 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
-  Box, Typography, Paper, TextField, Button, Select, MenuItem, InputLabel, FormControl, Card, CardMedia, CardContent, CardActions, Chip, Alert, Slider
+  Box, Typography, Paper, TextField, Button, Select, MenuItem, InputLabel, FormControl, Card, CardMedia, CardContent, CardActions, Chip, Alert, Slider, IconButton, Tooltip
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import SyncIcon from '@mui/icons-material/Sync';
 import DownloadIcon from '@mui/icons-material/Download';
 import ImageSearchIcon from '@mui/icons-material/ImageSearch';
+import CloseIcon from '@mui/icons-material/Close';
+import ClearIcon from '@mui/icons-material/Clear';
+import CancelIcon from '@mui/icons-material/Cancel';
+
+const computeBboxStyle = (bbox) => {
+  if (!bbox || !Array.isArray(bbox) || bbox.length < 4) return null;
+  let [ymin, xmin, ymax, xmax] = bbox;
+  if (ymax <= ymin || xmax <= xmin) return null;
+  if (ymax > 1 || xmax > 1) {
+    ymin = (ymin / 1080) * 100;
+    ymax = (ymax / 1080) * 100;
+    xmin = (xmin / 1920) * 100;
+    xmax = (xmax / 1920) * 100;
+  } else {
+    ymin = ymin * 100;
+    ymax = ymax * 100;
+    xmin = xmin * 100;
+    xmax = xmax * 100;
+  }
+  const top = `${Math.max(2, Math.min(85, ymin))}%`;
+  const left = `${Math.max(2, Math.min(85, xmin))}%`;
+  const width = `${Math.max(5, Math.min(95, xmax - xmin))}%`;
+  const height = `${Math.max(5, Math.min(95, ymax - ymin))}%`;
+  return { top, left, width, height };
+};
 
 export default function InvestigationSearch({ role, token, searchEvents = [], initialQuery = '' }) {
   const [cameras, setCameras] = useState([]);
@@ -19,6 +44,59 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [selectedFaceFile, setSelectedFaceFile] = useState(null);
+  const [selectedVisionFile, setSelectedVisionFile] = useState(null);
+  const [extractedAiPrompt, setExtractedAiPrompt] = useState('');
+
+  const handleVisionImageSearchUpload = (file) => {
+    if (!file || !token) return;
+    setLoading(true);
+    setError('');
+    setExtractedAiPrompt('Analyzing image with Florence-2 VLM on GPU...');
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    fetch('/api/search/image-query', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData
+    })
+      .then(async res => {
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.detail || 'Vision image query failed');
+        return body;
+      })
+      .then(data => {
+        const prompt = data.extracted_prompt || 'Extracted Target';
+        setQuery(prompt);
+        setExtractedAiPrompt(prompt);
+        let list = Array.isArray(data.results) ? data.results : [];
+        const transformed = list.map((item, idx) => {
+          const p = item.payload || {};
+          const score = item.score || 0;
+          return {
+            id: `vlm-${idx}-${p.timestamp}`,
+            kind: p.type || 'scene',
+            title: p.type === 'scene' ? 'Scene Match' : (p.vehicle_type ? `Vehicle: ${p.vehicle_type}` : 'Forensic Match'),
+            summary: p.caption || `Cosine similarity match score of ${Math.round(score * 100)}%`,
+            camera_name: p.camera_id || 'Unknown',
+            timestamp: p.timestamp ? p.timestamp.substring(0, 19).replace('T', ' ') : 'N/A',
+            confidence: Math.round(score * 100),
+            snapshot_path: resolveSnapshotUrl(p.snapshot_url),
+            target_label: prompt.length > 20 ? prompt.substring(0, 20) + '...' : prompt,
+            bbox_style: computeBboxStyle(p.bbox)
+          };
+        });
+        setResults(transformed);
+        setLoading(false);
+      })
+      .catch(err => {
+        setError(err.message);
+        setExtractedAiPrompt('');
+        setLoading(false);
+      });
+  };
 
   // Enhanced Advanced Search States
   const [timePreset, setTimePreset] = useState('all');
@@ -115,15 +193,21 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
     if (e) e.preventDefault();
     if (!token) return;
 
+    // Date range validation (Issue 4)
+    if (start && end && new Date(start) > new Date(end)) {
+      setError('Invalid Time Bound: Starting date cannot be later than ending date.');
+      return;
+    }
+
     setLoading(true);
     setError('');
 
     // Scenario A: Face Vector similarity matching
     if (kind === 'face_search') {
-      const faceImage = document.getElementById('faceImageInput')?.files?.[0];
+      const faceImage = selectedFaceFile || document.getElementById('faceImageInput')?.files?.[0];
       
       if (!faceImage) {
-        setError('Please upload a face image file first to match against target database.');
+        setError('Please select/upload a face image file first to match against target database.');
         setLoading(false);
         return;
       }
@@ -284,9 +368,10 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
             title: `Plate Match: ${item.license_plate}`,
             summary: `Vehicle Class: ${(item.vehicle_type || 'Unknown').toUpperCase()} (OCR Confidence: ${Math.round(item.ocr_confidence * 100)}%)`,
             camera_name: item.camera_name || 'Unknown',
-            timestamp: item.timestamp ? item.timestamp.substring(0, 19).replace('T', ' ') : 'N/A',
+            timestamp: item.timestamp ? String(item.timestamp).substring(0, 19).replace('T', ' ') : 'N/A',
             confidence: Math.round(item.ocr_confidence * 100),
-            snapshot_path: null
+            snapshot_path: resolveSnapshotUrl(item.snapshot_url || (item.track_uuid ? `/api/v1/playback/snapshot/${item.track_uuid}` : null)),
+            bbox_style: computeBboxStyle(typeof item.bbox === 'string' ? JSON.parse(item.bbox || '[]') : item.bbox)
           }));
           setResults(transformed);
           setLoading(false);
@@ -350,7 +435,14 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
             camera_name: p.camera_id || 'Unknown',
             timestamp: p.timestamp ? p.timestamp.substring(0, 19).replace('T', ' ') : 'N/A',
             confidence: Math.round(score * 100),
-            snapshot_path: resolveSnapshotUrl(p.snapshot_url)
+            snapshot_path: resolveSnapshotUrl(
+              p.full_snapshot_url ||
+              p.full_scene_url ||
+              (p.camera_id ? `/api/v1/playback/snapshot/full_cam_${p.camera_id}` : null) ||
+              p.snapshot_url
+            ),
+            target_label: query.trim() || p.vehicle_type || p.label || 'Target',
+            bbox_style: computeBboxStyle(p.bbox)
           };
         });
         setResults(transformed);
@@ -406,14 +498,14 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
   }, [results, classFilter, sortBy, minConfidence]);
 
   return (
-    <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', height: '100%', width: '100%' }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 85px)', overflow: 'hidden', p: 2 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
         <Typography variant="h6" fontWeight="bold">Forensic Incident Search Ledger</Typography>
         <Typography variant="caption" color="text.secondary">Clearance Authority: {role.toUpperCase()}</Typography>
       </Box>
 
       {/* Main Search Panel - Responsive CSS Grid Layout */}
-      <Paper component="form" onSubmit={runSearch} variant="outlined" sx={{ p: 3, mb: 3 }}>
+      <Paper component="form" onSubmit={runSearch} variant="outlined" sx={{ p: 2, mb: 1.5 }}>
         <Box sx={{
           display: 'grid',
           gridTemplateColumns: {
@@ -455,16 +547,77 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
             ))}
           </Box>
 
-          {/* Semantic Query input (spans wider on desktop) */}
-          <Box sx={{ gridColumn: { xs: 'span 1', lg: 'span 2' } }}>
-            <TextField
-              label="Natural Language Semantic Search"
-              fullWidth
-              size="small"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="e.g. person in red shirt, white car..."
-            />
+          {/* Semantic Query input + Image Query Uploader */}
+          <Box sx={{ gridColumn: { xs: 'span 1', lg: 'span 2' }, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            <Box sx={{ display: 'flex', gap: 1 }}>
+              <TextField
+                label="Natural Language Semantic Search"
+                fullWidth
+                size="small"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="e.g. person in red shirt, white car..."
+              />
+              <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+                <Button
+                  component="label"
+                  variant={selectedVisionFile ? "contained" : "outlined"}
+                  color="secondary"
+                  size="small"
+                  startIcon={<ImageSearchIcon />}
+                  sx={{ whiteSpace: 'nowrap', px: 2, height: 40 }}
+                >
+                  {selectedVisionFile ? `File: ${selectedVisionFile.name.length > 16 ? selectedVisionFile.name.substring(0, 14) + '...' : selectedVisionFile.name}` : 'Upload Image Query'}
+                  <input
+                    id="visionImageInput"
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        setSelectedVisionFile(e.target.files[0]);
+                        handleVisionImageSearchUpload(e.target.files[0]);
+                      }
+                    }}
+                  />
+                </Button>
+                {selectedVisionFile && (
+                  <Tooltip title="Cancel / Remove uploaded query image">
+                    <IconButton
+                      size="small"
+                      color="error"
+                      onClick={() => {
+                        setSelectedVisionFile(null);
+                        setExtractedAiPrompt('');
+                        setQuery('');
+                        const inp = document.getElementById('visionImageInput');
+                        if (inp) inp.value = '';
+                      }}
+                      sx={{
+                        border: '1px solid',
+                        borderColor: 'error.main',
+                        bgcolor: 'rgba(239, 68, 68, 0.2)',
+                        '&:hover': { bgcolor: 'rgba(239, 68, 68, 0.4)' },
+                        height: 40,
+                        width: 40,
+                        borderRadius: 1
+                      }}
+                    >
+                      <CloseIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
+            </Box>
+            {extractedAiPrompt && (
+              <Chip
+                label={`✨ AI Extracted Prompt: "${extractedAiPrompt}"`}
+                size="small"
+                color="info"
+                onDelete={() => setExtractedAiPrompt('')}
+                sx={{ alignSelf: 'flex-start', fontSize: '0.72rem', fontWeight: 600 }}
+              />
+            )}
           </Box>
 
           <Box>
@@ -503,18 +656,67 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
           </Box>
 
           <Box sx={{ gridColumn: { xs: 'span 1', sm: 'span 2' } }}>
-            <Box sx={{ display: 'flex', gap: 1 }}>
-              <TextField
-                id="faceIdInput"
-                label="Enrollment Face ID"
-                size="small"
-                placeholder="e.g. track_15"
-                sx={{ width: 140 }}
-              />
-              <Button component="label" variant="outlined" size="small" sx={{ flexGrow: 1, height: 40 }}>
-                Upload Match Face
-                <input id="faceImageInput" type="file" accept="image/*" hidden />
-              </Button>
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                <TextField
+                  id="faceIdInput"
+                  label="Enrollment Face ID"
+                  size="small"
+                  placeholder="e.g. track_15"
+                  sx={{ width: 140 }}
+                />
+                <Box sx={{ display: 'flex', gap: 0.5, flexGrow: 1, alignItems: 'center' }}>
+                  <Button
+                    component="label"
+                    variant={selectedFaceFile ? "contained" : "outlined"}
+                    color={selectedFaceFile ? "success" : "primary"}
+                    size="small"
+                    startIcon={<ImageSearchIcon />}
+                    sx={{ flexGrow: 1, height: 40, whiteSpace: 'nowrap', overflow: 'hidden' }}
+                  >
+                    {selectedFaceFile ? `File: ${selectedFaceFile.name.length > 18 ? selectedFaceFile.name.substring(0, 16) + '...' : selectedFaceFile.name}` : 'Upload Target Face Image'}
+                    <input
+                      id="faceImageInput"
+                      type="file"
+                      accept="image/*"
+                      hidden
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files[0]) {
+                          setSelectedFaceFile(e.target.files[0]);
+                        }
+                      }}
+                    />
+                  </Button>
+                  {selectedFaceFile && (
+                    <Tooltip title="Cancel / Remove target face image">
+                      <IconButton
+                        size="small"
+                        color="error"
+                        onClick={() => {
+                          setSelectedFaceFile(null);
+                          const inp = document.getElementById('faceImageInput');
+                          if (inp) inp.value = '';
+                        }}
+                        sx={{
+                          border: '1px solid',
+                          borderColor: 'error.main',
+                          bgcolor: 'rgba(239, 68, 68, 0.25)',
+                          '&:hover': { bgcolor: 'rgba(239, 68, 68, 0.5)' },
+                          height: 40,
+                          width: 40,
+                          borderRadius: 1,
+                          flexShrink: 0
+                        }}
+                      >
+                        <CloseIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </Box>
+              </Box>
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
+                Supports JPG, PNG, WEBP (Max 10MB) for vector similarity matching.
+              </Typography>
             </Box>
           </Box>
 
@@ -666,19 +868,39 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
               </Typography>
             </Box>
 
-            <Box sx={{ overflowY: 'auto', flexGrow: 1, maxHeight: 'calc(100vh - 350px)' }}>
+            <Box sx={{ overflowY: 'auto', flexGrow: 1, maxHeight: 'calc(100vh - 430px)' }}>
               {loading ? (
                 <Typography variant="body2" color="text.secondary" align="center" sx={{ mt: 4 }}>RETRIEVING ENCODINGS...</Typography>
               ) : processedResults.length === 0 ? (
-                <Typography variant="body2" color="text.secondary" align="center" sx={{ mt: 4, py: 6, border: '1px dashed', borderColor: 'divider' }}>
-                  [ LEDGER EMPTY // CHECK PARAMETERS ]
-                </Typography>
+                <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', py: 8, px: 2, border: '1px dashed', borderColor: 'divider', borderRadius: 2, textAlign: 'center' }}>
+                  <SearchIcon sx={{ fontSize: 48, color: 'text.secondary', mb: 1, opacity: 0.5 }} />
+                  <Typography variant="subtitle1" fontWeight="bold" sx={{ mb: 0.5 }}>
+                    No Forensic Records Found
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 400 }}>
+                    No events matched your current semantic query, class filter, or time horizon parameters. Try clearing your filters or selecting "ALL HISTORY".
+                  </Typography>
+                </Box>
               ) : (
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                   {processedResults.map((item, index) => (
-                    <Card key={`${item.kind}-${item.id || item.export_uuid || index}`} variant="outlined" sx={{ display: 'flex', flexDirection: { xs: 'column', sm: 'row' } }}>
+                    <Card
+                      key={`${item.kind}-${item.id || item.export_uuid || index}`}
+                      variant="outlined"
+                      tabIndex={0}
+                      role="article"
+                      aria-label={`${item.title} at ${item.camera_name}`}
+                      sx={{
+                        display: 'flex',
+                        flexDirection: { xs: 'column', sm: 'row' },
+                        '&:focus-visible': {
+                          outline: '2px solid primary.main',
+                          outlineOffset: '2px'
+                        }
+                      }}
+                    >
                       {item.snapshot_path && (
-                        <Box sx={{ position: 'relative', width: { xs: '100%', sm: 200 }, height: 140, flexShrink: 0, backgroundColor: '#000' }}>
+                        <Box sx={{ position: 'relative', width: { xs: '100%', sm: 220 }, height: 145, flexShrink: 0, backgroundColor: '#000', overflow: 'hidden' }}>
                           <CardMedia
                             component="img"
                             sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
@@ -686,14 +908,66 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
                             alt="Forensic Frame Capture"
                             onError={(e) => { e.target.style.display = 'none'; }}
                           />
-                          {item.confidence > 0 && (
+                          {item.confidence > 0 && item.bbox_style ? (
+                            <Box
+                              sx={{
+                                position: 'absolute',
+                                top: item.bbox_style.top,
+                                left: item.bbox_style.left,
+                                width: item.bbox_style.width,
+                                height: item.bbox_style.height,
+                                border: '2px solid #00e676',
+                                boxShadow: '0 0 10px rgba(0, 230, 118, 0.8), inset 0 0 6px rgba(0, 230, 118, 0.3)',
+                                borderRadius: '4px',
+                                pointerEvents: 'none',
+                                zIndex: 2,
+                                transition: 'all 0.2s ease-in-out'
+                              }}
+                            >
+                              <Box
+                                sx={{
+                                  position: 'absolute',
+                                  top: -20,
+                                  left: -2,
+                                  backgroundColor: '#00e676',
+                                  color: '#000',
+                                  fontSize: '0.62rem',
+                                  fontWeight: 800,
+                                  px: 0.8,
+                                  py: 0.1,
+                                  borderRadius: '3px 3px 0 0',
+                                  whiteSpace: 'nowrap',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 0.4,
+                                  boxShadow: '0 2px 4px rgba(0,0,0,0.6)',
+                                  letterSpacing: '0.3px',
+                                  textTransform: 'uppercase'
+                                }}
+                              >
+                                <span>🎯 {item.target_label || query || 'MATCH'}</span>
+                                <span>•</span>
+                                <span>{item.confidence}%</span>
+                              </Box>
+                            </Box>
+                          ) : item.confidence > 0 ? (
                             <Chip 
-                              label={`${item.confidence}%`} 
+                              label={`🎯 ${item.target_label || query || 'MATCH'} • ${item.confidence}%`}
                               size="small" 
                               color="success" 
-                              sx={{ position: 'absolute', top: 8, left: 8, borderRadius: 1, fontWeight: 'bold' }} 
+                              sx={{
+                                position: 'absolute',
+                                top: 8,
+                                left: 8,
+                                borderRadius: 1,
+                                fontWeight: 800,
+                                fontSize: '0.68rem',
+                                textTransform: 'uppercase',
+                                boxShadow: '0 2px 6px rgba(0,0,0,0.6)',
+                                zIndex: 2
+                              }} 
                             />
-                          )}
+                          ) : null}
                           {item.confidence === 0 && (
                             <Box sx={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }}>
                               <Chip label="NO TARGETS" size="small" sx={{ borderRadius: 1, fontWeight: 'bold' }} />

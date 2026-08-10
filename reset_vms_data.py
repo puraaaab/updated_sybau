@@ -13,13 +13,14 @@ def reset_all_data():
     # 1. Clear Database Tables via SQLAlchemy
     try:
         from backend.database.connection import SessionLocal
-        from backend.database.models import Track, Face, Vehicle, Alert, SceneCaption, GlobalIdentity, SearchHistory, CustomAlertRule
+        from backend.database.models import Track, Face, Vehicle, RawOCR, Alert, SceneCaption, GlobalIdentity, SearchHistory, CustomAlertRule
 
         with SessionLocal() as db:
-            print("  • Clearing SQL database tables (tracks, faces, vehicles, alerts, captions, identities, search history)...")
+            print("  • Clearing SQL database tables (tracks, faces, vehicles, raw_ocr, alerts, captions, identities, search history)...")
             db.query(Track).delete()
             db.query(Face).delete()
             db.query(Vehicle).delete()
+            db.query(RawOCR).delete()
             db.query(Alert).delete()
             db.query(SceneCaption).delete()
             db.query(GlobalIdentity).delete()
@@ -49,10 +50,15 @@ def reset_all_data():
         client = get_qdrant_client()
         if client:
             from qdrant_client.http import models as qmodels
-            client.recreate_collection(
+            try:
+                client.delete_collection("vms_embeddings")
+            except Exception:
+                pass
+
+            client.create_collection(
                 collection_name="vms_embeddings",
                 vectors_config={
-                    "face": qmodels.VectorParams(size=512, distance=qmodels.Distance.COSINE),
+                    "face": qmodels.VectorParams(size=128, distance=qmodels.Distance.COSINE),
                     "scene": qmodels.VectorParams(size=1024, distance=qmodels.Distance.COSINE),
                     "vehicle": qmodels.VectorParams(size=576, distance=qmodels.Distance.COSINE),
                     "person_crop": qmodels.VectorParams(size=768, distance=qmodels.Distance.COSINE)

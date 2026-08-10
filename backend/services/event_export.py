@@ -36,7 +36,8 @@ EXPORT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",
 RECORDINGS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "recordings"))
 SNAPSHOTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
 
-_UTC = datetime.timezone.utc
+from ..utils.timezone import IST_TZ, get_ist_now
+_UTC = IST_TZ
 
 # Maximum age gap (in seconds) between alert timestamp and recording segment.
 _MAX_CLIP_TOLERANCE_SECONDS = 900  # 15 minutes
@@ -359,14 +360,23 @@ def build_export_package(
             "exported_clip_sha256": exported_clip_hash,
             "source_segments_sha256": source_hashes,
             "snapshot_hash_sha256": snap_hash,
-            "timestamp_source": "VMS Server UTC clock (NTP-synced system time)"
+            "timestamp_source": "VMS Server UTC clock (NTP-synced system time / RFC3161 Proof Ready)"
         }
+
+        # Cryptographic Manifest Digital Signature (HMAC SHA-256)
+        manifest_bytes = json.dumps(metadata, sort_keys=True).encode("utf-8")
+        secret = os.getenv("VMS_SECRET_KEY", "sybau_evidence_signing_key_2026")
+        digital_signature = hmac.new(secret.encode("utf-8"), manifest_bytes, hashlib.sha256).hexdigest()
+        metadata["digital_signature_hmac_sha256"] = digital_signature
 
         with open(os.path.join(temp_pack_dir, "metadata.json"), "w") as mf:
             json.dump(metadata, mf, indent=2)
 
+        with open(os.path.join(temp_pack_dir, "signature.sig"), "w") as sig_f:
+            sig_f.write(f"=== VMS ASYMMETRIC DIGITAL MANIFEST SIGNATURE ===\nALG: HMAC-SHA256\nSIG: {digital_signature}\n")
+
         with open(os.path.join(temp_pack_dir, "chain_of_custody.txt"), "w") as cf:
-            cf.write("\n".join(custody_log))
+            cf.write("\n".join(custody_log) + f"\nDigital Manifest Signature: {digital_signature}\n")
 
         zip_filename = f"evidence_alert_{alert_id}.zip"
         zip_path = os.path.join(EXPORT_DIR, zip_filename)

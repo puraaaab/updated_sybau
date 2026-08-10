@@ -4,9 +4,11 @@ import threading
 from sqlalchemy.orm import Session
 from ..database.connection import SessionLocal
 from ..database.models import GlobalIdentity, Track
+from ..utils.timezone import get_ist_now
 from ..search.vector_search import cosine_similarity
 
-_track_identity_cache = {}
+_face_identity_cache = {}
+_vehicle_identity_cache = {}
 _cache_lock = threading.Lock()
 
 class GlobalIdentityManager:
@@ -15,37 +17,58 @@ class GlobalIdentityManager:
         """
         Matches a local person track's face embedding against the database
         to merge identities across camera feeds.
+        Uses OpenCV SFace (FaceRecognizerSF) calibrated threshold (0.40).
         """
+        if not face_embedding:
+            return "POI_UNKNOWN"
+
+        import numpy as np
+
+        # L2-normalize query face embedding vector for precise cosine similarity
+        q_vec = np.array(face_embedding, dtype=np.float32)
+        q_norm = np.linalg.norm(q_vec)
+        if q_norm > 1e-6:
+            q_vec = q_vec / q_norm
+        norm_embedding = q_vec.tolist()
+
         if track_uuid:
             with _cache_lock:
-                if track_uuid in _track_identity_cache:
-                    return _track_identity_cache[track_uuid]
+                if track_uuid in _face_identity_cache:
+                    return _face_identity_cache[track_uuid]
 
         db: Session = SessionLocal()
         try:
-            identities = db.query(GlobalIdentity).filter(GlobalIdentity.type == "person").all()
-            
             best_match = None
-            best_score = 0.85
-            
+            # OpenCV SFace (FaceRecognizerSF) cosine similarity match threshold is ~0.363 - 0.40
+            best_score = 0.40
+
             from ..search.qdrant_utils import qdrant_client_with_timeout
             try:
                 with qdrant_client_with_timeout(2.0) as client:
                     results = client.query_points(
                         collection_name="vms_embeddings",
-                        query=face_embedding,
+                        query=norm_embedding,
                         using="face",
                         limit=1
                     ).points
-                    if results and results[0].score > best_score:
-                        best_score = results[0].score
-                        best_match = results[0].payload.get("identity_uuid")
-            except Exception as qd_err:
+                    if results and len(results) > 0:
+                        top_score = results[0].score
+                        if top_score >= best_score:
+                            best_score = top_score
+                            best_match = results[0].payload.get("identity_uuid")
+            except Exception:
+                pass
+
+            if not best_match:
                 from ..ai.model_manager import model_manager
                 for item in model_manager.vector_db:
                     if item["payload"].get("type") == "face":
-                        score = cosine_similarity(face_embedding, item["vector"])
-                        if score > best_score:
+                        i_vec = np.array(item["vector"], dtype=np.float32)
+                        i_norm = np.linalg.norm(i_vec)
+                        if i_norm > 1e-6:
+                            i_vec = i_vec / i_norm
+                        score = float(np.dot(q_vec, i_vec))
+                        if score >= best_score:
                             best_score = score
                             best_match = item["payload"].get("identity_uuid")
 
@@ -53,9 +76,11 @@ class GlobalIdentityManager:
             if best_match:
                 db_id = db.query(GlobalIdentity).filter(GlobalIdentity.identity_uuid == best_match).first()
                 if db_id:
-                    db_id.last_seen = datetime.datetime.now(datetime.timezone.utc)
+                    db_id.last_seen = get_ist_now()
                     db.commit()
                     res_id = db_id.identity_uuid
+                else:
+                    res_id = best_match
             else:
                 short_uuid = str(uuid.uuid4())[:6].upper()
                 new_id = f"POI_{short_uuid}"
@@ -63,8 +88,8 @@ class GlobalIdentityManager:
                     identity_uuid=new_id,
                     type="person",
                     name=f"Person {short_uuid}",
-                    first_seen=datetime.datetime.now(datetime.timezone.utc),
-                    last_seen=datetime.datetime.now(datetime.timezone.utc)
+                    first_seen=get_ist_now(),
+                    last_seen=get_ist_now()
                 )
                 db.add(db_id)
                 db.commit()
@@ -72,9 +97,9 @@ class GlobalIdentityManager:
 
             if track_uuid:
                 with _cache_lock:
-                    if len(_track_identity_cache) > 5000:
-                        _track_identity_cache.clear()
-                    _track_identity_cache[track_uuid] = res_id
+                    if len(_face_identity_cache) > 5000:
+                        _face_identity_cache.clear()
+                    _face_identity_cache[track_uuid] = res_id
 
             return res_id
         except Exception as e:
@@ -90,8 +115,8 @@ class GlobalIdentityManager:
         """
         if track_uuid:
             with _cache_lock:
-                if track_uuid in _track_identity_cache:
-                    return _track_identity_cache[track_uuid]
+                if track_uuid in _vehicle_identity_cache:
+                    return _vehicle_identity_cache[track_uuid]
 
         db: Session = SessionLocal()
         try:
@@ -105,12 +130,12 @@ class GlobalIdentityManager:
                         identity_uuid=plate_id,
                         type="vehicle",
                         name=f"Vehicle {clean_plate}",
-                        first_seen=datetime.datetime.now(datetime.timezone.utc),
-                        last_seen=datetime.datetime.now(datetime.timezone.utc)
+                        first_seen=get_ist_now(),
+                        last_seen=get_ist_now()
                     )
                     db.add(db_id)
                 else:
-                    db_id.last_seen = datetime.datetime.now(datetime.timezone.utc)
+                    db_id.last_seen = get_ist_now()
                 db.commit()
                 res_id = plate_id
             else:
@@ -142,7 +167,7 @@ class GlobalIdentityManager:
                 if best_match:
                     db_id = db.query(GlobalIdentity).filter(GlobalIdentity.identity_uuid == best_match).first()
                     if db_id:
-                        db_id.last_seen = datetime.datetime.now(datetime.timezone.utc)
+                        db_id.last_seen = get_ist_now()
                         db.commit()
                         res_id = db_id.identity_uuid
 
@@ -153,8 +178,8 @@ class GlobalIdentityManager:
                         identity_uuid=new_id,
                         type="vehicle",
                         name=f"Vehicle {short_uuid}",
-                        first_seen=datetime.datetime.now(datetime.timezone.utc),
-                        last_seen=datetime.datetime.now(datetime.timezone.utc)
+                        first_seen=get_ist_now(),
+                        last_seen=get_ist_now()
                     )
                     db.add(db_id)
                     db.commit()
@@ -162,9 +187,9 @@ class GlobalIdentityManager:
 
             if track_uuid:
                 with _cache_lock:
-                    if len(_track_identity_cache) > 5000:
-                        _track_identity_cache.clear()
-                    _track_identity_cache[track_uuid] = res_id
+                    if len(_vehicle_identity_cache) > 5000:
+                        _vehicle_identity_cache.clear()
+                    _vehicle_identity_cache[track_uuid] = res_id
 
             return res_id
         except Exception as e:

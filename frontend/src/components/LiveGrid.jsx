@@ -57,13 +57,15 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
     const isMjpeg = lowerUrl.includes('.mjpg') || lowerUrl.includes('.mjpeg') || lowerUrl.includes('video.cgi') || lowerUrl.includes('/mjpeg');
     const isDirect = lowerUrl.includes('.mp4') || lowerUrl.includes('.webm') || lowerUrl.includes('.ogg');
     const isM3u8 = lowerUrl.includes('.m3u8');
-    const isInternal = lowerUrl.includes(':8888') || lowerUrl.includes('localhost') || lowerUrl.includes('127.0.0.1') || lowerUrl.includes('/hls/');
+    const isWhep = lowerUrl.includes('/whep') || lowerUrl.includes(':8889');
     
     if (isMjpeg) {
       setPlayMode('mjpeg');
     } else if (isDirect) {
       setPlayMode('direct');
-    } else if (isHls || isM3u8 || !isInternal) {
+    } else if (isWhep) {
+      setPlayMode('webrtc');
+    } else if (isHls || isM3u8) {
       setPlayMode('hls');
     } else {
       setPlayMode('webrtc');
@@ -108,17 +110,26 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
     pc.addTransceiver('video', { direction: 'recvonly' });
 
     let isCancelled = false;
-    fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/sdp' },
-      body: ''
-    })
+    pc.createOffer()
+      .then(offer => {
+        if (isCancelled || !pcRef.current) return null;
+        return pcRef.current.setLocalDescription(offer).then(() => offer);
+      })
+      .then(offer => {
+        if (!offer || isCancelled) return;
+        return fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp' },
+          body: offer.sdp
+        });
+      })
       .then(res => {
+        if (!res) return;
         if (!res.ok) throw new Error(`WHEP Handshake HTTP ${res.status}`);
         return res.text();
       })
       .then(answerSdp => {
-        if (isCancelled || !pcRef.current) return;
+        if (!answerSdp || isCancelled || !pcRef.current) return;
         return pcRef.current.setRemoteDescription({ type: 'answer', sdp: answerSdp });
       })
       .catch(err => {
@@ -317,6 +328,15 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
   return (
     <Box
       onDoubleClick={onDoubleClick}
+      tabIndex={0}
+      role="button"
+      aria-label={`Live camera player stream ${cameraId || ''}`}
+      onKeyDown={(e) => {
+        if ((e.key === 'Enter' || e.key === ' ') && onDoubleClick) {
+          e.preventDefault();
+          onDoubleClick(e);
+        }
+      }}
       sx={{
         position: 'relative',
         width: '100%',
@@ -325,7 +345,11 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
         overflow: 'hidden',
         cursor: onDoubleClick ? 'pointer' : 'default',
         borderRadius: (settings?.borderRadius !== undefined ? settings.borderRadius : 0),
-        border: isPttActive ? '2px solid #ef4444' : 'none'
+        border: isPttActive ? '2px solid #ef4444' : 'none',
+        '&:focus-visible': {
+          outline: '2px solid primary.main',
+          outlineOffset: '2px'
+        }
       }}
     >
       {isOffline ? (
@@ -673,7 +697,7 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
         ) : (
           <Box sx={gridTemplateSx}>
             {filteredCameras.map(cam => {
-              const hlsUrl = cam.hls_url || cam.stream_url;
+              const activeUrl = cam.webrtc_url || cam.hls_url || cam.stream_url;
               return (
                 <Card key={cam.id} sx={{
                   display: 'flex',
@@ -699,13 +723,13 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
 
                   {/* Video Stream Container */}
                   <LivePlayer
-                    url={hlsUrl}
+                    url={activeUrl}
                     originalUrl={cam.stream_url}
                     isOffline={cam.status === 'offline'}
                     token={token}
                     settings={settings}
                     cameraId={cam.id}
-                    isHls={Boolean(cam.hls_url)}
+                    isHls={Boolean(cam.hls_url && !cam.webrtc_url)}
                     onDoubleClick={() => setExpandedCamera(cam)}
                   />
 
@@ -880,13 +904,13 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
           {expandedCamera && (
             <Box sx={{ width: '100%', minHeight: '65vh', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <LivePlayer
-                url={expandedCamera.hls_url || expandedCamera.stream_url}
+                url={expandedCamera.webrtc_url || expandedCamera.hls_url || expandedCamera.stream_url}
                 originalUrl={expandedCamera.stream_url}
                 isOffline={expandedCamera.status === 'offline'}
                 token={token}
                 settings={settings}
                 cameraId={expandedCamera.id}
-                isHls={Boolean(expandedCamera.hls_url)}
+                isHls={Boolean(expandedCamera.hls_url && !expandedCamera.webrtc_url)}
               />
             </Box>
           )}

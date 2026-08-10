@@ -12,9 +12,13 @@ Base.metadata.create_all(bind=engine)
 
 base_dir = r"d:\sybau_granth\Cyber Crime-TATA Black Colour Car  27-7-2028"
 
-def seed_cyber_crime_dataset_cameras():
+def seed_cyber_crime_dataset_cameras(force_reseed: bool = False):
     db = SessionLocal()
     try:
+        existing_total = db.query(Camera).count()
+        if existing_total > 0 and not force_reseed:
+            print(f"[SeedDataset] Database already contains {existing_total} camera(s). Preserving user deleted/configured cameras.")
+            return
         xml_files = [
             os.path.join(base_dir, "Black car-Kharvarnagar BRTS Junction", "ExportedMedia", "Export__Rokadiya Hanuman-Towards Bhatena C-Turn_Monday July 27 2026123156  cf6384e.xml"),
             os.path.join(base_dir, "Black car-Kharvarnagar BRTS Junction", "ExportedMedia", "Export__Rokadiya Hanuman-Towards Bhatena_Monday July 27 2026123151  e6f4a55.xml"),

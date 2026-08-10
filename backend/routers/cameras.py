@@ -23,6 +23,53 @@ import defusedxml.ElementTree as ET
 router = APIRouter(prefix="/cameras", tags=["Cameras"])
 
 
+def geocode_location(location_str: str = "", name_str: str = "") -> tuple[float, float]:
+    """
+    Automatically resolves real Surat GPS coordinates from location address or camera landmark names.
+    Supports instant Surat landmark lookup and online OpenStreetMap Nominatim geocoding.
+    """
+    query = f"{location_str} {name_str}".strip()
+    if not query or query.lower() in ["unknown", "n/a", "location"]:
+        return 21.1702, 72.8311
+
+    low = query.lower()
+    landmarks = [
+        ("bus", (21.2052, 72.8408)),
+        ("station", (21.2052, 72.8408)),
+        ("parle", (21.1712, 72.7954)),
+        ("svnit", (21.1645, 72.7845)),
+        ("kargil", (21.1548, 72.7715)),
+        ("gaurav", (21.1560, 72.7750)),
+        ("rokadiya", (21.1738, 72.8423)),
+        ("hanuman", (21.1738, 72.8423)),
+        ("bhatena", (21.1742, 72.8418)),
+        ("jogani", (21.1735, 72.8430)),
+        ("adajan", (21.1960, 72.7920)),
+        ("vesu", (21.1350, 72.7710)),
+        ("varachha", (21.2150, 72.8620)),
+        ("dumas", (21.0910, 72.7120)),
+        ("katargam", (21.2280, 72.8250)),
+        ("majura", (21.1820, 72.8180)),
+        ("ring road", (21.1910, 72.8350))
+    ]
+    for key, coords in landmarks:
+        if key in low:
+            return coords[0], coords[1]
+
+    try:
+        import urllib.request
+        req_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(query + ', Surat, Gujarat')}&format=json&limit=1"
+        req = urllib.request.Request(req_url, headers={'User-Agent': 'VMSPro-Surat-Geocoder/1.0'})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode())
+            if data and len(data) > 0:
+                return float(data[0]['lat']), float(data[0]['lon'])
+    except Exception:
+        pass
+
+    return 21.1702, 72.8311
+
+
 @router.get("")
 def get_cameras(user=Depends(verify_viewer), db: Session = Depends(get_db)):
     cams = db.query(Camera).all()
@@ -37,6 +84,8 @@ def get_cameras(user=Depends(verify_viewer), db: Session = Depends(get_db)):
             "status": c.status,
             "width": c.width,
             "height": c.height,
+            "latitude": getattr(c, "latitude", 21.1702),
+            "longitude": getattr(c, "longitude", 72.8311),
             "motion_status": telem.get("motion_status", "STREAMING"),
             "fps": telem.get("fps", 2.0)
         }
@@ -44,9 +93,11 @@ def get_cameras(user=Depends(verify_viewer), db: Session = Depends(get_db)):
         is_youtube = "youtube.com" in raw or "youtu.be" in raw
         if is_youtube:
             cam_dict["hls_url"] = raw
+            cam_dict["webrtc_url"] = raw
             cam_dict["is_youtube"] = True
         else:
             cam_dict["hls_url"] = f"http://localhost:8888/{c.id}/index.m3u8"
+            cam_dict["webrtc_url"] = f"http://localhost:8889/{c.id}/whep"
             cam_dict["is_youtube"] = False
         result.append(cam_dict)
     return result
@@ -142,10 +193,12 @@ def resolve_onvif_stream_uri(payload: dict, user=Depends(verify_viewer)):
 
 
 @router.post("")
-def add_camera(camera: dict, user=Depends(verify_admin), db: Session = Depends(get_db)):
+def add_camera(camera: dict, user=Depends(verify_operator), db: Session = Depends(get_db)):
     existing = db.query(Camera).filter(Camera.id == camera["id"]).first()
     if existing:
         raise HTTPException(status_code=400, detail="Camera ID already exists")
+
+    lat, lng = geocode_location(camera.get("location", ""), camera.get("name", ""))
 
     new_cam = Camera(
         id=camera["id"],
@@ -154,7 +207,9 @@ def add_camera(camera: dict, user=Depends(verify_admin), db: Session = Depends(g
         stream_url=camera["stream_url"],
         status="connecting",
         width=camera.get("width", 1920),
-        height=camera.get("height", 1080)
+        height=camera.get("height", 1080),
+        latitude=camera.get("latitude", lat),
+        longitude=camera.get("longitude", lng)
     )
     db.add(new_cam)
 
@@ -181,7 +236,7 @@ def add_camera(camera: dict, user=Depends(verify_admin), db: Session = Depends(g
 
 
 @router.put("/{camera_id}")
-def update_camera(camera_id: str, camera: dict, user=Depends(verify_admin), db: Session = Depends(get_db)):
+def update_camera(camera_id: str, camera: dict, user=Depends(verify_operator), db: Session = Depends(get_db)):
     cam = db.query(Camera).filter(Camera.id == camera_id).first()
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -192,6 +247,10 @@ def update_camera(camera_id: str, camera: dict, user=Depends(verify_admin), db: 
     cam.stream_url = camera.get("stream_url", cam.stream_url)
     cam.width = camera.get("width", cam.width)
     cam.height = camera.get("height", cam.height)
+    
+    lat, lng = geocode_location(cam.location, cam.name)
+    cam.latitude = camera.get("latitude", lat)
+    cam.longitude = camera.get("longitude", lng)
     
     db.commit()
     db.refresh(cam)
@@ -216,7 +275,7 @@ def update_camera(camera_id: str, camera: dict, user=Depends(verify_admin), db: 
 
 
 @router.delete("/{camera_id}")
-def delete_camera(camera_id: str, user=Depends(verify_admin), db: Session = Depends(get_db)):
+def delete_camera(camera_id: str, user=Depends(verify_operator), db: Session = Depends(get_db)):
     cam = db.query(Camera).filter(Camera.id == camera_id).first()
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -299,7 +358,8 @@ def get_camera_resolved_stream(camera_id: str, request: Request, user=Depends(ve
     if resolved.startswith("rtsp://127.0.0.1:8554/") or resolved.startswith("rtsp://localhost:8554/"):
         cam_id = resolved.split("/")[-1]
         hls_url = f"http://localhost:8888/{cam_id}/index.m3u8"
-        return {"stream_url": hls_url, "is_hls": True}
+        webrtc_url = f"http://localhost:8889/{cam_id}/whep"
+        return {"stream_url": webrtc_url, "hls_url": hls_url, "webrtc_url": webrtc_url, "is_hls": False, "is_webrtc": True}
 
     return {"stream_url": resolved, "is_hls": False}
 

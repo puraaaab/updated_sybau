@@ -9,7 +9,7 @@ To transfer this project to your new RTX 4060 Laptop, you need to copy the entir
 - Delete the `__pycache__` folders.
 
 **CRITICAL: What MUST be included:**
-- The custom model: `yolo26m.pt` (Make sure this stays in the root of the folder!)
+- The custom model: `yolo26l.pt` (Make sure this stays in the root of the folder!)
 - The video sources: `Videos/` folder (The `.avi` CCTV footage files).
 
 ---

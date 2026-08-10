@@ -91,7 +91,22 @@ class Vehicle(Base):
     vehicle_type = Column(String, default="unknown")
     vehicle_color = Column(String, default="unknown", index=True)
     snapshot_url = Column(String, nullable=True)
+    bbox = Column(Text, nullable=True)
     timestamp = Column(DateTime(timezone=True), default=_utcnow)
+
+
+class RawOCR(Base):
+    __tablename__ = "raw_ocr_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(String, index=True, nullable=False)
+    track_uuid = Column(String, index=True, nullable=True)
+    detected_text = Column(String, nullable=False, index=True)
+    raw_text = Column(String, nullable=True)
+    ocr_confidence = Column(Float, default=0.0, index=True)
+    source_type = Column(String, default="license_plate")
+    snapshot_url = Column(String, nullable=True)
+    timestamp = Column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
 class Alert(Base):
@@ -155,6 +170,7 @@ class GlobalIdentity(Base):
     first_seen = Column(DateTime(timezone=True), default=_utcnow)
     last_seen = Column(DateTime(timezone=True), default=_utcnow)
     embedding_id = Column(String, index=True, nullable=True)  # associated face/vehicle embedding
+    snapshot_path = Column(String, nullable=True)  # path to face crop image
 
 
 class AuditLog(Base):

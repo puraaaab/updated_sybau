@@ -51,9 +51,9 @@ def generate_fir_case_report(
     Generates a printable FIR Evidence Annexure with real cryptographic integrity signature.
     Access restricted to operators and administrators only.
     """
-    _UTC = datetime.timezone.utc
-    now = datetime.datetime.now(_UTC)
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+    from ..utils.timezone import get_ist_now
+    now = get_ist_now()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S IST")
     now_iso = now.isoformat()
 
     # BUG-12 FIX: Validate export_id is safe before embedding in HTML (prevents XSS via path param)

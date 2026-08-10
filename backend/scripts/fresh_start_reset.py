@@ -24,7 +24,8 @@ def reset_system_data():
         "global_identities",
         "audit_logs",
         "search_history",
-        "scene_captions"
+        "scene_captions",
+        "raw_ocr_records"
     ]
 
     with engine.begin() as conn:
@@ -35,8 +36,16 @@ def reset_system_data():
             except Exception as e:
                 print(f"Note clearing {tbl}: {e}")
 
-    # 2. Reset vector DB in-memory fallback
+    # 2. Reset vector DB (Qdrant & in-memory fallback)
     model_manager.vector_db.clear()
+    try:
+        from backend.search.qdrant_utils import get_qdrant_client
+        client = get_qdrant_client()
+        if client:
+            client.delete_collection("vms_embeddings")
+            print("Purged Qdrant collection 'vms_embeddings'.")
+    except Exception as q_err:
+        print(f"Note clearing Qdrant collection: {q_err}")
     print("Cleared in-memory vector database embeddings.")
 
     # 3. Purge storage files (snapshots, clips, forensic exports)

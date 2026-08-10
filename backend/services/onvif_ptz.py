@@ -69,3 +69,53 @@ async def send_ptz_command(ip: str, port: int, action: str, pan: float = 0.0, ti
             "action": action,
             "vector": {"pan": pan, "tilt": tilt, "zoom": zoom}
         }
+
+import time
+import asyncio
+import threading
+
+class PTZPatrolManager:
+    """
+    Manages background PTZ guard tours (sweeping preset positions A -> B -> C)
+    and automatic home position return after operator manual override timeout.
+    """
+    def __init__(self):
+        self.active_tours = {}
+        self.last_manual_override = {}
+        self._lock = threading.Lock()
+
+    def touch_manual_override(self, camera_id: str):
+        with self._lock:
+            self.last_manual_override[camera_id] = time.time()
+
+    def start_patrol_tour(self, camera_id: str, presets: list, dwell_time_sec: float = 10.0):
+        with self._lock:
+            self.active_tours[camera_id] = {
+                "presets": presets,
+                "dwell_time": dwell_time_sec,
+                "current_idx": 0,
+                "running": True
+            }
+
+    def stop_patrol_tour(self, camera_id: str):
+        with self._lock:
+            if camera_id in self.active_tours:
+                self.active_tours[camera_id]["running"] = False
+
+    def get_next_patrol_preset(self, camera_id: str, auto_home_sec: float = 60.0) -> str | None:
+        with self._lock:
+            last_override = self.last_manual_override.get(camera_id, 0.0)
+            if (time.time() - last_override) < auto_home_sec:
+                return None  # Operator currently controlling or cooling down
+
+            tour = self.active_tours.get(camera_id)
+            if not tour or not tour.get("running") or not tour.get("presets"):
+                return None
+
+            idx = tour["current_idx"]
+            preset = tour["presets"][idx]
+            tour["current_idx"] = (idx + 1) % len(tour["presets"])
+            return preset
+
+ptz_patrol_manager = PTZPatrolManager()
+

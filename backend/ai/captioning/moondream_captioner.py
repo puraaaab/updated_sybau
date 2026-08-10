@@ -44,42 +44,74 @@ MOONDREAM_API_URL   = "https://api.moondream.ai/v1/query"
 REQUEST_TIMEOUT_SEC = 30.0  # cloud API timeout per image
 
 
-def _get_api_key() -> str:
+_key_lock = threading.Lock()
+_key_cursor = 0
+
+def _get_next_api_key() -> tuple[str, int, int]:
+    """
+    Returns (api_key, key_index, total_keys) in round-robin sequence from MOONDREAM_API_KEYS (or MOONDREAM_API_KEY).
+    Supports comma-separated keys in .env:
+    MOONDREAM_API_KEYS=key1, key2, key3, key4
+    """
+    global _key_cursor
     load_dotenv(override=True)
-    return os.getenv("MOONDREAM_API_KEY", "")
+
+    keys_str = os.getenv("MOONDREAM_API_KEYS", "").strip()
+    if not keys_str:
+        keys_str = os.getenv("MOONDREAM_API_KEY", "").strip()
+
+    if not keys_str:
+        return "", 0, 0
+
+    raw_keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+    valid_keys = [k for k in raw_keys if k and not k.startswith("YOUR_MOONDREAM_KEY_") and k != "your_key_here"]
+
+    target_list = valid_keys if valid_keys else raw_keys
+    if not target_list:
+        return "", 0, 0
+
+    with _key_lock:
+        idx = _key_cursor % len(target_list)
+        key = target_list[idx]
+        _key_cursor = (_key_cursor + 1) % len(target_list)
+        return key, idx + 1, len(target_list)
+
 
 def _get_model_name() -> str:
     return os.getenv("MOONDREAM_MODEL", "moondream3.1-9B-A2B")
 
 MOONDREAM_PROMPT = (
-    "You are analyzing a traffic surveillance frame. Generate a single detailed paragraph describing the current scene. "
+    "You are analyzing a surveillance frame. Generate a single detailed paragraph describing the current scene. "
     "Count every visible object accurately and describe only what is directly observable.\n\n"
     "Include:\n"
-    "• Total vehicle count.\n"
-    "• For every vehicle: type, color, approximate location (left/center/right, foreground/background), motion or parked status, "
-    "travel direction if visible, and any roof cargo or carried load.\n"
-    "• Number of motorcycles/scooters and whether they have one or more riders.\n"
+    "• Total vehicle and person counts.\n"
+    "• For every vehicle: type, color, location (left/center/right, foreground/background), motion or parked status.\n"
+    "• Number of motorcycles/scooters and whether they have riders.\n"
     "• Number of pedestrians, their actions, and clothing colors.\n"
-    "• Traffic conditions (light, moderate, heavy, congestion, stopped traffic).\n"
-    "• Visible road markings, intersections, signals, barriers, sidewalks, fences, buildings, trees, utility poles, and advertisements.\n"
-    "• Exact transcription of any readable license plates, shop names, signs, or banners. Never guess missing or blurry characters.\n"
-    "• Road and environmental conditions including weather, lighting, shadows, and any obstructions.\n\n"
-    "Return a single coherent paragraph containing only factual observations from the frame. "
-    "Do not speculate about identities, intentions, speed, events before or after the frame, or hidden objects."
+    "• Environment details: building entrances, doors, sidewalks, crosswalks, fences, trees, utility poles, advertisements.\n"
+    "• Exact transcription of any clearly readable license plates, shop names, signs, or banners.\n\n"
+    "Return a single coherent paragraph containing only positive factual observations from the frame. "
+    "Do not state negative claims such as 'No license plates are legible' or 'No shop names are readable'. "
+    "Do not speculate about identities, intentions, or events."
 )
 
 
-# ── Single-image API call (Single unified paragraph prompt) ───────────────────
+# ── Single-image API call (Round-Robin Multi-Key Rotation) ───────────────────
 def _call_moondream_api(image_data_uri: str, corr_id: str) -> str:
     """
-    POST one image to Moondream cloud API with a single unified paragraph prompt.
+    POST one image to Moondream cloud API with round-robin API key rotation.
     Returns a clean, detailed single-paragraph scene description.
     """
-    api_key = _get_api_key()
-    if not api_key or api_key == "your_key_here":
-        raise RuntimeError("MOONDREAM_API_KEY not set in .env")
+    api_key, key_idx, total_keys = _get_next_api_key()
+    if not api_key or api_key.startswith("YOUR_MOONDREAM_KEY_") or api_key == "your_key_here":
+        raise RuntimeError("No valid Moondream API Key configured in MOONDREAM_API_KEYS / MOONDREAM_API_KEY in .env")
 
-    client = _get_http_client()
+    headers = {
+        "X-Moondream-Auth": api_key,
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
     payload = {
         "model":     _get_model_name(),
         "image_url": image_data_uri,
@@ -88,18 +120,19 @@ def _call_moondream_api(image_data_uri: str, corr_id: str) -> str:
     }
 
     t0 = time.time()
-    resp = client.post(MOONDREAM_API_URL, json=payload)
+    with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as client:
+        resp = client.post(MOONDREAM_API_URL, json=payload, headers=headers)
     elapsed = time.time() - t0
 
     if resp.status_code != 200:
-        raise RuntimeError(f"API HTTP {resp.status_code}: {resp.text[:300]}")
+        raise RuntimeError(f"API HTTP {resp.status_code} (Key #{key_idx}/{total_keys}): {resp.text[:300]}")
 
     data = resp.json()
     caption = (data.get("result") or data.get("answer") or data.get("caption") or "").strip()
     if not caption:
-        raise RuntimeError(f"Empty response from API: {data}")
+        raise RuntimeError(f"Empty response from API (Key #{key_idx}/{total_keys}): {data}")
 
-    logger.info(f"[Moondream] corr={corr_id} API took {elapsed:.2f}s → {len(caption)} chars")
+    logger.info(f"[Moondream] corr={corr_id} Key #{key_idx}/{total_keys} API took {elapsed:.2f}s → {len(caption)} chars")
     return caption
 
 
@@ -190,16 +223,36 @@ def _worker_thread():
             _stats["in_flight"] += 1
 
         try:
+            from backend.ai.captioning.caption_integrity import caption_integrity_validator
             image_uri = _encode_frame(frame)
-            caption   = _call_moondream_api(image_uri, corr_id)
+            raw_caption = _call_moondream_api(image_uri, corr_id)
 
-            # Build merged caption if YOLO summary is available
+            # Strict 1-to-1 Image-to-Caption Integrity Verification
+            is_valid, reason, envelope = caption_integrity_validator.validate_and_claim(
+                image_id=corr_id,
+                camera_id=camera_id,
+                frame=frame,
+                raw_caption=raw_caption
+            )
+
+            if not is_valid:
+                logger.error(f"[Moondream INTEGRITY REJECTED] {reason}")
+                with _slots_lock:
+                    slot = _slots.get(camera_id)
+                    if slot:
+                        slot.pending = False
+                        slot.last_error = reason
+                with _stats_lock:
+                    _stats["errors"] += 1
+                continue
+
+            # Integrity Check PASSED! Build merged caption
             if yolo_summary:
-                full_caption = f"[YOLO]: {yolo_summary} | [Moondream]: {caption} | camera {camera_id}"
+                full_caption = f"[YOLO]: {yolo_summary} | [Moondream]: {raw_caption} | camera {camera_id}"
             else:
-                full_caption = f"[Moondream]: {caption} | camera {camera_id}"
+                full_caption = f"[Moondream]: {raw_caption} | camera {camera_id}"
 
-            # Persist to DB + Kafka
+            # Persist to DB + Kafka using verified image_id
             _persist_caption(camera_id, full_caption, frame, corr_id)
 
             with _slots_lock:
@@ -214,7 +267,7 @@ def _worker_thread():
             with _stats_lock:
                 _stats["captioned"] += 1
 
-            logger.info(f"[Moondream] corr={corr_id} cam={camera_id} caption complete")
+            logger.info(f"[Moondream INTEGRITY PASS] corr={corr_id} cam={camera_id} caption complete")
 
         except Exception as e:
             logger.error(f"[Moondream] corr={corr_id} cam={camera_id} ERROR: {e}", exc_info=True)
@@ -233,35 +286,32 @@ def _worker_thread():
 
 # ── Persistence helper ────────────────────────────────────────────────────────
 def _persist_caption(camera_id: str, full_caption: str, frame: np.ndarray, corr_id: str):
-    """Write caption to Postgres SceneCaption table + Kafka captions topic."""
+    """Write caption to Postgres SceneCaption table + Kafka captions topic bound to image_id snapshot."""
     try:
-        import datetime, os, uuid
+        import datetime, os
         from backend.database.connection import SessionLocal
         from backend.database.models import SceneCaption
         from backend.ai.embeddings.embedder import get_text_embedding
         from backend.messaging.kafka_client import event_client
         from backend.search.qdrant_utils import enqueue_qdrant_point
 
-
         snap_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage", "snapshots")
         )
         os.makedirs(snap_dir, exist_ok=True)
 
-
-        vid      = str(uuid.uuid4())
+        vid = corr_id if corr_id else f"img_{uuid.uuid4().hex[:12]}"
         snap_path = os.path.join(snap_dir, f"{vid}.jpg")
         snap_url  = f"/api/v1/playback/snapshot/{vid}"
         _IST      = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
         now       = datetime.datetime.now(_IST)
 
-        # Save snapshot asynchronously using shared persistent pool
+        # Save exact frame snapshot asynchronously bound to vid
         try:
             from backend.workers.ai_worker import save_snapshot_async
             save_snapshot_async(snap_path, frame)
         except Exception as snap_err:
             logger.warning(f"[Moondream] Snapshot write error cam={camera_id}: {snap_err}")
-
 
         # Embed caption text
         embedding = None
@@ -406,8 +456,13 @@ def submit_moondream_caption(
     Submit a frame for Moondream captioning. Non-blocking.
     Returns True if enqueued, False if camera already pending or queue full.
     """
-    if corr_id is None:
-        corr_id = uuid.uuid4().hex[:8]
+    from backend.ai.captioning.caption_integrity import caption_integrity_validator
+    image_id, envelope = caption_integrity_validator.create_envelope(
+        frame=frame,
+        camera_id=camera_id,
+        yolo_summary=yolo_summary,
+        custom_id=corr_id
+    )
 
     register_moondream_camera(camera_id)
 
@@ -420,8 +475,8 @@ def submit_moondream_caption(
         slot.pending_since = datetime.datetime.now(datetime.timezone.utc)
 
     try:
-        _work_queue.put_nowait((camera_id, frame.copy(), yolo_summary, corr_id))
-        logger.info(f"[Moondream] corr={corr_id} cam={camera_id} ENQUEUED (qsize={_work_queue.qsize()})")
+        _work_queue.put_nowait((camera_id, frame.copy(), yolo_summary, image_id))
+        logger.info(f"[Moondream] image_id={image_id} cam={camera_id} ENQUEUED (qsize={_work_queue.qsize()})")
         return True
     except queue.Full:
         with _slots_lock:

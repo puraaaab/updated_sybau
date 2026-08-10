@@ -24,6 +24,9 @@ def test_yolo_uses_configured_confidence(monkeypatch):
         def track(self, source, **kwargs):
             captured.update(kwargs)
             return [Result()]
+        def predict(self, source, **kwargs):
+            captured.update(kwargs)
+            return [Result()]
 
     monkeypatch.setattr(yolo.model_manager, "get_yolo", lambda: Model())
     monkeypatch.setattr(yolo, "get_models", lambda: {"yolo": {"confidence": 0.25}})

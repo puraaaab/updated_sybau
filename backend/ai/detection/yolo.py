@@ -78,45 +78,25 @@ def _parse_result_boxes(result) -> List[Dict[str, Any]]:
 
 
 def detect_and_track(frame: np.ndarray):
-    """Executes YOLO tracking on one camera frame."""
+    """Executes YOLO detection on one camera frame."""
     yolo_model = None
     device_target = "cuda" if torch.cuda.is_available() else "cpu"
     try:
         yolo_model = model_manager.get_yolo()
         with model_manager.gpu_lock:
-            results = yolo_model.track(
+            results = yolo_model.predict(
                 frame,
-                persist=True,
-                tracker="bytetrack.yaml",
                 imgsz=960,
                 classes=COCO_CLASS_IDS,
                 conf=_confidence_threshold(),
                 device=device_target,
                 verbose=False,
             )
-    except Exception:
-        logger.warning("YOLO track() failed for this frame; falling back to plain predict.")
-        try:
-            if yolo_model is None:
-                return []
-            with model_manager.gpu_lock:
-                results = yolo_model.predict(
-                    frame,
-                    imgsz=960,
-                    classes=COCO_CLASS_IDS,
-                    conf=_confidence_threshold(),
-                    device=device_target,
-                    verbose=False,
-                )
-            if results:
-                return _parse_result_boxes(results[0])
-        except Exception:
-            pass
-        return []
-
-    if not results:
-        return []
-    return _parse_result_boxes(results[0])
+        if results:
+            return _parse_result_boxes(results[0])
+    except Exception as e:
+        logger.warning(f"YOLO predict failed for frame: {e}")
+    return []
 
 
 def detect_and_track_batch(
@@ -125,7 +105,7 @@ def detect_and_track_batch(
     frame_counters: List[int],
     skip_interval: int = 1,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Executes batched YOLO tracking across multiple camera streams with selective frame skipping."""
+    """Executes batched YOLO detection across multiple camera streams with selective frame skipping."""
     batch_detections = {stream_id: [] for stream_id in stream_ids}
     safe_skip_interval = max(1, int(skip_interval or 1))
     frames_to_process = []
@@ -143,10 +123,8 @@ def detect_and_track_batch(
         yolo_model = model_manager.get_yolo()
         device_target = "cuda" if torch.cuda.is_available() else "cpu"
         with model_manager.gpu_lock:
-            results = yolo_model.track(
+            results = yolo_model.predict(
                 frames_to_process,
-                persist=True,
-                tracker="bytetrack.yaml",
                 imgsz=960,
                 classes=COCO_CLASS_IDS,
                 conf=_confidence_threshold(),
@@ -160,7 +138,7 @@ def detect_and_track_batch(
             stream_id = stream_ids[orig_stream_idx]
             batch_detections[stream_id] = _parse_result_boxes(result)
     except Exception as exc:
-        logger.warning(f"Batched YOLO track() failed ({exc}); falling back to single-frame detect_and_track.")
+        logger.warning(f"Batched YOLO predict failed ({exc}); falling back to single-frame detect_and_track.")
         for orig_idx in active_stream_indices:
             sid = stream_ids[orig_idx]
             frm = frames[orig_idx]

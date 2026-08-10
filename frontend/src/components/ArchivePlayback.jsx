@@ -37,13 +37,16 @@ function CameraArchivePanel({ camera, token, syncTimestamp, onSyncRequest, onExp
         const rawClips = Array.isArray(data) ? data : (data.clips || []);
         const cl = rawClips.map(item => ({
           filename: item.filename,
-          url: item.filepath || `/api/v1/playback/video/${camera.id}/${item.filename}`,
+          url: `/api/v1/playback/video/${camera.id}/${item.filename}?token=${token}`,
           timestamp: item.filename ? item.filename.replace('.mp4', '') : 'N/A',
           size_bytes: item.size_bytes || 1048576
         }));
         setClips(cl);
         setLoading(false);
-        if (cl.length > 0 && !selectedClip) setSelectedClip(cl[cl.length - 1]);
+        if (cl.length > 0 && !selectedClip) {
+          const defaultClip = cl.length > 1 ? cl[cl.length - 2] : cl[0];
+          setSelectedClip(defaultClip);
+        }
       })
       .catch(() => setLoading(false));
   }, [camera.id, token, selectedClip]);
@@ -51,7 +54,10 @@ function CameraArchivePanel({ camera, token, syncTimestamp, onSyncRequest, onExp
   useEffect(() => { fetchClips(); }, [fetchClips]);
 
   useEffect(() => {
-    if (videoRef.current) videoRef.current.load();
+    if (videoRef.current) {
+      videoRef.current.load();
+      videoRef.current.play().catch(e => console.log('Autoplay info:', e));
+    }
   }, [selectedClip]);
 
   useEffect(() => {
@@ -95,11 +101,15 @@ function CameraArchivePanel({ camera, token, syncTimestamp, onSyncRequest, onExp
         </Box>
       </Box>
 
-      <Box sx={{ position: 'relative', backgroundColor: '#000', aspectRatio: '16/9', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <Box sx={{ position: 'relative', backgroundColor: '#000', height: 320, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
         {selectedClip ? (
           <video
+            key={selectedClip.filename}
             ref={videoRef}
             controls
+            autoPlay
+            playsInline
+            preload="auto"
             style={{ width: '100%', height: '100%', objectFit: 'contain' }}
             src={selectedClip.url}
             onTimeUpdate={handleTimeUpdate}
@@ -233,9 +243,9 @@ export default function ArchivePlayback({ token }) {
   };
 
   return (
-    <Box sx={{ p: 3, height: '100%', display: 'flex', flexDirection: 'column', gap: 2 }}>
+    <Box sx={{ p: 2, height: 'calc(100vh - 85px)', display: 'flex', flexDirection: 'column', gap: 2, overflow: 'hidden' }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Typography variant="h5" sx={{ fontWeight: 800, color: 'primary.main' }}>
+        <Typography variant="h6" sx={{ fontWeight: 800, color: 'primary.main' }}>
           MULTI-CAMERA ARCHIVE PLAYBACK
         </Typography>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>

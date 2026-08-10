@@ -57,7 +57,7 @@ def get_suspect_co_occurrence(
                 "camera_name": cam.name if cam else t1.camera_id,
                 "location": cam.location if cam else "Main Area",
                 "timestamp": t1.first_seen.isoformat() if t1.first_seen else datetime.datetime.now().isoformat(),
-                "confidence_score": round(0.85 + (len(group_members) * 0.04), 2),
+                "confidence_score": min(round(0.80 + (len(group_members) * 0.03), 2), 0.99),
                 "member_count": len(group_members),
                 "members": [
                     {

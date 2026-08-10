@@ -1,9 +1,10 @@
-﻿import React, { useState } from 'react';
+import React, { useState } from 'react';
 import {
   Box, Typography, Grid, Paper, FormControl, InputLabel, Select, MenuItem,
   FormControlLabel, Switch, Slider, Button, TextField, Divider, Table, TableBody,
   TableCell, TableContainer, TableHead, TableRow, IconButton, Alert, Chip,
-  List, ListItem, ListItemButton, ListItemText, ListItemIcon
+  List, ListItem, ListItemButton, ListItemText, ListItemIcon,
+  Dialog, DialogTitle, DialogContent, DialogActions
 } from '@mui/material';
 import PaletteIcon from '@mui/icons-material/Palette';
 import TvIcon from '@mui/icons-material/Tv';
@@ -52,6 +53,7 @@ export default function SettingsConsole({
   const [resetPwdText, setResetPwdText] = useState('');
   const [confirmAdminPass, setConfirmAdminPass] = useState('');
   const [hardDeleteUserId, setHardDeleteUserId] = useState(null);
+  const [softDeleteUser, setSoftDeleteUser] = useState(null);
 
   // ONVIF Discovery Settings
   const [onvifUser, setOnvifUser] = useState('');
@@ -520,15 +522,33 @@ export default function SettingsConsole({
                               </TableCell>
                               <TableCell align="center">
                                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
-                                  <IconButton size="small" disabled={!!u.deleted_at} onClick={() => setResetPwdUserId(resetPwdUserId === u.id ? null : u.id)} title="Reset Password">
+                                  <IconButton
+                                    size="small"
+                                    disabled={!!u.deleted_at}
+                                    onClick={() => setResetPwdUserId(resetPwdUserId === u.id ? null : u.id)}
+                                    title="Reset Password"
+                                    aria-label={`Reset password for ${u.username}`}
+                                  >
                                     <RefreshIcon fontSize="small" />
                                   </IconButton>
                                   {!u.deleted_at && (
-                                    <IconButton size="small" color="error" onClick={() => onSoftDelete(u.id)} title="Disable / Deactivate">
+                                    <IconButton
+                                      size="small"
+                                      color="error"
+                                      onClick={() => setSoftDeleteUser(u)}
+                                      title="Disable / Deactivate"
+                                      aria-label={`Deactivate user ${u.username}`}
+                                    >
                                       <DeleteIcon fontSize="small" />
                                     </IconButton>
                                   )}
-                                  <IconButton size="small" color="warning" onClick={() => setHardDeleteUserId(hardDeleteUserId === u.id ? null : u.id)} title="Purge Record">
+                                  <IconButton
+                                    size="small"
+                                    color="warning"
+                                    onClick={() => setHardDeleteUserId(hardDeleteUserId === u.id ? null : u.id)}
+                                    title="Purge Record"
+                                    aria-label={`Permanently purge user ${u.username}`}
+                                  >
                                     <DeleteIcon fontSize="small" />
                                   </IconButton>
                                 </Box>
@@ -640,6 +660,31 @@ export default function SettingsConsole({
           <CameraManagement token={token} />
         )}
       </Paper>
+
+      {/* Soft Delete Confirmation Dialog (Issue 6) */}
+      <Dialog open={Boolean(softDeleteUser)} onClose={() => setSoftDeleteUser(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>Confirm User Deactivation</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            Are you sure you want to deactivate user <strong>"{softDeleteUser?.username}"</strong>? They will be unable to log in until reactivated by an admin.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setSoftDeleteUser(null)} variant="outlined">Cancel</Button>
+          <Button
+            onClick={() => {
+              if (softDeleteUser) {
+                onSoftDelete(softDeleteUser.id);
+                setSoftDeleteUser(null);
+              }
+            }}
+            color="error"
+            variant="contained"
+          >
+            Deactivate User
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

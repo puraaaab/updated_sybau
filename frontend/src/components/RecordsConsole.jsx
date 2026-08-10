@@ -18,6 +18,7 @@ import {
   IconButton,
   CircularProgress,
   Pagination,
+  TablePagination,
   FormControl,
   Select,
   MenuItem,
@@ -31,6 +32,7 @@ import FaceIcon from '@mui/icons-material/Face';
 import DirectionsCarIcon from '@mui/icons-material/DirectionsCar';
 import ConfirmationNumberIcon from '@mui/icons-material/ConfirmationNumber';
 import SubtitlesIcon from '@mui/icons-material/Subtitles';
+import TextFieldsIcon from '@mui/icons-material/TextFields';
 import SortIcon from '@mui/icons-material/Sort';
 import CloseIcon from '@mui/icons-material/Close';
 import CameraAltIcon from '@mui/icons-material/CameraAlt';
@@ -44,6 +46,7 @@ export default function RecordsConsole({ token }) {
     faces_count: 0,
     vehicles_count: 0,
     plates_count: 0,
+    ocr_count: 0,
     captions_count: 0,
     identities_count: 0
   });
@@ -51,12 +54,13 @@ export default function RecordsConsole({ token }) {
   const [facesData, setFacesData] = useState({ total: 0, items: [] });
   const [vehiclesData, setVehiclesData] = useState({ total: 0, items: [] });
   const [platesData, setPlatesData] = useState({ total: 0, items: [] });
+  const [ocrData, setOcrData] = useState({ total: 0, items: [] });
   const [captionsData, setCaptionsData] = useState({ total: 0, items: [] });
 
   const [searchQuery, setSearchQuery] = useState('');
   const [page, setPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(20);
   const [previewImage, setPreviewImage] = useState(null);
-  const limit = 20;
 
 
   const authHeaders = token ? { 'Authorization': `Bearer ${token}` } : {};
@@ -66,7 +70,14 @@ export default function RecordsConsole({ token }) {
       const res = await fetch('/api/v1/records/stats', { headers: authHeaders });
       if (res.ok) {
         const data = await res.json();
-        setStats(data);
+        setStats(prev => ({
+          faces_count: Math.max(prev.faces_count, data.faces_count || 0),
+          vehicles_count: Math.max(prev.vehicles_count, data.vehicles_count || 0),
+          plates_count: Math.max(prev.plates_count, data.plates_count || 0),
+          ocr_count: Math.max(prev.ocr_count, data.ocr_count || 0),
+          captions_count: Math.max(prev.captions_count, data.captions_count || 0),
+          identities_count: Math.max(prev.identities_count, data.identities_count || 0),
+        }));
       }
     } catch (err) {
       console.error("Error fetching record stats:", err);
@@ -75,27 +86,51 @@ export default function RecordsConsole({ token }) {
 
   const fetchTabData = async () => {
     setLoading(true);
-    const offset = (page - 1) * limit;
+    const offset = (page - 1) * rowsPerPage;
     const qParam = searchQuery ? `&search=${encodeURIComponent(searchQuery)}` : '';
     const sParam = `&sort=${sortOrder}`;
 
     try {
       if (activeTab === 0) {
         // Faces
-        const res = await fetch(`/api/v1/records/faces?limit=${limit}&offset=${offset}${qParam}${sParam}`, { headers: authHeaders });
-        if (res.ok) setFacesData(await res.json());
+        const res = await fetch(`/api/v1/records/faces?limit=${rowsPerPage}&offset=${offset}${qParam}${sParam}`, { headers: authHeaders });
+        if (res.ok) {
+          const data = await res.json();
+          setFacesData(data);
+          setStats(prev => ({ ...prev, faces_count: Math.max(prev.faces_count, data.total || 0) }));
+        }
       } else if (activeTab === 1) {
         // Vehicles
-        const res = await fetch(`/api/v1/records/vehicles?limit=${limit}&offset=${offset}${qParam}${sParam}`, { headers: authHeaders });
-        if (res.ok) setVehiclesData(await res.json());
+        const res = await fetch(`/api/v1/records/vehicles?limit=${rowsPerPage}&offset=${offset}${qParam}${sParam}`, { headers: authHeaders });
+        if (res.ok) {
+          const data = await res.json();
+          setVehiclesData(data);
+          setStats(prev => ({ ...prev, vehicles_count: Math.max(prev.vehicles_count, data.total || 0) }));
+        }
       } else if (activeTab === 2) {
         // Number Plates
-        const res = await fetch(`/api/v1/records/plates?limit=${limit}&offset=${offset}${qParam}${sParam}`, { headers: authHeaders });
-        if (res.ok) setPlatesData(await res.json());
+        const res = await fetch(`/api/v1/records/plates?limit=${rowsPerPage}&offset=${offset}${qParam}${sParam}`, { headers: authHeaders });
+        if (res.ok) {
+          const data = await res.json();
+          setPlatesData(data);
+          setStats(prev => ({ ...prev, plates_count: Math.max(prev.plates_count, data.total || 0) }));
+        }
       } else if (activeTab === 3) {
+        // Raw OCR
+        const res = await fetch(`/api/v1/records/ocr?limit=${rowsPerPage}&offset=${offset}${qParam}${sParam}`, { headers: authHeaders });
+        if (res.ok) {
+          const data = await res.json();
+          setOcrData(data);
+          setStats(prev => ({ ...prev, ocr_count: Math.max(prev.ocr_count, data.total || 0) }));
+        }
+      } else if (activeTab === 4) {
         // Captions
-        const res = await fetch(`/api/v1/records/captions?limit=${limit}&offset=${offset}${qParam}${sParam}`, { headers: authHeaders });
-        if (res.ok) setCaptionsData(await res.json());
+        const res = await fetch(`/api/v1/records/captions?limit=${rowsPerPage}&offset=${offset}${qParam}${sParam}`, { headers: authHeaders });
+        if (res.ok) {
+          const data = await res.json();
+          setCaptionsData(data);
+          setStats(prev => ({ ...prev, captions_count: Math.max(prev.captions_count, data.total || 0) }));
+        }
       }
     } catch (err) {
       console.error("Error fetching records:", err);
@@ -107,7 +142,7 @@ export default function RecordsConsole({ token }) {
   useEffect(() => {
     fetchStats();
     fetchTabData();
-  }, [activeTab, page, sortOrder, token]);
+  }, [activeTab, page, rowsPerPage, sortOrder, token]);
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
@@ -124,7 +159,8 @@ export default function RecordsConsole({ token }) {
     if (activeTab === 0) endpoint = '/api/v1/records/faces';
     else if (activeTab === 1) endpoint = '/api/v1/records/vehicles';
     else if (activeTab === 2) endpoint = '/api/v1/records/plates';
-    else if (activeTab === 3) endpoint = '/api/v1/records/captions';
+    else if (activeTab === 3) endpoint = '/api/v1/records/ocr';
+    else if (activeTab === 4) endpoint = '/api/v1/records/captions';
 
     let itemsToExport = [];
     try {
@@ -158,6 +194,11 @@ export default function RecordsConsole({ token }) {
         csvLines.push(`${item.id},${item.camera_id},${item.license_plate},${item.ocr_confidence},${item.vehicle_type || 'car'},${item.timestamp},"${item.snapshot_url || ''}"`);
       });
     } else if (activeTab === 3) {
+      csvLines.push("ID,Camera ID,Track UUID,Detected Text,Raw OCR,Confidence,Timestamp,Snapshot URL");
+      itemsToExport.forEach(item => {
+        csvLines.push(`${item.id},${item.camera_id},${item.track_uuid},"${item.detected_text}","${item.raw_text}",${item.ocr_confidence},${item.timestamp},"${item.snapshot_url || ''}"`);
+      });
+    } else if (activeTab === 4) {
       csvLines.push("ID,Camera ID,Generated Scene Caption,Timestamp,Snapshot URL");
       itemsToExport.forEach(item => {
         csvLines.push(`${item.id},${item.camera_id},"${(item.caption || '').replace(/"/g, '""')}",${item.timestamp},"${item.snapshot_url || ''}"`);
@@ -174,16 +215,22 @@ export default function RecordsConsole({ token }) {
     document.body.removeChild(link);
   };
 
+  const facesCount = Math.max(stats.faces_count || 0, facesData.total || 0);
+  const vehiclesCount = Math.max(stats.vehicles_count || 0, vehiclesData.total || 0);
+  const platesCount = Math.max(stats.plates_count || 0, platesData.total || 0);
+  const ocrCount = Math.max(stats.ocr_count || 0, ocrData.total || 0);
+  const captionsCount = Math.max(stats.captions_count || 0, captionsData.total || 0);
+
   return (
-    <Box sx={{ p: 3 }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 85px)', overflow: 'hidden', p: 2 }}>
       {/* Header Title */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.5 }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '0.5px', color: 'primary.main' }}>
+          <Typography variant="h6" sx={{ fontWeight: 800, letterSpacing: '0.5px', color: 'primary.main' }}>
             CAPTURED RECORDS LEDGER
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Central audit directory logging all faces, vehicle tracks, OCR license plates, and AI scene captions.
+          <Typography variant="caption" color="text.secondary">
+            Central audit directory logging all faces, vehicle tracks, OCR license plates, raw frame OCR text, and AI scene captions.
           </Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 1 }}>
@@ -208,58 +255,72 @@ export default function RecordsConsole({ token }) {
       </Box>
 
       {/* Top Metric Cards */}
-      <Grid container spacing={2} sx={{ mb: 3 }}>
-        <Grid xs={12} sm={6} md={3}>
-          <Paper sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 2, borderLeft: '4px solid #00e676' }}>
-            <FaceIcon sx={{ fontSize: 36, color: '#00e676' }} />
+      <Grid container spacing={2} sx={{ mb: 1.5 }}>
+        <Grid size={{ xs: 12, sm: 6, md: 2.4 }}>
+          <Paper sx={{ p: 1.5, display: 'flex', alignItems: 'center', gap: 1.5, borderLeft: '4px solid #00e676' }}>
+            <FaceIcon sx={{ fontSize: 28, color: '#00e676' }} />
             <Box>
               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
-                CAPTURED FACES
+                FACES
               </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {stats.faces_count.toLocaleString()}
+              <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                {facesCount.toLocaleString()}
               </Typography>
             </Box>
           </Paper>
         </Grid>
 
-        <Grid xs={12} sm={6} md={3}>
-          <Paper sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 2, borderLeft: '4px solid #29b6f6' }}>
-            <DirectionsCarIcon sx={{ fontSize: 36, color: '#29b6f6' }} />
+        <Grid size={{ xs: 12, sm: 6, md: 2.4 }}>
+          <Paper sx={{ p: 1.5, display: 'flex', alignItems: 'center', gap: 1.5, borderLeft: '4px solid #29b6f6' }}>
+            <DirectionsCarIcon sx={{ fontSize: 28, color: '#29b6f6' }} />
             <Box>
               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
-                CAPTURED VEHICLES
+                VEHICLES
               </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {stats.vehicles_count.toLocaleString()}
+              <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                {vehiclesCount.toLocaleString()}
               </Typography>
             </Box>
           </Paper>
         </Grid>
 
-        <Grid xs={12} sm={6} md={3}>
-          <Paper sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 2, borderLeft: '4px solid #ab47bc' }}>
-            <ConfirmationNumberIcon sx={{ fontSize: 36, color: '#ab47bc' }} />
+        <Grid size={{ xs: 12, sm: 6, md: 2.4 }}>
+          <Paper sx={{ p: 1.5, display: 'flex', alignItems: 'center', gap: 1.5, borderLeft: '4px solid #ab47bc' }}>
+            <ConfirmationNumberIcon sx={{ fontSize: 28, color: '#ab47bc' }} />
             <Box>
               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
-                NUMBER PLATES (OCR)
+                NUMBER PLATES
               </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {stats.plates_count.toLocaleString()}
+              <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                {platesCount.toLocaleString()}
               </Typography>
             </Box>
           </Paper>
         </Grid>
 
-        <Grid xs={12} sm={6} md={3}>
-          <Paper sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 2, borderLeft: '4px solid #ff7043' }}>
-            <SubtitlesIcon sx={{ fontSize: 36, color: '#ff7043' }} />
+        <Grid size={{ xs: 12, sm: 6, md: 2.4 }}>
+          <Paper sx={{ p: 1.5, display: 'flex', alignItems: 'center', gap: 1.5, borderLeft: '4px solid #ffb74d' }}>
+            <TextFieldsIcon sx={{ fontSize: 28, color: '#ffb74d' }} />
             <Box>
               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
-                AI SCENE CAPTIONS
+                RAW OCR TEXT
               </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {stats.captions_count.toLocaleString()}
+              <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                {ocrCount.toLocaleString()}
+              </Typography>
+            </Box>
+          </Paper>
+        </Grid>
+
+        <Grid size={{ xs: 12, sm: 6, md: 2.4 }}>
+          <Paper sx={{ p: 1.5, display: 'flex', alignItems: 'center', gap: 1.5, borderLeft: '4px solid #ff7043' }}>
+            <SubtitlesIcon sx={{ fontSize: 28, color: '#ff7043' }} />
+            <Box>
+              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
+                AI CAPTIONS
+              </Typography>
+              <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                {captionsCount.toLocaleString()}
               </Typography>
             </Box>
           </Paper>
@@ -267,7 +328,7 @@ export default function RecordsConsole({ token }) {
       </Grid>
 
       {/* Main Tabs Navigation */}
-      <Paper sx={{ width: '100%', mb: 2 }}>
+      <Paper sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
         <Box sx={{ borderBottom: 1, borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center', pr: 2 }}>
           <Tabs
             value={activeTab}
@@ -275,10 +336,11 @@ export default function RecordsConsole({ token }) {
             textColor="primary"
             indicatorColor="primary"
           >
-            <Tab icon={<FaceIcon />} iconPosition="start" label={`Faces (${stats.faces_count})`} />
-            <Tab icon={<DirectionsCarIcon />} iconPosition="start" label={`Vehicles (${stats.vehicles_count})`} />
-            <Tab icon={<ConfirmationNumberIcon />} iconPosition="start" label={`Number Plates (${stats.plates_count})`} />
-            <Tab icon={<SubtitlesIcon />} iconPosition="start" label={`AI Captions (${stats.captions_count})`} />
+            <Tab icon={<FaceIcon />} iconPosition="start" label={`Faces (${facesCount})`} />
+            <Tab icon={<DirectionsCarIcon />} iconPosition="start" label={`Vehicles (${vehiclesCount})`} />
+            <Tab icon={<ConfirmationNumberIcon />} iconPosition="start" label={`Number Plates (${platesCount})`} />
+            <Tab icon={<TextFieldsIcon />} iconPosition="start" label={`OCR (${ocrCount})`} />
+            <Tab icon={<SubtitlesIcon />} iconPosition="start" label={`AI Captions (${captionsCount})`} />
           </Tabs>
 
           <Box component="form" onSubmit={handleSearchSubmit} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
@@ -322,23 +384,24 @@ export default function RecordsConsole({ token }) {
             </Typography>
           </Box>
         ) : (
-          <Box sx={{ p: 2 }}>
+          <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, p: 1.5 }}>
             {/* Tab 0: Faces */}
             {activeTab === 0 && (
-              <TableContainer>
+              <TableContainer sx={{ flexGrow: 1, overflowY: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
                 <Table size="small">
                   <TableHead>
                     <TableRow>
                       <TableCell sx={{ fontWeight: 'bold' }}>Snapshot</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Track UUID</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Resolved Identity</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }}>Resolved Identity (POI)</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }}>Camera Occurrences</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }}>Total Sightings</TableCell>
                       <TableCell sx={{ fontWeight: 'bold' }}>Confidence</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Timestamp</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }}>Latest Timestamp</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
                     {facesData.items.length === 0 ? (
-                      <TableRow><TableCell colSpan={5} align="center">No face detection records found.</TableCell></TableRow>
+                      <TableRow><TableCell colSpan={6} align="center">No face detection records found.</TableCell></TableRow>
                     ) : (
                       facesData.items.map((row) => (
                         <TableRow key={row.id} hover>
@@ -347,15 +410,27 @@ export default function RecordsConsole({ token }) {
                               <Box
                                 component="img"
                                 src={row.snapshot_url}
-                                alt="Face"
-                                sx={{ width: 48, height: 48, borderRadius: 1, objectFit: 'cover', border: '1px solid #444' }}
+                                alt="Face Crop"
+                                onError={(e) => { e.target.onerror = null; e.target.src = '/api/v1/playback/snapshot/default'; }}
+                                onClick={() => setPreviewImage(row.snapshot_url)}
+                                sx={{
+                                  width: 52,
+                                  height: 52,
+                                  borderRadius: '50%',
+                                  objectFit: 'cover',
+                                  border: '2px solid #00e676',
+                                  cursor: 'pointer',
+                                  transition: 'transform 0.15s ease-in-out',
+                                  '&:hover': { transform: 'scale(1.2)', borderColor: '#38bdf8', boxShadow: '0 0 10px rgba(0, 230, 118, 0.5)' }
+                                }}
                               />
                             ) : (
                               <FaceIcon color="action" />
                             )}
                           </TableCell>
-                          <TableCell><Chip label={row.track_uuid} size="small" variant="outlined" /></TableCell>
-                          <TableCell sx={{ fontWeight: 600 }}>{row.label}</TableCell>
+                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{row.label}</TableCell>
+                          <TableCell><Chip label={row.cameras || 'Live Grid'} size="small" variant="outlined" color="secondary" /></TableCell>
+                          <TableCell><Chip label={`${row.sightings || 1} sighting(s)`} size="small" color="success" sx={{ fontWeight: 'bold' }} /></TableCell>
                           <TableCell>{(row.confidence * 100).toFixed(0)}%</TableCell>
                           <TableCell color="text.secondary">{row.timestamp}</TableCell>
                         </TableRow>
@@ -368,7 +443,7 @@ export default function RecordsConsole({ token }) {
 
             {/* Tab 1: Vehicles */}
             {activeTab === 1 && (
-              <TableContainer>
+              <TableContainer sx={{ flexGrow: 1, overflowY: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
                 <Table size="small">
                   <TableHead>
                     <TableRow>
@@ -393,6 +468,7 @@ export default function RecordsConsole({ token }) {
                                 component="img"
                                 src={row.snapshot_url}
                                 alt="Vehicle Snapshot"
+                                onError={(e) => { e.target.onerror = null; e.target.src = '/api/v1/playback/snapshot/default'; }}
                                 onClick={() => setPreviewImage(row.snapshot_url)}
                                 sx={{
                                   width: 72,
@@ -442,7 +518,7 @@ export default function RecordsConsole({ token }) {
 
             {/* Tab 2: Number Plates */}
             {activeTab === 2 && (
-              <TableContainer>
+              <TableContainer sx={{ flexGrow: 1, overflowY: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
                 <Table size="small">
                   <TableHead>
                     <TableRow>
@@ -466,6 +542,7 @@ export default function RecordsConsole({ token }) {
                                 component="img"
                                 src={row.snapshot_url}
                                 alt="Plate Snapshot"
+                                onError={(e) => { e.target.onerror = null; e.target.src = '/api/v1/playback/snapshot/default'; }}
                                 onClick={() => setPreviewImage(row.snapshot_url)}
                                 sx={{
                                   width: 72,
@@ -503,9 +580,74 @@ export default function RecordsConsole({ token }) {
               </TableContainer>
             )}
 
-            {/* Tab 3: AI Scene Captions Log */}
+            {/* Tab 3: Raw OCR Text Log */}
             {activeTab === 3 && (
-              <TableContainer>
+              <TableContainer sx={{ flexGrow: 1, overflowY: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 'bold', width: '90px' }}>Snapshot</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }}>Detected Raw OCR Text</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }}>Camera ID</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }}>Track UUID</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }}>OCR Confidence</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }}>Timestamp</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {ocrData.items.length === 0 ? (
+                      <TableRow><TableCell colSpan={6} align="center">No raw OCR text records found.</TableCell></TableRow>
+                    ) : (
+                      ocrData.items.map((row) => (
+                        <TableRow key={row.id} hover>
+                          <TableCell>
+                            {row.snapshot_url ? (
+                              <Box
+                                component="img"
+                                src={row.snapshot_url}
+                                alt="OCR Snapshot"
+                                onError={(e) => { e.target.onerror = null; e.target.src = '/api/v1/playback/snapshot/default'; }}
+                                onClick={() => setPreviewImage(row.snapshot_url)}
+                                sx={{
+                                  width: 72,
+                                  height: 48,
+                                  objectFit: 'cover',
+                                  borderRadius: 1,
+                                  border: '1px solid rgba(255,255,255,0.2)',
+                                  cursor: 'pointer',
+                                  transition: 'transform 0.15s ease-in-out',
+                                  '&:hover': { transform: 'scale(1.1)', borderColor: 'primary.main' }
+                                }}
+                              />
+                            ) : (
+                              <Box sx={{ width: 72, height: 48, borderRadius: 1, bgcolor: 'action.disabledBackground', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                <CameraAltIcon sx={{ fontSize: 20, opacity: 0.5 }} />
+                              </Box>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <Chip
+                              label={row.raw_text || row.detected_text}
+                              color="warning"
+                              variant="outlined"
+                              sx={{ fontWeight: 'bold', fontSize: '0.85rem', fontFamily: 'monospace' }}
+                            />
+                          </TableCell>
+                          <TableCell sx={{ fontWeight: 600 }}>{row.camera_id}</TableCell>
+                          <TableCell><Chip label={row.track_uuid} size="small" variant="outlined" /></TableCell>
+                          <TableCell>{(row.ocr_confidence * 100).toFixed(0)}%</TableCell>
+                          <TableCell color="text.secondary">{row.timestamp}</TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            )}
+
+            {/* Tab 4: AI Scene Captions Log */}
+            {activeTab === 4 && (
+              <TableContainer sx={{ flexGrow: 1, overflowY: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
                 <Table size="small">
                   <TableHead>
                     <TableRow>
@@ -582,39 +724,44 @@ export default function RecordsConsole({ token }) {
             >
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', p: 2, borderBottom: '1px solid #334155' }}>
                 <Typography variant="h6" fontWeight="bold" color="primary.main">
-                  AI Caption Snapshot — {previewImage?.camera_id} ({previewImage?.timestamp})
+                  Snapshot Preview {previewImage?.camera_id ? `— ${previewImage.camera_id} (${previewImage?.timestamp || ''})` : ''}
                 </Typography>
                 <IconButton onClick={() => setPreviewImage(null)} sx={{ color: '#94a3b8' }}>
                   <CloseIcon />
                 </IconButton>
               </Box>
               <DialogContent sx={{ p: 2, textAlign: 'center' }}>
-                {previewImage?.url && (
+                {(typeof previewImage === 'string' ? previewImage : previewImage?.url) && (
                   <Box
                     component="img"
-                    src={previewImage.url}
-                    alt="Full AI Snapshot"
-                    sx={{ width: '100%', maxHeight: '70vh', objectFit: 'contain', borderRadius: 1, border: '1px solid #334155', mb: 2 }}
+                    src={typeof previewImage === 'string' ? previewImage : previewImage.url}
+                    alt="Snapshot Preview"
+                    sx={{ width: '100%', maxHeight: '70vh', objectFit: 'contain', borderRadius: 1, border: '1px solid #334155', mb: previewImage?.caption ? 2 : 0 }}
                   />
                 )}
-                <Typography variant="body1" sx={{ fontFamily: 'monospace', backgroundColor: 'rgba(0,0,0,0.5)', p: 2, borderRadius: 1, color: '#38bdf8', textAlign: 'left' }}>
-                  {previewImage?.caption}
-                </Typography>
+                {previewImage?.caption && (
+                  <Typography variant="body1" sx={{ fontFamily: 'monospace', backgroundColor: 'rgba(0,0,0,0.5)', p: 2, borderRadius: 1, color: '#38bdf8', textAlign: 'left' }}>
+                    {previewImage.caption}
+                  </Typography>
+                )}
               </DialogContent>
             </Dialog>
 
 
             {/* Pagination Controls */}
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
-              <Typography variant="caption" color="text.secondary">
-                Showing {Math.min(limit, (activeTab === 0 ? facesData : activeTab === 1 ? vehiclesData : activeTab === 2 ? platesData : captionsData).items.length)} of {(activeTab === 0 ? facesData : activeTab === 1 ? vehiclesData : activeTab === 2 ? platesData : captionsData).total} records
-              </Typography>
-              <Pagination
-                count={Math.ceil(((activeTab === 0 ? facesData : activeTab === 1 ? vehiclesData : activeTab === 2 ? platesData : captionsData).total || 1) / limit)}
-                page={page}
-                onChange={(e, val) => setPage(val)}
-                color="primary"
-                size="small"
+            <Box sx={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', mt: 2, pt: 1, borderTop: '1px solid', borderColor: 'divider' }}>
+              <TablePagination
+                component="div"
+                count={(activeTab === 0 ? facesData : activeTab === 1 ? vehiclesData : activeTab === 2 ? platesData : captionsData).total || 0}
+                page={page - 1}
+                onPageChange={(e, newPage) => setPage(newPage + 1)}
+                rowsPerPage={rowsPerPage}
+                onRowsPerPageChange={(e) => {
+                  setRowsPerPage(parseInt(e.target.value, 10));
+                  setPage(1);
+                }}
+                rowsPerPageOptions={[10, 20, 50, 100]}
+                sx={{ borderBottom: 'none' }}
               />
             </Box>
           </Box>

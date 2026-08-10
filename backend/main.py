@@ -6,10 +6,12 @@ import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import time
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
-from .database.connection import engine, SessionLocal, Base
+from sqlalchemy.orm import Session
+from .database.connection import engine, SessionLocal, Base, get_db
 from .database.models import Camera, AlertConfig
 from .config import service as config_service
 from .recording import recorder
@@ -66,6 +68,16 @@ async def lifespan(app: FastAPI):
     memory_bus.subscribe(broadcast_event_to_websockets)
     Base.metadata.create_all(bind=engine)
 
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS snapshot_url VARCHAR;"))
+            conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS bbox TEXT;"))
+            conn.execute(text("ALTER TABLE global_identities ADD COLUMN IF NOT EXISTS snapshot_path TEXT;"))
+            conn.commit()
+    except Exception as migration_e:
+        print(f"Schema migration check note: {migration_e}")
+
     db = SessionLocal()
     try:
         if db.query(Camera).count() == 0:
@@ -100,13 +112,14 @@ async def lifespan(app: FastAPI):
 
     def _startup_ai():
         try:
-            from .ai.captioning.captioner import pre_warm as pre_warm_captioner
-            threading.Thread(target=pre_warm_captioner, daemon=True, name="Florence_Prewarm").start()
+            from .ai.scheduler import inference_scheduler
+            inference_scheduler.start()
 
             from .ai.model_manager import model_manager
-            print("Pre-warming YOLO, EasyOCR, and SentenceTransformer embedder...")
+            print("Pre-warming YOLO, EasyOCR, and SentenceTransformer embedder on CUDA...")
             model_manager.get_yolo()
             model_manager.get_ocr()
+
             try:
                 from .ai.embeddings.embedder import get_text_embedding
                 get_text_embedding("prewarm vector search engine")
@@ -119,12 +132,12 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"Note on Qdrant pre-init: {e}")
 
-            from .ai.scheduler import inference_scheduler
-            inference_scheduler.start()
-
             print("Starting background Stream Recorders and AI Workers...")
             recorder.start_all_recorders()
             ai_worker.start_all_ai_workers()
+
+            from .ai.captioning.captioner import pre_warm as pre_warm_captioner
+            threading.Thread(target=pre_warm_captioner, daemon=True, name="Florence_Prewarm").start()
 
             from .ai.captioning.moondream_captioner import start_moondream_worker
             start_moondream_worker()
@@ -191,6 +204,49 @@ app.include_router(records_router, prefix="/api/v1")
 app.include_router(rules_router, prefix="/api/v1")
 app.include_router(proxy_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
+
+from fastapi.responses import PlainTextResponse
+from .monitoring.metrics import generate_prometheus_metrics
+from .monitoring.health import get_services_health
+from .services.bwc_live_ingest import bwc_live_ingest_service
+
+@app.get("/healthz", tags=["Infrastructure"])
+def liveness_probe():
+    """Kubernetes Liveness Probe."""
+    return {"status": "ok", "timestamp": time.time()}
+
+@app.get("/readyz", tags=["Infrastructure"])
+def readiness_probe():
+    """Kubernetes Readiness Probe checking DB and internal services."""
+    services = get_services_health()
+    is_ready = services.get("postgresql") == "online"
+    if not is_ready:
+        return PlainTextResponse(content="Service Not Ready", status_code=503)
+    return {"status": "ready", "services": services}
+
+@app.get("/metrics", tags=["Infrastructure"])
+def prometheus_metrics_endpoint():
+    """Scraping endpoint for Prometheus monitoring systems."""
+    return PlainTextResponse(generate_prometheus_metrics(), media_type="text/plain")
+
+@app.post("/api/v1/bwc/live/register", tags=["BodyWornCameras"])
+def register_bwc_live_stream(
+    officer_id: str,
+    badge_number: str,
+    device_serial: str,
+    lat: float = None,
+    lng: float = None,
+    db: Session = Depends(get_db)
+):
+    """Registers an active cellular live Body-Worn Camera stream."""
+    return bwc_live_ingest_service.register_live_bwc(
+        db=db,
+        officer_id=officer_id,
+        badge_number=badge_number,
+        device_serial=device_serial,
+        lat=lat,
+        lng=lng
+    )
 
 
 @app.websocket("/api/v1/ws/alerts")

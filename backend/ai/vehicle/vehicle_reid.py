@@ -234,12 +234,13 @@ def detect_vehicle_color(crop: np.ndarray) -> tuple[str, str]:
     return fallback_color, "hsv_fallback"
 
 
-def detect_crop_color(crop: np.ndarray) -> tuple[str, str]:
+def detect_crop_color(crop: np.ndarray) -> str:
     """
     Extracts dominant color for any object crop (vehicles, motorcycles, bags, etc.).
-    Returns (color_name, color_method).
+    Returns color_name string (e.g. 'green', 'black', 'unknown').
     """
-    return detect_vehicle_color(crop)
+    res = detect_vehicle_color(crop)
+    return res[0] if isinstance(res, (tuple, list)) else (res or "unknown")
 
 
 def process_vehicles(frame: np.ndarray, detections: list) -> list:
@@ -418,7 +419,7 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
                         avg_conf = sum(r[2] for r in res) / len(res)
 
                         parsed_res = parse_plate(combined_raw)
-                        target_text = parsed_res["parsed"] if parsed_res.get("parsed") else (combined_raw if len(combined_raw) >= 4 else None)
+                        target_text = parsed_res["parsed"] if (parsed_res and parsed_res.get("parsed")) else None
                         if target_text and avg_conf > best_conf:
                             best_text = target_text
                             best_conf = avg_conf
@@ -453,15 +454,18 @@ def process_vehicles(frame: np.ndarray, detections: list) -> list:
                     ocr_conf = max(p_conf for p_str, p_conf in history if p_str == consensus_plate)
 
         # Explicit audited failure fields (no random vector pollution)
+        raw_ocr_val = raw_str if plate_crop is not None and 'raw_str' in locals() and raw_str else plate_text
         vehicles_detected.append({
             "track_uuid": veh.get("track_uuid") or f"TRK_{veh.get('camera_id', 'cam1')}_{veh['track_id']}",
             "license_plate": plate_text,
+            "raw_ocr_text": raw_ocr_val,
             "ocr_confidence": ocr_conf,
             "vehicle_type": veh["class_name"],
             "vehicle_color": vehicle_color,
             "color_method": color_method,
             "reid_vector": reid_vectors[i],
-            "reid_valid": reid_valid_flags[i]
+            "reid_valid": reid_valid_flags[i],
+            "bbox": veh.get("bbox", [])
         })
 
     return vehicles_detected

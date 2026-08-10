@@ -1,13 +1,20 @@
-﻿import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Box, Typography, Grid, Paper, TextField, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, IconButton, Alert
+  Box, Typography, Grid, Paper, TextField, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, IconButton, Alert, Dialog, DialogTitle, DialogContent, DialogActions, Avatar, Chip, Tooltip
 } from '@mui/material';
 import PersonAddIcon from '@mui/icons-material/PersonAdd';
 import DeleteIcon from '@mui/icons-material/Delete';
 import FileUploadIcon from '@mui/icons-material/FileUpload';
+import AccountCircleIcon from '@mui/icons-material/AccountCircle';
+import EditIcon from '@mui/icons-material/Edit';
+import CheckIcon from '@mui/icons-material/Check';
+import CloseIcon from '@mui/icons-material/Close';
+import SearchIcon from '@mui/icons-material/Search';
+import VideocamIcon from '@mui/icons-material/Videocam';
 
 export default function WatchlistManager({ token }) {
   const [watchlist, setWatchlist] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [photoFile, setPhotoFile] = useState(null);
@@ -15,6 +22,9 @@ export default function WatchlistManager({ token }) {
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
+  const [poiToDelete, setPoiToDelete] = useState(null);
+  const [editingPoiId, setEditingPoiId] = useState(null);
+  const [editingName, setEditingName] = useState('');
   const fileInputRef = useRef(null);
 
   const loadWatchlist = useCallback(() => {
@@ -43,9 +53,10 @@ export default function WatchlistManager({ token }) {
     if (!f) return;
     setPhotoFile(f);
     setSubmitError(null);
-    const reader = new FileReader();
-    reader.onloadend = () => setPhotoPreview(reader.result);
-    reader.readAsDataURL(f);
+    if (photoPreview && photoPreview.startsWith('blob:')) {
+      URL.revokeObjectURL(photoPreview);
+    }
+    setPhotoPreview(URL.createObjectURL(f));
   };
 
   const handleAddPOI = async (e) => {
@@ -89,9 +100,7 @@ export default function WatchlistManager({ token }) {
     }
   };
 
-  const handleDeletePOI = (id) => {
-    if (!window.confirm("Confirm deletion of this target POI from live watchlist?")) return;
-
+  const confirmDeletePOI = (id) => {
     fetch(`/api/v1/watchlist/${id}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${token}` }
@@ -103,6 +112,38 @@ export default function WatchlistManager({ token }) {
       .then(() => loadWatchlist())
       .catch(err => alert(err.message));
   };
+
+  const handleSaveRenamePOI = (poiId) => {
+    if (!editingName.trim()) return;
+    fetch(`/api/v1/watchlist/${poiId}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ name: editingName.trim() })
+    })
+      .then(res => {
+        if (!res.ok) throw new Error("Failed to update POI identity name");
+        return res.json();
+      })
+      .then(() => {
+        setEditingPoiId(null);
+        setEditingName('');
+        loadWatchlist();
+      })
+      .catch(err => alert(err.message));
+  };
+
+  const filteredWatchlist = watchlist.filter(poi => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    return (
+      (poi.name && poi.name.toLowerCase().includes(q)) ||
+      (poi.identity_uuid && poi.identity_uuid.toLowerCase().includes(q)) ||
+      (poi.cams_seen && poi.cams_seen.some(c => c.toLowerCase().includes(q)))
+    );
+  });
 
   return (
     <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
@@ -144,7 +185,14 @@ export default function WatchlistManager({ token }) {
                       color="error" 
                       variant="contained" 
                       sx={{ position: 'absolute', top: 4, right: 4 }}
-                      onClick={() => { setPhotoFile(null); setPhotoPreview(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+                      onClick={() => {
+                        setPhotoFile(null);
+                        if (photoPreview && photoPreview.startsWith('blob:')) {
+                          URL.revokeObjectURL(photoPreview);
+                        }
+                        setPhotoPreview(null);
+                        if (fileInputRef.current) fileInputRef.current.value = '';
+                      }}
                     >
                       Clear
                     </Button>
@@ -188,51 +236,145 @@ export default function WatchlistManager({ token }) {
 
         <Grid size={{ xs: 12, md: 8 }}>
           <Paper variant="outlined" sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
-            <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, borderBottom: '1px solid', borderColor: 'divider', pb: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1.5, borderBottom: '1px solid', borderColor: 'divider', pb: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
               <span>POI WATCHLIST LEDGER</span>
               <Typography variant="caption" color="primary.main" sx={{ border: '1px solid', borderColor: 'primary.main', px: 1, py: 0.25, borderRadius: 1 }}>
                 DPDP 2023 PURGE PROTECTED
               </Typography>
             </Typography>
 
-            <TableContainer sx={{ flexGrow: 1 }}>
+            <Box sx={{ mb: 2, display: 'flex', gap: 1 }}>
+              <TextField
+                size="small"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search POI by Name, ID, or Captured Camera..."
+                fullWidth
+                slotProps={{
+                  input: {
+                    startAdornment: <SearchIcon fontSize="small" sx={{ mr: 1, color: 'text.secondary' }} />
+                  }
+                }}
+              />
+              {searchQuery && (
+                <Button size="small" variant="outlined" onClick={() => setSearchQuery('')}>Clear</Button>
+              )}
+            </Box>
+
+            <TableContainer sx={{ flexGrow: 1, overflowY: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
               <Table size="small">
                 <TableHead>
                   <TableRow>
+                    <TableCell sx={{ fontWeight: 'bold' }}>FACE</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>ID</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>POI IDENTIFIER</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold' }}>POI IDENTIFIER & NAME</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold' }}>CAPTURED CAMERAS HISTORY</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>REGISTERED</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>RETENTION STATUS</TableCell>
                     <TableCell align="center" sx={{ fontWeight: 'bold' }}>ACTION</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {loading ? (
                     <TableRow>
-                      <TableCell colSpan={5} align="center" sx={{ py: 4, color: 'text.secondary' }}>LOADING REGISTRY...</TableCell>
+                      <TableCell colSpan={6} align="center" sx={{ py: 4, color: 'text.secondary' }}>LOADING REGISTRY...</TableCell>
                     </TableRow>
-                  ) : watchlist.length === 0 ? (
+                  ) : filteredWatchlist.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5} align="center" sx={{ py: 6, color: 'text.secondary' }}>[ NO TARGET POI PROFILES ENROLLED ]</TableCell>
+                      <TableCell colSpan={6} align="center" sx={{ py: 6 }}>
+                        <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                          <AccountCircleIcon sx={{ fontSize: 40, color: 'text.secondary', opacity: 0.5 }} />
+                          <Typography variant="subtitle2" fontWeight="bold" color="text.secondary">
+                            {searchQuery ? "No POI target profiles match search query" : "No POI Target Profiles Enrolled"}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Use the target registration form on the left to add suspect photos for real-time facial recognition.
+                          </Typography>
+                        </Box>
+                      </TableCell>
                     </TableRow>
                   ) : (
-                    watchlist.map((poi) => (
-                      <TableRow key={poi.id} hover>
-                        <TableCell sx={{ fontFamily: 'monospace' }}>{poi.identity_uuid}</TableCell>
-                        <TableCell sx={{ fontWeight: 'bold' }}>{poi.name}</TableCell>
-                        <TableCell sx={{ color: 'text.secondary' }}>{poi.first_seen ? poi.first_seen.substring(0, 10) : 'N/A'}</TableCell>
-                        <TableCell>
-                          <Typography variant="caption" color="success.main" sx={{ fontWeight: 'bold', fontFamily: 'monospace' }}>
-                            {poi.dpdp_status || 'DPDP_VERIFIED_ACTIVE'}
-                          </Typography>
-                        </TableCell>
-                        <TableCell align="center">
-                          <IconButton size="small" color="error" onClick={() => handleDeletePOI(poi.id)}>
-                            <DeleteIcon fontSize="small" />
-                          </IconButton>
-                        </TableCell>
-                      </TableRow>
-                    ))
+                    filteredWatchlist.map((poi) => {
+                      const isEditing = editingPoiId === poi.id;
+                      return (
+                        <TableRow key={poi.id} hover>
+                          <TableCell>
+                            <Avatar
+                              src={poi.face_crop_url}
+                              variant="rounded"
+                              sx={{ width: 44, height: 44, border: '1.5px solid', borderColor: 'primary.main', backgroundColor: '#0a0f1d' }}
+                            >
+                              <AccountCircleIcon />
+                            </Avatar>
+                          </TableCell>
+                          <TableCell sx={{ fontFamily: 'monospace', fontWeight: 'bold' }}>{poi.identity_uuid}</TableCell>
+                          <TableCell>
+                            {isEditing ? (
+                              <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+                                <TextField
+                                  size="small"
+                                  value={editingName}
+                                  onChange={(e) => setEditingName(e.target.value)}
+                                  autoFocus
+                                  sx={{ width: 160 }}
+                                />
+                                <IconButton size="small" color="success" onClick={() => handleSaveRenamePOI(poi.id)}>
+                                  <CheckIcon fontSize="small" />
+                                </IconButton>
+                                <IconButton size="small" color="inherit" onClick={() => setEditingPoiId(null)}>
+                                  <CloseIcon fontSize="small" />
+                                </IconButton>
+                              </Box>
+                            ) : (
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <Typography variant="body2" fontWeight="bold">{poi.name}</Typography>
+                                <Tooltip title="Edit Person Name">
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => {
+                                      setEditingPoiId(poi.id);
+                                      setEditingName(poi.name);
+                                    }}
+                                  >
+                                    <EditIcon fontSize="small" sx={{ fontSize: 16, opacity: 0.7 }} />
+                                  </IconButton>
+                                </Tooltip>
+                              </Box>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', maxWidth: 220 }}>
+                              {poi.cams_seen && poi.cams_seen.length > 0 ? (
+                                poi.cams_seen.map((cam, idx) => (
+                                  <Chip
+                                    key={idx}
+                                    icon={<VideocamIcon style={{ fontSize: 14 }} />}
+                                    label={cam}
+                                    size="small"
+                                    color="info"
+                                    variant="outlined"
+                                  />
+                                ))
+                              ) : (
+                                <Chip label="No Camera Detections Yet" size="small" variant="outlined" color="default" sx={{ opacity: 0.6 }} />
+                              )}
+                            </Box>
+                          </TableCell>
+                          <TableCell sx={{ color: 'text.secondary', fontSize: '0.8rem' }}>
+                            {poi.first_seen ? poi.first_seen.substring(0, 10) : 'N/A'}
+                          </TableCell>
+                          <TableCell align="center">
+                            <IconButton
+                              size="small"
+                              color="error"
+                              aria-label={`Delete POI ${poi.name}`}
+                              onClick={() => setPoiToDelete(poi)}
+                            >
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
                   )}
                 </TableBody>
               </Table>
@@ -240,6 +382,32 @@ export default function WatchlistManager({ token }) {
           </Paper>
         </Grid>
       </Grid>
+
+      {/* POI Deletion Confirmation Dialog (Issue 6) */}
+      <Dialog open={Boolean(poiToDelete)} onClose={() => setPoiToDelete(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>Confirm POI Removal</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            Are you sure you want to remove target POI <strong>"{poiToDelete?.name}"</strong> from the active watchlist registry? Facial recognition embeddings for this target will be purged.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setPoiToDelete(null)} variant="outlined">Cancel</Button>
+          <Button
+            onClick={() => {
+              if (poiToDelete) {
+                confirmDeletePOI(poiToDelete.id);
+                setPoiToDelete(null);
+              }
+            }}
+            color="error"
+            variant="contained"
+          >
+            Remove Target
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
+

@@ -18,6 +18,37 @@ import MonitorHeartIcon from '@mui/icons-material/MonitorHeart';
 import AccountCircleIcon from '@mui/icons-material/AccountCircle';
 import MenuIcon from '@mui/icons-material/Menu';
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong';
+import AccessTimeIcon from '@mui/icons-material/AccessTime';
+
+function ISTClock() {
+  const [timeStr, setTimeStr] = useState('');
+
+  useEffect(() => {
+    const updateTime = () => {
+      const now = new Date();
+      const formatted = now.toLocaleTimeString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      }).toUpperCase();
+      setTimeStr(formatted);
+    };
+
+    updateTime();
+    const interval = setInterval(updateTime, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+      <AccessTimeIcon sx={{ fontSize: 13, color: '#00e676' }} />
+      <Typography variant="caption" sx={{ fontFamily: 'monospace', fontWeight: 'bold', color: '#00e676', letterSpacing: '0.5px' }}>
+        {timeStr} IST
+      </Typography>
+    </Box>
+  );
+}
 
 // Components
 import LiveGrid from './components/LiveGrid';
@@ -52,6 +83,7 @@ export default function App() {
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [anchorEl, setAnchorEl] = useState(null);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [showMobileSearch, setShowMobileSearch] = useState(false);
 
   // Global Search State
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
@@ -607,8 +639,9 @@ export default function App() {
           })}
         </List>
       </Box>
-      <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Typography variant="caption" color="text.secondary">SYBAU SECURE CONSOLE v1.1</Typography>
+      <Box sx={{ p: 1.5, borderTop: '1px solid', borderColor: 'divider', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 0.5 }}>
+        <ISTClock />
+        <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem', opacity: 0.8 }}>SYBAU SECURE CONSOLE v1.1</Typography>
       </Box>
     </Box>
   );
@@ -619,10 +652,10 @@ export default function App() {
       <Box sx={{ display: 'flex', minHeight: '100vh', backgroundColor: 'background.default' }}>
         {/* Top Navbar */}
         <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1, backdropFilter: 'blur(10px)' }}>
-          <Toolbar sx={{ justifyContent: 'space-between' }}>
+          <Toolbar sx={{ justifyContent: 'space-between', gap: 1 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               {!isMdUp && (
-                <IconButton color="inherit" onClick={() => setMobileOpen(!mobileOpen)} sx={{ mr: 1 }}>
+                <IconButton color="inherit" onClick={() => setMobileOpen(!mobileOpen)} aria-label="Open navigation drawer" sx={{ mr: 1 }}>
                   <MenuIcon />
                 </IconButton>
               )}
@@ -665,7 +698,7 @@ export default function App() {
               </Tooltip>
             </Box>
 
-            {/* Global Search Box */}
+            {/* Global Search Box (Desktop) */}
             <Box component="form" onSubmit={handleGlobalSearchSubmit} sx={{ mx: 3, flexGrow: 0.3, display: { xs: 'none', sm: 'block' } }}>
               <TextField
                 size="small"
@@ -693,7 +726,17 @@ export default function App() {
             </Box>
 
             {/* Session Actions & Switchers */}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              {/* Mobile Search Toggle Icon */}
+              <IconButton
+                color="inherit"
+                aria-label="Toggle mobile search"
+                onClick={() => setShowMobileSearch(!showMobileSearch)}
+                sx={{ display: { xs: 'flex', sm: 'none' } }}
+              >
+                <SearchIcon />
+              </IconButton>
+
               <Chip
                 label={role.toUpperCase()}
                 color={role === 'admin' ? 'error' : role === 'operator' ? 'primary' : 'default'}
@@ -721,6 +764,29 @@ export default function App() {
               </Menu>
             </Box>
           </Toolbar>
+
+          {/* Mobile Search Expandable Input Overlay */}
+          {showMobileSearch && (
+            <Box component="form" onSubmit={handleGlobalSearchSubmit} sx={{ p: 1, px: 2, display: { xs: 'block', sm: 'none' }, borderTop: '1px solid', borderColor: 'divider' }}>
+              <TextField
+                size="small"
+                fullWidth
+                autoFocus
+                placeholder="Search telemetry..."
+                value={globalSearchQuery}
+                onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                slotProps={{
+                  input: {
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <SearchIcon fontSize="small" color="action" />
+                      </InputAdornment>
+                    ),
+                  }
+                }}
+              />
+            </Box>
+          )}
         </AppBar>
 
         {/* Sidebar Responsive Drawer */}
@@ -868,11 +934,11 @@ export default function App() {
 
         {/* BUG-6 FIX: Forced Password Change Dialog — blocks app access until completed */}
         <Dialog open={!!token && mustChangePassword} fullWidth maxWidth="xs" disableEscapeKeyDown>
-          <DialogTitle sx={{ bgcolor: '#0d0d0d', color: '#f2f2f2', borderBottom: '1px solid #232323' }}>
+          <DialogTitle sx={{ bgcolor: 'background.paper', color: 'text.primary', borderBottom: '1px solid', borderColor: 'divider' }}>
             🔐 Password Change Required
           </DialogTitle>
-          <DialogContent sx={{ bgcolor: '#0d0d0d', color: '#f2f2f2', pt: 3 }}>
-            <Typography variant="body2" sx={{ mb: 2, color: '#aaa' }}>
+          <DialogContent sx={{ bgcolor: 'background.paper', color: 'text.primary', pt: 3 }}>
+            <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
               Your account requires a password change before you can access the system.
             </Typography>
             {forcePwdError && <Alert severity="error" sx={{ mb: 2 }}>{forcePwdError}</Alert>}
@@ -880,24 +946,22 @@ export default function App() {
               fullWidth label="Current Password" type="password"
               value={forcePwdCurrentInput}
               onChange={e => setForcePwdCurrentInput(e.target.value)}
-              sx={{ mb: 2, '& .MuiOutlinedInput-root': { color: '#fff', '& fieldset': { borderColor: '#333' } }, '& .MuiInputLabel-root': { color: '#888' } }}
+              sx={{ mb: 2 }}
             />
             <TextField
               fullWidth label="New Password" type="password"
               value={forcePwdNewInput}
               onChange={e => setForcePwdNewInput(e.target.value)}
               helperText="Min 8 chars, must include upper, lower, and a digit."
-              FormHelperTextProps={{ style: { color: '#666' } }}
-              sx={{ '& .MuiOutlinedInput-root': { color: '#fff', '& fieldset': { borderColor: '#333' } }, '& .MuiInputLabel-root': { color: '#888' } }}
             />
           </DialogContent>
-          <DialogActions sx={{ bgcolor: '#0d0d0d', borderTop: '1px solid #232323', p: 2, gap: 1 }}>
+          <DialogActions sx={{ bgcolor: 'background.paper', borderTop: '1px solid', borderColor: 'divider', p: 2, gap: 1 }}>
             <Button onClick={handleLogout} variant="outlined" color="error">Cancel & Logout</Button>
             <Button
               onClick={handleForcedPasswordChange}
               variant="contained"
               disabled={forcePwdLoading || !forcePwdCurrentInput || !forcePwdNewInput}
-              sx={{ bgcolor: '#00e676', color: '#000', fontWeight: 700, '&:hover': { bgcolor: '#00c853' } }}
+              sx={{ fontWeight: 700 }}
             >
               {forcePwdLoading ? 'Changing...' : 'Change Password'}
             </Button>

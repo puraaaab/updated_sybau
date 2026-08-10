@@ -55,13 +55,6 @@ def _correct_state(code: str) -> tuple:
     letter_code = ''.join(_to_letter(c) for c in code)
     if letter_code in VALID_STATES:
         return letter_code, True
-    closest, min_dist = None, 999
-    for state in VALID_STATES:
-        d = _edit_distance(letter_code, state)
-        if d < min_dist:
-            min_dist, closest = d, state
-    if min_dist <= 1:
-        return closest, True
     return code, False
 
 def _clean(raw: str) -> str:
@@ -71,40 +64,41 @@ def _clean(raw: str) -> str:
 
 def _parse_standard(txt: str):
     """
-    Parse as standard Indian plate: [ST][##][L{0-3}][####]
-    Requires strict character compliance after correction.
+    Parse as standard Indian plate: [ST][##][L{0-3}][#{1-4}]
+    Requires strict character compliance after positional correction.
     """
-    if not (8 <= len(txt) <= 11):
+    if not (5 <= len(txt) <= 11):
         return None, None
 
     for series_len in [2, 3, 1, 0]:
-        total = 2 + 2 + series_len + 4
-        if len(txt) != total:
-            continue
-            
-        state_raw  = txt[0:2]
-        rto_raw    = txt[2:4]
-        series_raw = txt[4:4 + series_len]
-        serial_raw = txt[4 + series_len:]
+        for serial_len in [4, 3, 2, 1]:
+            total = 2 + 2 + series_len + serial_len
+            if len(txt) != total:
+                continue
 
-        state, state_fixed = _correct_state(state_raw)
-        if state not in VALID_STATES:
-            continue
+            state_raw  = txt[0:2]
+            rto_raw    = txt[2:4]
+            series_raw = txt[4:4 + series_len]
+            serial_raw = txt[4 + series_len:]
 
-        rto = _apply_positional(rto_raw, 'DD')
-        if not re.match(r'^\d{2}$', rto):
-            continue
-            
-        series = _apply_positional(series_raw, 'L' * series_len)
-        if not re.match(r'^[A-Z]*$', series):
-            continue
+            state, state_fixed = _correct_state(state_raw)
+            if state not in VALID_STATES:
+                continue
 
-        serial = _apply_positional(serial_raw, 'DDDD')
-        if not re.match(r'^\d{4}$', serial):
-            continue
-            
-        parsed = f"{state}{rto}{series}{serial}"
-        return parsed, "standard" if series_len > 0 else "standard_no_series"
+            rto = _apply_positional(rto_raw, 'DD')
+            if not re.match(r'^\d{2}$', rto):
+                continue
+
+            series = _apply_positional(series_raw, 'L' * series_len)
+            if not re.match(r'^[A-Z]*$', series):
+                continue
+
+            serial = _apply_positional(serial_raw, 'D' * serial_len)
+            if not re.match(r'^\d+$', serial):
+                continue
+
+            parsed = f"{state}{rto}{series}{serial}"
+            return parsed, "standard" if series_len > 0 else "standard_no_series"
 
     return None, None
 
