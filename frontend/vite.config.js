@@ -10,6 +10,7 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
+        ws: true,
         rewrite: (path) => path.startsWith('/api/v1') ? path : path.replace(/^\/api/, '/api/v1'),
         configure: (proxy) => {
           proxy.on('error', (err, _req, res) => {

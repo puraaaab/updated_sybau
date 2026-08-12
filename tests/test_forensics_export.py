@@ -20,7 +20,8 @@ def get_auth_header():
 
 def test_create_forensic_export_endpoint():
     headers = get_auth_header()
-    response = client.post("/api/v1/forensics/export?camera_id=cam_1", headers=headers)
+    # Use cyber_cam_6 which has actual valid recorded MP4 video files
+    response = client.post("/api/v1/forensics/export?camera_id=cyber_cam_6", headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert "export_filename" in data
@@ -40,7 +41,8 @@ def test_build_export_package_dual_hashes_and_method():
     Session = sessionmaker(bind=engine)
     db = Session()
 
-    _now = datetime.datetime.now(datetime.timezone.utc)
+    from backend.utils.timezone import get_ist_now
+    _now = get_ist_now()
     alert = Alert(
         camera_id="cam_test_export",
         type="loitering",

@@ -70,14 +70,14 @@ export default function RecordsConsole({ token }) {
       const res = await fetch('/api/v1/records/stats', { headers: authHeaders });
       if (res.ok) {
         const data = await res.json();
-        setStats(prev => ({
-          faces_count: Math.max(prev.faces_count, data.faces_count || 0),
-          vehicles_count: Math.max(prev.vehicles_count, data.vehicles_count || 0),
-          plates_count: Math.max(prev.plates_count, data.plates_count || 0),
-          ocr_count: Math.max(prev.ocr_count, data.ocr_count || 0),
-          captions_count: Math.max(prev.captions_count, data.captions_count || 0),
-          identities_count: Math.max(prev.identities_count, data.identities_count || 0),
-        }));
+        setStats({
+          faces_count: data.faces_count || 0,
+          vehicles_count: data.vehicles_count || 0,
+          plates_count: data.plates_count || 0,
+          ocr_count: data.ocr_count || 0,
+          captions_count: data.captions_count || 0,
+          identities_count: data.identities_count || 0,
+        });
       }
     } catch (err) {
       console.error("Error fetching record stats:", err);
@@ -97,7 +97,9 @@ export default function RecordsConsole({ token }) {
         if (res.ok) {
           const data = await res.json();
           setFacesData(data);
-          setStats(prev => ({ ...prev, faces_count: Math.max(prev.faces_count, data.total || 0) }));
+          if (typeof data.total === 'number') {
+            setStats(prev => ({ ...prev, faces_count: data.total }));
+          }
         }
       } else if (activeTab === 1) {
         // Vehicles
@@ -105,7 +107,9 @@ export default function RecordsConsole({ token }) {
         if (res.ok) {
           const data = await res.json();
           setVehiclesData(data);
-          setStats(prev => ({ ...prev, vehicles_count: Math.max(prev.vehicles_count, data.total || 0) }));
+          if (typeof data.total === 'number') {
+            setStats(prev => ({ ...prev, vehicles_count: data.total }));
+          }
         }
       } else if (activeTab === 2) {
         // Number Plates
@@ -113,7 +117,9 @@ export default function RecordsConsole({ token }) {
         if (res.ok) {
           const data = await res.json();
           setPlatesData(data);
-          setStats(prev => ({ ...prev, plates_count: Math.max(prev.plates_count, data.total || 0) }));
+          if (typeof data.total === 'number') {
+            setStats(prev => ({ ...prev, plates_count: data.total }));
+          }
         }
       } else if (activeTab === 3) {
         // Raw OCR
@@ -121,7 +127,9 @@ export default function RecordsConsole({ token }) {
         if (res.ok) {
           const data = await res.json();
           setOcrData(data);
-          setStats(prev => ({ ...prev, ocr_count: Math.max(prev.ocr_count, data.total || 0) }));
+          if (typeof data.total === 'number') {
+            setStats(prev => ({ ...prev, ocr_count: data.total }));
+          }
         }
       } else if (activeTab === 4) {
         // Captions
@@ -129,7 +137,9 @@ export default function RecordsConsole({ token }) {
         if (res.ok) {
           const data = await res.json();
           setCaptionsData(data);
-          setStats(prev => ({ ...prev, captions_count: Math.max(prev.captions_count, data.total || 0) }));
+          if (typeof data.total === 'number') {
+            setStats(prev => ({ ...prev, captions_count: data.total }));
+          }
         }
       }
     } catch (err) {
@@ -142,7 +152,7 @@ export default function RecordsConsole({ token }) {
   useEffect(() => {
     fetchStats();
     fetchTabData();
-  }, [activeTab, page, rowsPerPage, sortOrder, token]);
+  }, [activeTab, page, rowsPerPage, sortOrder, token, searchQuery]);
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
@@ -215,11 +225,11 @@ export default function RecordsConsole({ token }) {
     document.body.removeChild(link);
   };
 
-  const facesCount = Math.max(stats.faces_count || 0, facesData.total || 0);
-  const vehiclesCount = Math.max(stats.vehicles_count || 0, vehiclesData.total || 0);
-  const platesCount = Math.max(stats.plates_count || 0, platesData.total || 0);
-  const ocrCount = Math.max(stats.ocr_count || 0, ocrData.total || 0);
-  const captionsCount = Math.max(stats.captions_count || 0, captionsData.total || 0);
+  const facesCount = stats.faces_count || 0;
+  const vehiclesCount = stats.vehicles_count || 0;
+  const platesCount = stats.plates_count || 0;
+  const ocrCount = stats.ocr_count || 0;
+  const captionsCount = stats.captions_count || 0;
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 85px)', overflow: 'hidden', p: 2 }}>
@@ -646,71 +656,150 @@ export default function RecordsConsole({ token }) {
             )}
 
             {/* Tab 4: AI Scene Captions Log */}
-            {activeTab === 4 && (
-              <TableContainer sx={{ flexGrow: 1, overflowY: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 'bold', width: '90px' }}>Snapshot</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold', width: '120px' }}>Camera ID</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Generated AI Scene Caption</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold', width: '180px' }}>Timestamp</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {captionsData.items.length === 0 ? (
-                      <TableRow><TableCell colSpan={4} align="center">No generated scene captions logged yet.</TableCell></TableRow>
-                    ) : (
-                      captionsData.items.map((row) => (
-                        <TableRow key={row.id} hover>
-                          <TableCell>
-                            {row.snapshot_url ? (
-                              <Box
-                                component="img"
-                                src={row.snapshot_url}
-                                alt="AI Scene Frame"
-                                onClick={() => setPreviewImage({ url: row.snapshot_url, caption: row.caption, camera_id: row.camera_id, timestamp: row.timestamp })}
-                                sx={{
-                                  width: 64,
-                                  height: 44,
-                                  borderRadius: 1,
-                                  objectFit: 'cover',
-                                  border: '1px solid #38bdf8',
-                                  cursor: 'pointer',
-                                  transition: 'transform 0.2s',
-                                  '&:hover': { transform: 'scale(1.08)', boxShadow: '0 0 8px rgba(56, 189, 248, 0.6)' }
-                                }}
-                              />
-                            ) : (
-                              <CameraAltIcon color="action" />
-                            )}
-                          </TableCell>
-                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{row.camera_id}</TableCell>
-                          <TableCell>
-                            <Typography
-                              variant="body2"
-                              onClick={() => row.snapshot_url && setPreviewImage({ url: row.snapshot_url, caption: row.caption, camera_id: row.camera_id, timestamp: row.timestamp })}
-                              sx={{
-                                fontFamily: 'monospace',
-                                color: '#e0e0e0',
-                                backgroundColor: 'rgba(0,0,0,0.3)',
-                                p: 1,
-                                borderRadius: 1,
-                                cursor: row.snapshot_url ? 'pointer' : 'default',
-                                '&:hover': row.snapshot_url ? { backgroundColor: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8' } : {}
-                              }}
-                            >
-                              {row.caption}
-                            </Typography>
-                          </TableCell>
-                          <TableCell color="text.secondary">{row.timestamp}</TableCell>
-                        </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
-              </TableContainer>
-            )}
+            {activeTab === 4 && (() => {
+              // ── Timestamp helpers (scoped to this tab) ─────────────────────
+              // Parse ts= field from stored caption string. Returns Date or null.
+              const parseCaptureTsRC = (caption) => {
+                try {
+                  const m = caption?.match(/\bts=(\S+)/);
+                  if (!m) return null;  // No ts= in caption → show only DB time
+                  const d = new Date(m[1]);
+                  return isNaN(d.getTime()) ? null : d;  // Invalid date → fallback
+                } catch { return null; }
+              };
+
+              // Strip ts= field from the displayed caption text (keep it clean).
+              const stripTs = (caption) => {
+                try { return caption?.replace(/\s*\|\s*ts=\S+/, '').trim() || '[No caption]'; }
+                catch { return caption || '[No caption]'; }
+              };
+
+              // Format a Date into HH:MM:SS IST string for display.
+              const fmtTime = (d) => {
+                try {
+                  return d.toLocaleTimeString('en-IN', { hour12: false, timeZone: 'Asia/Kolkata' });
+                } catch { return null; }
+              };
+
+              // Human-readable processing lag between capture time and DB stored time.
+              const getLag = (capturedAt, storedAtStr) => {
+                try {
+                  if (!capturedAt || !storedAtStr) return null;
+                  const storedAt = new Date(storedAtStr);
+                  if (isNaN(storedAt.getTime())) return null;
+                  const lagSeconds = Math.round((storedAt - capturedAt) / 1000);
+                  if (lagSeconds < 0) return null;      // Clock skew → hide
+                  if (lagSeconds > 3600) return null;   // >1 hr → too old to be useful
+                  if (lagSeconds < 60) return { label: `⚡ ${lagSeconds}s`, ok: true };
+                  return { label: `⚠ ${Math.floor(lagSeconds / 60)}m ${lagSeconds % 60}s`, ok: false };
+                } catch { return null; }
+              };
+              // ────────────────────────────────────────────────────────────────
+
+              return (
+                <TableContainer sx={{ flexGrow: 1, overflowY: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell sx={{ fontWeight: 'bold', width: '90px' }}>Snapshot</TableCell>
+                        <TableCell sx={{ fontWeight: 'bold', width: '120px' }}>Camera</TableCell>
+                        <TableCell sx={{ fontWeight: 'bold' }}>AI Scene Caption</TableCell>
+                        <TableCell sx={{ fontWeight: 'bold', width: '210px' }}>Timestamps</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {(captionsData.items || []).length === 0 ? (
+                        <TableRow><TableCell colSpan={4} align="center">No generated scene captions logged yet.</TableCell></TableRow>
+                      ) : (
+                        captionsData.items.map((row) => {
+                          const capturedAt = parseCaptureTsRC(row.caption);
+                          const capturedTime = capturedAt ? fmtTime(capturedAt) : null;
+                          const lag = getLag(capturedAt, row.timestamp);
+                          const cleanCaption = stripTs(row.caption);
+
+                          return (
+                            <TableRow key={row.id} hover>
+                              <TableCell>
+                                {row.snapshot_url ? (
+                                  <Box
+                                    component="img"
+                                    src={row.snapshot_url}
+                                    alt="AI Scene Frame"
+                                    onClick={() => setPreviewImage({ url: row.snapshot_url, caption: cleanCaption, camera_id: row.camera_id, timestamp: row.timestamp })}
+                                    sx={{
+                                      width: 64, height: 44, borderRadius: 1, objectFit: 'cover',
+                                      border: '1px solid #38bdf8', cursor: 'pointer',
+                                      transition: 'transform 0.2s',
+                                      '&:hover': { transform: 'scale(1.08)', boxShadow: '0 0 8px rgba(56,189,248,0.6)' }
+                                    }}
+                                  />
+                                ) : (
+                                  <CameraAltIcon color="action" />
+                                )}
+                              </TableCell>
+                              <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{row.camera_id}</TableCell>
+                              <TableCell>
+                                <Typography
+                                  variant="body2"
+                                  onClick={() => row.snapshot_url && setPreviewImage({ url: row.snapshot_url, caption: cleanCaption, camera_id: row.camera_id, timestamp: row.timestamp })}
+                                  sx={{
+                                    fontFamily: 'monospace', color: '#e0e0e0',
+                                    backgroundColor: 'rgba(0,0,0,0.3)', p: 1, borderRadius: 1,
+                                    cursor: row.snapshot_url ? 'pointer' : 'default',
+                                    '&:hover': row.snapshot_url ? { backgroundColor: 'rgba(56,189,248,0.1)', color: '#38bdf8' } : {}
+                                  }}
+                                >
+                                  {cleanCaption}
+                                </Typography>
+                              </TableCell>
+                              <TableCell>
+                                {/* Frame captured at — from ts= embedded in caption */}
+                                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.4 }}>
+                                  {capturedTime ? (
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                      <Typography variant="caption" sx={{ color: '#94a3b8', minWidth: 58 }}>📷 captured</Typography>
+                                      <Typography variant="caption" sx={{ fontFamily: 'monospace', color: '#e2e8f0', fontWeight: 600 }}>
+                                        {capturedTime}
+                                      </Typography>
+                                    </Box>
+                                  ) : null}
+                                  {/* Stored at — from DB timestamp column */}
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                    <Typography variant="caption" sx={{ color: '#94a3b8', minWidth: 58 }}>
+                                      {capturedTime ? '💾 stored' : '🕒 time'}
+                                    </Typography>
+                                    <Typography variant="caption" sx={{ fontFamily: 'monospace', color: '#94a3b8' }}>
+                                      {row.timestamp
+                                        ? (() => { try { return fmtTime(new Date(row.timestamp)) || row.timestamp; } catch { return row.timestamp; } })()
+                                        : 'unknown'}
+                                    </Typography>
+                                  </Box>
+                                  {/* Processing lag badge */}
+                                  {lag && (
+                                    <Chip
+                                      label={lag.label}
+                                      size="small"
+                                      sx={{
+                                        height: 16, fontSize: '0.6rem', fontFamily: 'monospace',
+                                        alignSelf: 'flex-start',
+                                        backgroundColor: lag.ok ? 'rgba(34,197,94,0.15)' : 'rgba(245,158,11,0.15)',
+                                        color: lag.ok ? '#22c55e' : '#f59e0b',
+                                        border: `1px solid ${lag.ok ? 'rgba(34,197,94,0.4)' : 'rgba(245,158,11,0.4)'}`,
+                                      }}
+                                    />
+                                  )}
+                                </Box>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })
+                      )}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              );
+            })()}
+
 
             {/* Snapshot Preview Dialog */}
             <Dialog

@@ -436,10 +436,9 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
             timestamp: p.timestamp ? p.timestamp.substring(0, 19).replace('T', ' ') : 'N/A',
             confidence: Math.round(score * 100),
             snapshot_path: resolveSnapshotUrl(
+              p.snapshot_url ||
               p.full_snapshot_url ||
-              p.full_scene_url ||
-              (p.camera_id ? `/api/v1/playback/snapshot/full_cam_${p.camera_id}` : null) ||
-              p.snapshot_url
+              p.full_scene_url
             ),
             target_label: query.trim() || p.vehicle_type || p.label || 'Target',
             bbox_style: computeBboxStyle(p.bbox)

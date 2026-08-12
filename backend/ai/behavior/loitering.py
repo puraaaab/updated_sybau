@@ -17,7 +17,8 @@ class LoiteringDetector:
         cy = bbox[3]
 
         track_id = track_info["track_id"]
-        now = datetime.datetime.now(datetime.timezone.utc)
+        from ...utils.timezone import get_ist_now
+        now = get_ist_now()
 
         in_loitering_zone = False
         active_zone_name = ""

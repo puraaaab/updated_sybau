@@ -1,5 +1,6 @@
 import logging
 import uuid
+import datetime
 import numpy as np
 from ..detection.yolo import detect_and_track
 from ..tracking.tracker import trajectory_tracker
@@ -12,6 +13,9 @@ from ..embeddings.embedder import get_text_embedding
 from ...config.service import get_models
 
 logger = logging.getLogger(__name__)
+
+# IST timezone constant (Indian Standard Time +05:30) used to stamp every frame at capture time
+_IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: dict, frame_idx: int) -> dict:
     from ..scheduler import inference_scheduler
@@ -27,7 +31,19 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     corr_id = f"img_{uuid.uuid4().hex[:12]}"
     if florence_enabled and (n_frames <= 1 or frame_idx % n_frames == 0):
         try:
-            florence_queued = submit_async_scene_caption(frame, camera_id=camera_id, corr_id=corr_id)
+            # Stamp the exact IST wall-clock moment this frame was captured.
+            # Embedded as ts= in the stored caption so the UI can show "captured X ago".
+            # Fallback: empty string — caption stored without ts= rather than crashing.
+            try:
+                frame_ts = datetime.datetime.now(_IST).strftime("%Y-%m-%dT%H:%M:%S+05:30")
+            except Exception:
+                frame_ts = ""
+            florence_queued = submit_async_scene_caption(
+                frame,
+                camera_id=camera_id,
+                corr_id=corr_id,
+                frame_ts=frame_ts,
+            )
         except Exception as e:
             logger.warning(f"[{camera_id}] Parallel Florence dispatch error: {e}")
 
@@ -94,8 +110,9 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
             # Map Indian 3-wheeler geometry (COCO truck/car fallback to auto-rickshaw)
             if v_type in ("auto_rickshaw", "rickshaw", "tuktuk", "three_wheeler"):
                 v_type = "auto-rickshaw"
-            elif v_type == "truck":
-                # Check bounding box aspect ratio: 3-wheelers are upright (w/h between 0.85 and 1.4)
+            elif v_type in ("truck", "bus"):
+                # Check bounding box aspect ratio: 3-wheelers are upright (w/h between 0.75 and 1.45)
+                # YOLO frequently misclassifies Indian auto-rickshaws as 'truck' or 'bus'
                 bbox = v.get("bbox") or [0, 0, 100, 100]
                 bw, bh = max(1, bbox[2] - bbox[0]), max(1, bbox[3] - bbox[1])
                 aspect = bw / float(bh)
@@ -218,5 +235,27 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
         "alerts": alerts,
         "caption": caption,
         "embedding": embedding,
-        "florence_queued": florence_queued
+        "florence_queued": florence_queued,
+        # BUG-05 FIX: dominant YOLO class for this frame stored as structured
+        # Qdrant payload field so semantic search can filter by class label.
+        "dominant_class": _compute_dominant_class(tracks),
     }
+
+
+def _compute_dominant_class(tracks: list) -> str | None:
+    """Returns the most-detected object class in `tracks` by count.
+    Used as the `yolo_class` payload field in the Qdrant scene vector so
+    semantic search can apply a class-label filter to avoid cross-class
+    mismatches (e.g. 'black car' matching a 'black motorcycle' caption).
+    """
+    if not tracks:
+        return None
+    counts: dict = {}
+    for t in tracks:
+        cls = t.get("class_name")
+        if cls and cls != "license_plate":
+            counts[cls] = counts.get(cls, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=counts.__getitem__)
+

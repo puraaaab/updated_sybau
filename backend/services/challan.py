@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from ..database.connection import get_db
 from ..database.models import Alert, Camera, Vehicle, AuditLog
 from ..auth.helpers import verify_operator
+from ..utils.timezone import get_ist_now
 
 router = APIRouter(prefix="/challan", tags=["E-Challan Citation"])
 
@@ -36,7 +37,7 @@ def _generate_qr_base64(payment_url: str) -> str:
     qr.make(fit=True)
     img = qr.make_image(fill_color="#0f172a", back_color="#ffffff")
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    img.save(buf, "PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
@@ -63,8 +64,8 @@ def generate_echallan_citation(
     lat = getattr(cam, "latitude", 21.1950) if cam else 21.1950
     lng = getattr(cam, "longitude", 72.8200) if cam else 72.8200
 
-    now = datetime.datetime.now(datetime.timezone.utc)
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+    now = get_ist_now()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S IST")
     citation_no = f"CHLN-2026-SURAT-{alert.id:06d}"
 
     # Lookup matching Vehicle record for license plate & vehicle type
@@ -187,7 +188,7 @@ def generate_echallan_citation(
 
             <div class="grid">
                 <div class="item"><label>Citation Number</label><span>{citation_no}</span></div>
-                <div class="item"><label>Issue Date &amp; Time (UTC)</label><span>{now_str}</span></div>
+                <div class="item"><label>Issue Date &amp; Time (IST)</label><span>{now_str}</span></div>
                 <div class="item"><label>Target License Plate</label><span style="color:#f59e0b;">{license_plate}</span></div>
                 <div class="item"><label>Vehicle Category / Color</label><span>{vehicle_type} ({vehicle_color})</span></div>
                 <div class="item"><label>Offence Classification</label><span>{violation_title}</span></div>

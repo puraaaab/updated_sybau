@@ -22,12 +22,12 @@
   },
   "florence": {
     "enabled": true,
-    "model_id": "microsoft/Florence-2-large",
+    "model_id": "microsoft/Florence-2-base",
     "device": "cuda",
     "invoke_every_n_frames": 4,
     "dispatch_interval_seconds": 0.5,
     "caption_batch_size": 1,
-    "max_new_tokens": 1024
+    "max_new_tokens": 64
   },
   "moondream": {
     "enabled": true,

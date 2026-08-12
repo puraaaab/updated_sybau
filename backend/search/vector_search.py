@@ -39,7 +39,9 @@ _TEXT_REPLACEMENTS = {
     "girl": "woman", "lady": "woman",
     "tuktuk": "rickshaw", "tuk-tuk": "rickshaw",
     "auto": "rickshaw", "auto-rickshaw": "rickshaw",
-    "automobile": "car", "vehicle": "car", "sedan": "car", "suv": "car",
+    "automobile": "car", "sedan": "car", "suv": "car",
+    # BUG-05 FIX: motorcycle synonyms so 'bike' and 'motorbike' queries work
+    "bike": "motorcycle", "motorbike": "motorcycle", "moto": "motorcycle",
     "footpath": "sidewalk", "pavement": "sidewalk",
     "handbag": "bag", "backpack": "bag", "purse": "bag"
 }
@@ -355,6 +357,21 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
             except Exception as e:
                 logger.debug(f"Qdrant vehicle query note: {e}")
 
+        # BUG-05 FIX: detect vehicle-class keywords in the query so we can
+        # penalise results whose yolo_class contradicts the requested class.
+        _VEHICLE_CLASSES = {
+            "car", "motorcycle", "truck", "bus", "bicycle",
+            "van", "suv", "rickshaw", "scooter", "moped"
+        }
+        q_lower_norm = normalize_text(query_text)
+        query_vehicle_class = next(
+            (c for c in _VEHICLE_CLASSES if c in q_lower_norm.split()), None
+        )
+
+        # BUG-05 FIX: minimum cosine similarity threshold for scene vectors.
+        # Scores below this are noise — discard before applying keyword boost.
+        MIN_SCENE_SCORE = 0.55
+
         if qd_results:
             results = []
             seen_snapshots = set()
@@ -362,6 +379,13 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
             existing_snaps = set(os.listdir(snap_dir)) if os.path.exists(snap_dir) else set()
 
             for r in qd_results:
+                base_score = float(r.score)
+
+                # Drop scene results below the minimum similarity threshold
+                p_type = r.payload.get("type", "")
+                if p_type == "scene" and base_score < MIN_SCENE_SCORE:
+                    continue
+
                 snap_url = r.payload.get("snapshot_url") or ""
                 cam_id = r.payload.get("camera_id") or ""
                 snap_id = snap_url.split("/")[-1] if snap_url else ""
@@ -375,13 +399,12 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
                     has_file = (
                         f"{snap_id}.jpg" in existing_snaps or 
                         snap_id in existing_snaps or 
-                        (cam_id and f"full_cam_{cam_id}.jpg" in existing_snaps) or
                         f"full_{snap_id}.jpg" in existing_snaps
                     )
                     if not has_file:
                         continue
 
-                score = float(r.score)
+                score = base_score
                 text_to_compare = " ".join(filter(None, [
                     str(r.payload.get("caption") or ""),
                     str(r.payload.get("upper_color") or ""),
@@ -391,14 +414,23 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
                     str(r.payload.get("license_plate") or "")
                 ])).strip()
                 score += _keyword_boost(query_text, text_to_compare)
+
+                # BUG-05 FIX: penalise cross-class vehicle mismatches.
+                # If the query requests a specific vehicle class and the stored
+                # yolo_class contradicts it, subtract 0.3 from the score so that
+                # correct-class results always rank above wrong-class results.
+                if query_vehicle_class and p_type == "scene":
+                    stored_class = r.payload.get("yolo_class") or ""
+                    if stored_class and stored_class != query_vehicle_class:
+                        score -= 0.3
+
                 score = min(score, 0.99)  # Cap score at 0.99 so UI doesn't exceed 99%
 
                 payload = dict(r.payload)
-                cam_id = payload.get("camera_id")
-                if cam_id:
-                    payload["full_snapshot_url"] = f"/api/v1/playback/snapshot/full_cam_{cam_id}"
-                elif snap_url:
+                if snap_id and f"full_{snap_id}.jpg" in existing_snaps:
                     payload["full_snapshot_url"] = f"/api/v1/playback/snapshot/full_{snap_id}"
+                elif snap_url:
+                    payload["full_snapshot_url"] = snap_url
 
                 results.append({"score": score, "payload": payload})
 

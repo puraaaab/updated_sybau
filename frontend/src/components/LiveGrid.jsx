@@ -472,12 +472,12 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Florence Telemetry Counter State
-  const [florenceStats, setFlorenceStats] = useState({ captioning: 0, queue: 0, captioned: 0 });
+  const [florenceStats, setFlorenceStats] = useState({ captioning: 0, queue: 0, captioned: 0, camera_stats: {} });
 
   useEffect(() => {
     const fetchFlorenceStats = () => {
       fetch('/api/v1/florence/stats')
-        .then(res => res.ok ? res.json() : { captioning: 0, queue: 0, captioned: 0 })
+        .then(res => res.ok ? res.json() : { captioning: 0, queue: 0, captioned: 0, camera_stats: {} })
         .then(data => setFlorenceStats(data))
         .catch(() => {});
     };
@@ -485,6 +485,35 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
     const interval = setInterval(fetchFlorenceStats, 1000);
     return () => clearInterval(interval);
   }, []);
+
+  // ── Caption timestamp helpers ────────────────────────────────────────────
+  // Parse the `ts=YYYY-MM-DDTHH:MM:SS+05:30` field embedded in stored captions.
+  // Returns a Date object or null — all errors return null (never crash the UI).
+  const parseCapTs = (caption) => {
+    try {
+      const m = caption?.match(/\bts=(\S+)/);
+      if (!m) return null; // No ts= field — badge hidden silently
+      const d = new Date(m[1]);
+      return isNaN(d.getTime()) ? null : d; // Invalid date — badge hidden
+    } catch {
+      return null; // Any parse error — never crash UI
+    }
+  };
+
+  // Convert a captured-at Date into a human-readable age string.
+  // Returns null when the badge should be hidden (clock skew, >1 hour, or any error).
+  const getAgeLabel = (ts) => {
+    try {
+      const ageSeconds = Math.floor((Date.now() - ts.getTime()) / 1000);
+      if (ageSeconds < 0) return null;    // Clock skew — hide badge
+      if (ageSeconds > 3600) return null; // >1 hour old — treat as archival
+      if (ageSeconds < 60) return `${ageSeconds}s ago`;
+      return `${Math.floor(ageSeconds / 60)}m ${ageSeconds % 60}s ago`;
+    } catch {
+      return null; // Never crash on age calculation
+    }
+  };
+  // ────────────────────────────────────────────────────────────────────────
 
 
   const fetchCameras = useCallback(() => {
@@ -734,12 +763,42 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
                   />
 
                   {/* Bottom Camera Info */}
-                  <Box sx={{ p: 0.75, backgroundColor: 'background.default', borderTop: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <Typography variant="caption" color="text.secondary" noWrap>
-                      {cam.location || cam.name}
-                    </Typography>
-                    <Chip label="LIVE 2.0 FPS" size="small" color="primary" variant="outlined" sx={{ height: 16, fontSize: '0.6rem' }} />
-                  </Box>
+                  {(() => {
+                    // Resolve the last caption for this camera from Florence stats.
+                    // Falls back gracefully: no stats → no badge, bad data → no badge.
+                    const camStat = florenceStats?.camera_stats?.[cam.id];
+                    const lastCaption = camStat?.last_caption || null;
+                    const capTs = lastCaption ? parseCapTs(lastCaption) : null;
+                    const ageLabel = capTs ? getAgeLabel(capTs) : null;
+
+                    return (
+                      <Box sx={{ p: 0.75, backgroundColor: 'background.default', borderTop: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 0.5 }}>
+                        <Typography variant="caption" color="text.secondary" noWrap sx={{ flex: 1, minWidth: 0 }}>
+                          {cam.location || cam.name}
+                        </Typography>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
+                          {ageLabel && (
+                            <Tooltip title={`Florence-2 scene caption was captured ${ageLabel}. YOLO detection is always live.`}>
+                              <Chip
+                                label={`📷 ${ageLabel}`}
+                                size="small"
+                                sx={{
+                                  height: 16,
+                                  fontSize: '0.58rem',
+                                  fontFamily: 'monospace',
+                                  backgroundColor: 'rgba(245,158,11,0.15)',
+                                  color: '#f59e0b',
+                                  border: '1px solid rgba(245,158,11,0.4)',
+                                  cursor: 'default',
+                                }}
+                              />
+                            </Tooltip>
+                          )}
+                          <Chip label="LIVE" size="small" color="primary" variant="outlined" sx={{ height: 16, fontSize: '0.6rem' }} />
+                        </Box>
+                      </Box>
+                    );
+                  })()}
                 </Card>
               );
             })}

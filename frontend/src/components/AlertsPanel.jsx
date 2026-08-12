@@ -126,8 +126,14 @@ export default function AlertsPanel({ alerts, token }) {
   };
 
   const formatTime = (tsStr) => {
+    if (!tsStr) return "00:00:00";
     try {
+      if (typeof tsStr === 'string' && tsStr.includes(' ')) {
+        const parts = tsStr.split(' ');
+        if (parts.length >= 2) return parts[1].split('.')[0];
+      }
       const d = new Date(tsStr);
+      if (isNaN(d.getTime())) return "00:00:00";
       return d.toTimeString().split(' ')[0];
     } catch {
       return "00:00:00";

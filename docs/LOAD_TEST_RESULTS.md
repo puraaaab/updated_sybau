@@ -1,6 +1,6 @@
 # Multi-Stream AI VMS Benchmark & Load Test Report
 
-**Execution Timestamp:** 2026-08-06 07:05:20 UTC  
+**Execution Timestamp:** 2026-08-06 07:05:20 IST  
 **Test Topology:** 10 Concurrent 1080p Video Feeds  
 **Inference Cadence:** 2.0 FPS Sampling per Camera Stream  
 

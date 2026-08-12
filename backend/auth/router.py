@@ -238,15 +238,16 @@ def _seed_users(db: Session):
     """Seed initial accounts if database is empty. All default accounts forced to change password."""
     import os
 
-    is_prod = os.getenv("APP_ENV") == "production"
     admin_pass = os.getenv("INITIAL_ADMIN_PASSWORD", "Admin@123456")
 
+    # Admin gets must_change_password=False so the system is immediately usable.
+    # Operator/Viewer default accounts must change their passwords on first login.
     default_accounts = [
-        ("admin",    admin_pass,       "admin"),
-        ("operator", "Operator@123456", "operator"),
-        ("viewer",   "Viewer@123456",   "viewer"),
+        ("admin",    admin_pass,       "admin",    False),
+        ("operator", "Operator@123456", "operator", True),
+        ("viewer",   "Viewer@123456",   "viewer",   True),
     ]
-    for uname, pwd, role in default_accounts:
+    for uname, pwd, role, force_change in default_accounts:
         existing = db.query(User).filter(User.username == uname).first()
         if not existing:
             db.add(User(
@@ -254,7 +255,7 @@ def _seed_users(db: Session):
                 password_hash=get_password_hash(pwd),
                 role=role,
                 status="active",
-                # SEC-02 FIX: ALL default accounts must change password on first login
-                must_change_password=True,
+                must_change_password=force_change,
             ))
     db.commit()
+

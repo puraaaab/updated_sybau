@@ -192,8 +192,9 @@ def get_full_health_report() -> dict:
             "status": "online" if cid in active_ai_workers else "offline",
         })
 
+    from ..utils.timezone import get_ist_now_iso
     return {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "timestamp": get_ist_now_iso(),
         "system_vitals": vitals,
         "services": services,
         "cameras": camera_health,

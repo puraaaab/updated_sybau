@@ -284,8 +284,12 @@ class CameraAIWorker:
                         # Fetch zones and config from cache (refreshed every 1.0s)
                         zones, alerts_cfg = self._get_cached_config(db)
 
-                        # Execute full AI inference pipeline on GPU
+                        # Execute full AI inference pipeline on GPU.
+                        # Measure ONLY the inference time (YOLO + behavior engine) for latency_ms,
+                        # NOT the full DB write cycle which takes orders of magnitude longer.
+                        _inference_start = time.time()
                         results = process_frame(frame, self.camera_id, zones, alerts_cfg, frame_idx)
+                        inference_latency_ms = round((time.time() - _inference_start) * 1000.0, 2)
                         frame_idx += 1
 
                         if frame_idx % 100 == 0:
@@ -566,6 +570,8 @@ class CameraAIWorker:
                                         "caption": results["caption"],
                                         "snapshot_url": snap_url,
                                         "timestamp": datetime.datetime.now(_IST).isoformat(),
+                                        # BUG-05 FIX: structured YOLO class for cross-class filtering in search
+                                        "yolo_class": results.get("dominant_class"),
                                     }
                                 ))
 
@@ -590,7 +596,7 @@ class CameraAIWorker:
                             pending_snapshot_writes.append((snap_path, frame))
 
                             raw_lat = (time.time() - start_time) * 1000.0
-                            calc_latency = round(raw_lat if raw_lat < 5000.0 else min(raw_lat, 85.0), 2)
+                            calc_latency = inference_latency_ms  # pure YOLO inference time, not DB write time
                             alert_conf = float(alert.get("confidence", 0.95))
                             db_alert = Alert(
                                 camera_id=self.camera_id,
@@ -605,6 +611,7 @@ class CameraAIWorker:
                             db.add(db_alert)
                             db.flush() # assign ID before commit
 
+                            from ..utils.timezone import format_ist_str
                             pending_alert_events.append({
                                 "id": db_alert.id,
                                 "camera_id": self.camera_id,
@@ -612,7 +619,7 @@ class CameraAIWorker:
                                 "message": alert["message"],
                                 "severity": alert["severity"],
                                 "confidence": alert_conf,
-                                "timestamp": db_alert.timestamp.isoformat(),
+                                "timestamp": format_ist_str(db_alert.timestamp),
                                 "latency_ms": calc_latency,
                                 "snapshot_url": db_alert.snapshot_url,
                             })

@@ -20,6 +20,7 @@ Each exported ZIP contains:
 """
 
 import os
+import hmac
 import zipfile
 import json
 import hashlib
@@ -37,7 +38,7 @@ RECORDINGS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "
 SNAPSHOTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
 
 from ..utils.timezone import IST_TZ, get_ist_now
-_UTC = IST_TZ
+_IST = IST_TZ
 
 # Maximum age gap (in seconds) between alert timestamp and recording segment.
 _MAX_CLIP_TOLERANCE_SECONDS = 900  # 15 minutes
@@ -54,7 +55,7 @@ def compute_sha256(filepath: str) -> str:
 
 def _parse_segment_timestamp(filename: str) -> datetime.datetime | None:
     """
-    Attempt to extract a UTC datetime from a recording segment filename.
+    Attempt to extract an IST datetime from a recording segment filename.
     Expected patterns: segment_YYYYMMDD_HHMMSS.mp4 or 1722000000.mp4 (unix epoch).
     Returns None if the filename cannot be parsed.
     """
@@ -65,13 +66,13 @@ def _parse_segment_timestamp(filename: str) -> datetime.datetime | None:
             candidate = "_".join(name.split("_")[-2:])
             try:
                 dt = datetime.datetime.strptime(candidate, fmt)
-                return dt.replace(tzinfo=_UTC)
+                return dt.replace(tzinfo=_IST)
             except ValueError:
                 pass
 
     try:
         epoch = float(name)
-        return datetime.datetime.fromtimestamp(epoch, tz=_UTC)
+        return datetime.datetime.fromtimestamp(epoch, tz=_IST)
     except (ValueError, OSError):
         pass
 
@@ -203,7 +204,7 @@ def _find_overlapping_segments(
         return [], None
 
     if alert_time.tzinfo is None:
-        alert_time = alert_time.replace(tzinfo=_UTC)
+        alert_time = alert_time.replace(tzinfo=_IST)
 
     win_start = alert_time - datetime.timedelta(seconds=pre_roll_sec)
     win_end = alert_time + datetime.timedelta(seconds=post_roll_sec)
@@ -215,7 +216,7 @@ def _find_overlapping_segments(
         seg_start = _parse_segment_timestamp(fname)
         if seg_start is not None:
             if seg_start.tzinfo is None:
-                seg_start = seg_start.replace(tzinfo=_UTC)
+                seg_start = seg_start.replace(tzinfo=_IST)
             seg_end = seg_start + datetime.timedelta(seconds=segment_duration_sec)
             
             gap = abs((seg_start - alert_time).total_seconds())
@@ -252,6 +253,8 @@ def build_export_package(
     Computes dual hashes: source_segments_sha256 AND exported_clip_sha256.
     Labels export_method explicitly as "stream_copy" or "re_encoded".
     """
+    t_start = datetime.datetime.now()
+    logger.info(f"[EVIDENCE-EXPORT] Starting evidence package export for Alert ID {alert_id} (operator={exported_by})...")
     os.makedirs(EXPORT_DIR, exist_ok=True)
 
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
@@ -260,18 +263,21 @@ def build_export_package(
 
     camera_id = alert.camera_id
     alert_time = alert.timestamp
-    export_time = datetime.datetime.now(_UTC)
+    export_time = datetime.datetime.now(_IST)
 
     if alert_time and alert_time.tzinfo is None:
-        alert_time = alert_time.replace(tzinfo=_UTC)
+        alert_time = alert_time.replace(tzinfo=_IST)
 
+    logger.info(f"[EVIDENCE-EXPORT] Step 1/5: Locating recording segments for Camera '{camera_id}' near alert time {alert_time}...")
     cam_rec_dir = os.path.join(RECORDINGS_DIR, camera_id)
     video_files, clip_gap = _find_overlapping_segments(cam_rec_dir, alert_time, pre_roll_sec=30, post_roll_sec=30)
     video_file = video_files[0] if video_files else None
+    logger.info(f"[EVIDENCE-EXPORT] Step 1/5 OK: Found {len(video_files)} segment(s) (best file={os.path.basename(video_file) if video_file else 'NONE'}).")
 
     # Compute source segment hashes
     source_hashes = {}
     if video_files:
+        logger.info(f"[EVIDENCE-EXPORT] Step 2/5: Computing SHA-256 fingerprint for source recording segment(s)...")
         for vf in video_files:
             if os.path.exists(vf):
                 source_hashes[os.path.basename(vf)] = compute_sha256(vf)
@@ -304,6 +310,7 @@ def build_export_package(
             else:
                 req_start_offset = 0.0
 
+            logger.info(f"[EVIDENCE-EXPORT] Step 3/5: Slicing evidence clip from {os.path.basename(video_file)} (start_offset={req_start_offset:.2f}s, duration=60s)...")
             slice_info = slice_evidence_clip(
                 source_video_path=video_file,
                 output_clip_path=copied_video,
@@ -315,6 +322,7 @@ def build_export_package(
             exported_clip_hash = compute_sha256(copied_video)
             with open(os.path.join(temp_pack_dir, "signature.sha256"), "w") as sf:
                 sf.write(f"{exported_clip_hash}  evidence_clip.mp4\n")
+            logger.info(f"[EVIDENCE-EXPORT] Step 3/5 OK: Clip sliced via {slice_info.get('export_method')} (SHA-256={exported_clip_hash[:16]}...).")
 
         snap_hash = None
         if snapshot_file and os.path.exists(snapshot_file):
@@ -325,10 +333,10 @@ def build_export_package(
 
         custody_log = [
             f"=== VMS Pro Evidence Chain of Custody ===",
-            f"Export Time (UTC):              {export_time.isoformat()}",
+            f"Export Time (IST):              {export_time.isoformat()}",
             f"Exported By:                    {exported_by}",
             f"Alert ID:                       {alert_id}",
-            f"Alert Timestamp (UTC):          {alert_time.isoformat() if alert_time else 'UNKNOWN'}",
+            f"Alert Timestamp (IST):          {alert_time.isoformat() if alert_time else 'UNKNOWN'}",
             f"Alert Camera:                   {camera_id}",
             f"Alert Type:                     {alert.type}",
             f"Alert Severity:                 {alert.severity}",
@@ -346,13 +354,13 @@ def build_export_package(
         ]
 
         metadata = {
-            "export_timestamp_utc": export_time.isoformat(),
+            "export_timestamp_ist": export_time.isoformat(),
             "exported_by": exported_by,
             "alert_id": alert.id,
             "camera_id": alert.camera_id,
             "alert_type": alert.type,
             "alert_severity": alert.severity,
-            "alert_timestamp_utc": alert_time.isoformat() if alert_time else None,
+            "alert_timestamp_ist": alert_time.isoformat() if alert_time else None,
             "export_method": export_method_str,
             "requested_start_offset_sec": slice_info.get("requested_start_offset_sec", 0.0),
             "actual_start_offset_sec": slice_info.get("actual_start_offset_sec", 0.0),
@@ -360,13 +368,18 @@ def build_export_package(
             "exported_clip_sha256": exported_clip_hash,
             "source_segments_sha256": source_hashes,
             "snapshot_hash_sha256": snap_hash,
-            "timestamp_source": "VMS Server UTC clock (NTP-synced system time / RFC3161 Proof Ready)"
+            "timestamp_source": "VMS Server IST clock (NTP-synced system time / RFC3161 Proof Ready)"
         }
 
-        # Cryptographic Manifest Digital Signature (HMAC SHA-256)
+        logger.info(f"[EVIDENCE-EXPORT] Step 4/5: Generating HMAC-SHA256 digital manifest signature and chain-of-custody log...")
         manifest_bytes = json.dumps(metadata, sort_keys=True).encode("utf-8")
-        secret = os.getenv("VMS_SECRET_KEY", "sybau_evidence_signing_key_2026")
-        digital_signature = hmac.new(secret.encode("utf-8"), manifest_bytes, hashlib.sha256).hexdigest()
+        _vms_key = os.getenv("VMS_SECRET_KEY")
+        if not _vms_key:
+            if os.getenv("APP_ENV") == "production":
+                raise RuntimeError("FATAL: VMS_SECRET_KEY must be set in production for evidence signing.")
+            import secrets as _sec
+            _vms_key = _sec.token_urlsafe(32)
+        digital_signature = hmac.new(_vms_key.encode("utf-8"), manifest_bytes, hashlib.sha256).hexdigest()
         metadata["digital_signature_hmac_sha256"] = digital_signature
 
         with open(os.path.join(temp_pack_dir, "metadata.json"), "w") as mf:
@@ -381,11 +394,17 @@ def build_export_package(
         zip_filename = f"evidence_alert_{alert_id}.zip"
         zip_path = os.path.join(EXPORT_DIR, zip_filename)
 
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        logger.info(f"[EVIDENCE-EXPORT] Step 5/5: Compiling final ZIP archive '{zip_filename}'...")
+        with zipfile.ZipFile(zip_path, "w") as zipf:
             for root, dirs, files in os.walk(temp_pack_dir):
                 for file in files:
-                    zipf.write(os.path.join(root, file), file)
+                    full_p = os.path.join(root, file)
+                    # MP4 files are already H.264 compressed — store without CPU re-compression overhead
+                    compress_type = zipfile.ZIP_STORED if file.endswith((".mp4", ".avi", ".mkv")) else zipfile.ZIP_DEFLATED
+                    zipf.write(full_p, file, compress_type=compress_type)
 
+        elapsed = (datetime.datetime.now() - t_start).total_seconds()
+        logger.info(f"[EVIDENCE-EXPORT] COMPLETE! Evidence package compiled in {elapsed:.2f}s -> {zip_path}")
         return zip_path
 
     finally:

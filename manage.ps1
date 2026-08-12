@@ -108,7 +108,14 @@ function Start-VMS {
 
     # 4. Start Backend (uvicorn)
     Write-Host "  Starting Backend server (uvicorn + venv)... (Logging to logs\backend.log)"
-    $bCmd = "/c cd /d `"$ProjectRoot`" && `"$VenvPython`" -u -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --no-access-log > `"$LogsDir\backend.log`" 2>&1"
+    # Load .env so VMS_SECRET_KEY and other vars are available to uvicorn.
+    # Without this every restart generates a new ephemeral JWT key, invalidating all browser sessions.
+    $envFile = "$ProjectRoot\.env"
+    $envPrefix = ""
+    if (Test-Path $envFile) {
+        $envPrefix = "set /p nul< NUL && for /f `"usebackq tokens=1,* delims==`" %%A in (`"$envFile`") do if not `"%%A`"==`"`" set `"%%A=%%B`" && "
+    }
+    $bCmd = "/c cd /d `"$ProjectRoot`" && `"$VenvPython`" -u -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --no-access-log --env-file `".env`" > `"$LogsDir\backend.log`" 2>&1"
     Start-Process cmd.exe -ArgumentList $bCmd -WindowStyle Hidden
 
     # 5. Start Frontend (Vite)

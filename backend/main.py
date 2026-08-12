@@ -132,18 +132,42 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"Note on Qdrant pre-init: {e}")
 
+            # Auto-create Kafka topics so a fresh Docker restart doesn't leave them missing.
+            try:
+                from kafka.admin import KafkaAdminClient, NewTopic
+                _admin = KafkaAdminClient(bootstrap_servers="localhost:9092", request_timeout_ms=4000)
+                _existing = set(_admin.list_topics())
+                _needed = ["alerts", "captions", "tracks", "vehicles"]
+                _to_create = [NewTopic(name=t, num_partitions=1, replication_factor=1)
+                              for t in _needed if t not in _existing]
+                if _to_create:
+                    _admin.create_topics(_to_create, validate_only=False)
+                    print(f"[Kafka] Auto-created topics: {[t.name for t in _to_create]}")
+                _admin.close()
+            except Exception as _ke:
+                print(f"[Kafka] Topic auto-create note: {_ke}")
+
             print("Starting background Stream Recorders and AI Workers...")
             recorder.start_all_recorders()
             ai_worker.start_all_ai_workers()
-
-            from .ai.captioning.captioner import pre_warm as pre_warm_captioner
-            threading.Thread(target=pre_warm_captioner, daemon=True, name="Florence_Prewarm").start()
 
             from .ai.captioning.moondream_captioner import start_moondream_worker
             start_moondream_worker()
 
             from .recording.retention import retention_manager
             retention_manager.start()
+
+            # Florence pre-warm runs LAST and in its own thread so it never blocks
+            # YOLO inference. Florence-2-large takes ~70s to load on first call;
+            # without this delay the CUDA RLock monopolises the GPU and YOLO can't
+            # write any records until Florence finishes its first generate() call.
+            def _delayed_florence_prewarm():
+                import time as _t
+                _t.sleep(5)  # Let YOLO process a few frames first
+                from .ai.captioning.captioner import pre_warm as pre_warm_captioner
+                pre_warm_captioner()
+            threading.Thread(target=_delayed_florence_prewarm, daemon=True, name="Florence_Prewarm").start()
+
         except Exception as _startup_exc:
             import traceback
             print(f"[FATAL] AI startup thread crashed: {_startup_exc}")
@@ -251,6 +275,20 @@ def register_bwc_live_stream(
 
 @app.websocket("/api/v1/ws/alerts")
 async def websocket_alerts_endpoint(websocket: WebSocket):
+    # BUG-16 FIX: Validate JWT before accepting the WebSocket connection.
+    # Clients must pass ?token=<jwt> in the connection URL.
+    from .auth.helpers import SECRET_KEY, ALGORITHM
+    import jwt as _jwt
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008, reason="Missing authentication token")
+        return
+    try:
+        _jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except Exception:
+        await websocket.close(code=1008, reason="Invalid or expired authentication token")
+        return
+
     await websocket.accept()
     active_websockets.append(websocket)
     print(f"New client connected to alerts WebSocket. Active clients: {len(active_websockets)}")
@@ -261,3 +299,4 @@ async def websocket_alerts_endpoint(websocket: WebSocket):
         if websocket in active_websockets:
             active_websockets.remove(websocket)
         print("Alerts WebSocket client disconnected.")
+

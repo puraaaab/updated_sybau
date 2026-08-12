@@ -258,9 +258,9 @@ def _worker_thread():
             with _slots_lock:
                 slot = _slots.get(camera_id)
                 if slot:
-                    import datetime
+                    from ...utils.timezone import get_ist_now
                     slot.last_caption      = full_caption
-                    slot.last_captioned_at = datetime.datetime.now(datetime.timezone.utc)
+                    slot.last_captioned_at = get_ist_now()
                     slot.pending           = False
                     slot.last_error        = None
 
@@ -470,9 +470,9 @@ def submit_moondream_caption(
         slot = _slots[camera_id]
         if slot.pending:
             return False  # camera already has an outstanding request
-        import datetime
+        from ...utils.timezone import get_ist_now
         slot.pending       = True
-        slot.pending_since = datetime.datetime.now(datetime.timezone.utc)
+        slot.pending_since = get_ist_now()
 
     try:
         _work_queue.put_nowait((camera_id, frame.copy(), yolo_summary, image_id))

@@ -1,7 +1,6 @@
 """
 VMS Pro — SQLAlchemy ORM Models
-COMP-01 FIX: All datetime defaults now use timezone-aware UTC (datetime.now(UTC))
-             instead of deprecated datetime.utcnow().
+COMP-01 FIX: All datetime defaults use timezone-aware IST (datetime.now(_IST)).
 AI-04 FIX:   Track model now includes last_bbox_x / last_bbox_y so heatmap is real.
 SCALE-05 FIX: Added indexes on Alert.type, Alert.severity, Alert.is_acknowledged,
               Face.confidence, Vehicle.ocr_confidence.
@@ -12,11 +11,11 @@ from sqlalchemy import Column, Index, Integer, String, Float, Boolean, DateTime,
 from sqlalchemy.orm import relationship
 from .connection import Base
 
-# Timezone-aware IST helper — Indian Standard Time (UTC+05:30)
+# Timezone-aware IST helper — Indian Standard Time (+05:30)
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 
-def _utcnow() -> datetime.datetime:
+def _istnow() -> datetime.datetime:
     return datetime.datetime.now(_IST)
 
 
@@ -59,8 +58,8 @@ class Track(Base):
     track_uuid = Column(String, index=True, nullable=False)
     camera_id = Column(String, index=True, nullable=False)
     label = Column(String, nullable=False)  # person, car, etc.
-    first_seen = Column(DateTime(timezone=True), default=_utcnow)
-    last_seen = Column(DateTime(timezone=True), default=_utcnow)
+    first_seen = Column(DateTime(timezone=True), default=_istnow)
+    last_seen = Column(DateTime(timezone=True), default=_istnow)
     speed = Column(Float, default=0.0)      # px/s — used for relative comparison only
     path_history = Column(Text, default="[]")  # JSON string of [[x,y], ...] normalised coords
 
@@ -77,7 +76,7 @@ class Face(Base):
     embedding_id = Column(String, index=True, nullable=True)  # Ref to Qdrant vector uuid
     label = Column(String, default="Unknown")
     confidence = Column(Float, default=0.0, index=True)  # SCALE-05: added index
-    timestamp = Column(DateTime(timezone=True), default=_utcnow)
+    timestamp = Column(DateTime(timezone=True), default=_istnow)
 
 
 class Vehicle(Base):
@@ -92,7 +91,7 @@ class Vehicle(Base):
     vehicle_color = Column(String, default="unknown", index=True)
     snapshot_url = Column(String, nullable=True)
     bbox = Column(Text, nullable=True)
-    timestamp = Column(DateTime(timezone=True), default=_utcnow)
+    timestamp = Column(DateTime(timezone=True), default=_istnow)
 
 
 class RawOCR(Base):
@@ -106,7 +105,7 @@ class RawOCR(Base):
     ocr_confidence = Column(Float, default=0.0, index=True)
     source_type = Column(String, default="license_plate")
     snapshot_url = Column(String, nullable=True)
-    timestamp = Column(DateTime(timezone=True), default=_utcnow, index=True)
+    timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)
 
 
 class Alert(Base):
@@ -118,7 +117,7 @@ class Alert(Base):
     message = Column(String, nullable=False)
     severity = Column(String, default="medium", index=True)  # SCALE-05: added index
     confidence = Column(Float, default=0.95)
-    timestamp = Column(DateTime(timezone=True), default=_utcnow, index=True)
+    timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)
     latency_ms = Column(Float, default=0.0, nullable=True)
     snapshot_url = Column(String, nullable=True)
     video_url = Column(String, nullable=True)
@@ -157,7 +156,7 @@ class CustomAlertRule(Base):
     severity = Column(String, default="high")
     is_active = Column(Boolean, default=True)
     confidence_threshold = Column(Float, default=0.35)
-    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    created_at = Column(DateTime(timezone=True), default=_istnow)
 
 
 class GlobalIdentity(Base):
@@ -167,8 +166,8 @@ class GlobalIdentity(Base):
     identity_uuid = Column(String, unique=True, index=True, nullable=False)  # e.g. "POI_204"
     type = Column(String, nullable=False)  # person, vehicle
     name = Column(String, default="Unknown POI")
-    first_seen = Column(DateTime(timezone=True), default=_utcnow)
-    last_seen = Column(DateTime(timezone=True), default=_utcnow)
+    first_seen = Column(DateTime(timezone=True), default=_istnow)
+    last_seen = Column(DateTime(timezone=True), default=_istnow)
     embedding_id = Column(String, index=True, nullable=True)  # associated face/vehicle embedding
     snapshot_path = Column(String, nullable=True)  # path to face crop image
 
@@ -182,7 +181,7 @@ class AuditLog(Base):
     action = Column(String, nullable=False, index=True)  # e.g. "LOGIN", "ALERT_ACK", "CAMERA_DELETE"
     detail = Column(Text, nullable=True)  # Human-readable action description
     ip_address = Column(String, nullable=True)  # COMP-03: now populated by all callers
-    timestamp = Column(DateTime(timezone=True), default=_utcnow, index=True)
+    timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)
 
 
 class SearchHistory(Base):
@@ -194,7 +193,7 @@ class SearchHistory(Base):
     query_text = Column(String, nullable=True)      # For semantic/text search
     query_type = Column(String, default="semantic")  # "semantic" | "face" | "license_plate"
     result_count = Column(Integer, default=0)
-    timestamp = Column(DateTime(timezone=True), default=_utcnow, index=True)
+    timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)
 
 
 class SceneCaption(Base):
@@ -205,4 +204,4 @@ class SceneCaption(Base):
     camera_id = Column(String, index=True, nullable=False)
     caption = Column(Text, nullable=False)
     snapshot_url = Column(String, nullable=True)
-    timestamp = Column(DateTime(timezone=True), default=_utcnow, index=True)
+    timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)

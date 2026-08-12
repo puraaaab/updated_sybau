@@ -116,7 +116,7 @@ export default function App() {
     const connectWS = () => {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = window.location.host;
-      const wsUrl = `${protocol}//${host}/api/v1/ws/alerts`;
+      const wsUrl = `${protocol}//${host}/api/v1/ws/alerts?token=${encodeURIComponent(token)}`;
       ws = new WebSocket(wsUrl);
 
       ws.onmessage = (event) => {
@@ -919,7 +919,7 @@ export default function App() {
               variant="filled"
               sx={{ width: '100%', fontWeight: 'bold', borderRadius: `${settings.borderRadius}px` }}
             >
-              {`[NEW ALERT - ${wsAlert.type.toUpperCase()}] ${wsAlert.message}`}
+              {`[NEW ALERT - ${(wsAlert?.type || 'EVENT').toUpperCase()}] ${wsAlert?.message || ''}`}
             </Alert>
           )}
         </Snackbar>

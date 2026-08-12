@@ -65,10 +65,11 @@ def validate_password_strength(password: str) -> Optional[str]:
 
 def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] = None) -> str:
     to_encode = data.copy()
+    from ..utils.timezone import get_ist_now
     if expires_delta:
-        expire = datetime.datetime.now(datetime.timezone.utc) + expires_delta
+        expire = get_ist_now() + expires_delta
     else:
-        expire = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = get_ist_now() + datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -120,6 +121,19 @@ def get_current_user(
         raise credentials_exception
     if getattr(user, "status", "active") != "active" or getattr(user, "deleted_at", None) is not None:
         raise credentials_exception
+
+    # BUG-04 FIX: Enforce must_change_password server-side.
+    # If the user has not yet changed their default password, block ALL endpoints
+    # except the change-password and login endpoints themselves.
+    if getattr(user, "must_change_password", False):
+        path = request.url.path
+        exempt_paths = ("/api/v1/auth/change-password", "/api/v1/auth/login")
+        if not any(path.endswith(ep) or path.startswith(ep) for ep in exempt_paths):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You must change your default password before accessing this resource. "
+                       "POST to /api/v1/auth/change-password with your current and new password.",
+            )
 
     user._client_ip = _extract_client_ip(request)
     return user
@@ -174,6 +188,15 @@ def verify_media_access(
 
 
 def verify_camera_access(camera_id: str, user: User) -> bool:
+    """Returns True if `user` is allowed to access `camera_id`.
+
+    Semantics:
+      - Admins always have full access.
+      - Non-admin users: if `allowed_cameras` is an EMPTY list (the default),
+        they can access ALL cameras (unrestricted mode).
+      - If `allowed_cameras` contains a non-empty list of camera IDs, the user
+        is restricted to ONLY those cameras (whitelist mode).
+    """
     if not user:
         return False
     if user.role == "admin":
@@ -181,13 +204,16 @@ def verify_camera_access(camera_id: str, user: User) -> bool:
 
     import json
     allowed_list = []
-    if getattr(user, "allowed_cameras", None):
+    raw = getattr(user, "allowed_cameras", None)
+    if raw:
         try:
-            allowed_list = json.loads(user.allowed_cameras)
+            allowed_list = json.loads(raw)
         except (ValueError, TypeError):
             allowed_list = []
 
+    # Empty list → unrestricted (admin hasn't set a camera whitelist for this user)
     if not allowed_list:
         return True
 
+    # Non-empty list → only the listed cameras are accessible
     return camera_id in allowed_list

@@ -140,7 +140,7 @@ def run_load_test(num_streams=10, duration_seconds=20):
 
     report_md = f"""# Multi-Stream AI VMS Benchmark & Load Test Report
 
-**Execution Timestamp:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  
+**Execution Timestamp:** {time.strftime('%Y-%m-%d %H:%M:%S IST', time.localtime())}  
 **Test Topology:** {num_streams} Concurrent 1080p Video Feeds  
 **Inference Cadence:** 2.0 FPS Sampling per Camera Stream  
 

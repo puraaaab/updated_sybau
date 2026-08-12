@@ -38,7 +38,7 @@ class CaptionIntegrityValidator:
     """
     Thread-safe registry and validation engine enforcing strict 1-to-1 image-to-caption integrity.
     """
-    REQUEST_TIMEOUT_SECONDS = 600.0  # Max valid request lifetime before marked stale
+    REQUEST_TIMEOUT_SECONDS = 3600.0  # Max valid request lifetime before marked stale (1 hour for multi-camera queue)
 
     def __init__(self):
         self._registry: Dict[str, CaptionEnvelope] = {}

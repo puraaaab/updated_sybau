@@ -94,16 +94,30 @@ def get_records_faces(
         query = query.offset(offset)
 
     items = query.all()
+
+    # BUG-08 FIX: fetch all camera_ids for every visible face label in ONE query
+    # instead of firing a db.query(Track) per face row (N+1 pattern).
+    from ..database.models import Track
+    from sqlalchemy import distinct
+    face_labels = [f.label for f, _ in items if f.label]
+    if face_labels:
+        cam_rows = (
+            db.query(Face.label, Track.camera_id)
+            .join(Track, Track.track_uuid == Face.track_uuid)
+            .filter(Face.label.in_(face_labels))
+            .distinct()
+            .all()
+        )
+        label_to_cams: dict = {}
+        for lbl, cam in cam_rows:
+            label_to_cams.setdefault(lbl, set()).add(cam)
+    else:
+        label_to_cams = {}
+
     results = []
     for f, sightings_count in items:
-        cam_rows = (
-            db.query(Track.camera_id)
-            .join(Face, Track.track_uuid == Face.track_uuid)
-            .filter(Face.label == f.label)
-            .distinct().all()
-        )
-        cams = [r[0] for r in cam_rows if r[0]]
-        cam_summary = ", ".join(sorted(set(cams))) if cams else "Live Grid"
+        cams = sorted(label_to_cams.get(f.label, set()) - {None})
+        cam_summary = ", ".join(cams) if cams else "Live Grid"
 
         results.append({
             "id": f.id,
@@ -116,6 +130,7 @@ def get_records_faces(
             "snapshot_url": f"/api/v1/playback/snapshot/{f.embedding_id}" if f.embedding_id else None
         })
     return {"total": total, "items": results}
+
 
 
 @router.get("/records/vehicles")

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..database.connection import get_db
 from ..database.models import Camera, Zone, AlertConfig
-from ..auth.helpers import verify_admin, verify_operator, verify_viewer
+from ..auth.helpers import verify_admin, verify_operator, verify_viewer, verify_media_access, verify_camera_access
 from ..config import service as config_service
 from ..recording import recorder
 from ..workers import ai_worker
@@ -337,6 +337,8 @@ def get_camera_resolved_stream(camera_id: str, request: Request, user=Depends(ve
     cam = db.query(Camera).filter(Camera.id == camera_id).first()
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
+    if not verify_camera_access(camera_id, user):
+        raise HTTPException(status_code=403, detail="Access to this camera is not permitted.")
 
     original_url = cam.stream_url
 
@@ -367,10 +369,14 @@ def get_camera_resolved_stream(camera_id: str, request: Request, user=Depends(ve
 import asyncio
 
 @router.get("/{camera_id}/mjpeg")
-async def stream_camera_mjpeg(camera_id: str, db: Session = Depends(get_db)):
+async def stream_camera_mjpeg(camera_id: str, user=Depends(verify_media_access), db: Session = Depends(get_db)):
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required to access this stream.")
     cam = db.query(Camera).filter(Camera.id == camera_id).first()
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
+    if not verify_camera_access(camera_id, user):
+        raise HTTPException(status_code=403, detail="Access to this camera is not permitted.")
 
     stream = stream_manager.get_stream(camera_id, cam.stream_url)
     loop = asyncio.get_running_loop()

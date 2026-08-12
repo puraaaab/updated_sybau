@@ -2,6 +2,7 @@ import logging
 import random
 import queue
 import time
+import uuid
 import threading
 import datetime
 from dataclasses import dataclass
@@ -14,6 +15,23 @@ from PIL import Image
 
 from ...config.service import get_models
 from ..model_manager import model_manager
+from ...utils.timezone import IST_TZ
+
+# ---------------------------------------------------------------------------
+# Dedicated CUDA stream for Florence — YOLO runs on default stream (stream 0),
+# Florence runs on stream 1 so both can be pipelined by the GPU scheduler.
+# Falls back to None (default stream) if CUDA is unavailable or stream creation
+# fails — behaviour is correct either way, just without parallelism.
+# ---------------------------------------------------------------------------
+try:
+    _florence_cuda_stream: torch.cuda.Stream | None = (
+        torch.cuda.Stream() if torch.cuda.is_available() else None
+    )
+    if _florence_cuda_stream is not None:
+        logger_tmp = logging.getLogger(__name__)
+        logger_tmp.info("[Florence] Dedicated CUDA stream created for parallel inference.")
+except Exception as _stream_exc:
+    _florence_cuda_stream = None  # fallback: default stream, no parallelism loss
 
 _persister_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="Florence_Persister")
 
@@ -28,7 +46,7 @@ MOCK_DESCRIPTIONS = [
     "An operator walking past the camera range."
 ]
 
-CAPTION_PROMPT = "<MORE_DETAILED_CAPTION>"
+CAPTION_PROMPT = "<DETAILED_CAPTION>"
 
 
 def _florence_dispatch_interval_seconds() -> float:
@@ -46,13 +64,13 @@ def _florence_dispatch_interval_seconds() -> float:
 def _florence_max_new_tokens() -> int:
     cfg = get_models().get("florence", {})
     if isinstance(cfg, dict):
-        tokens = cfg.get("max_new_tokens", 1024)
+        tokens = cfg.get("max_new_tokens", 512)
         try:
             tokens = int(tokens)
         except (TypeError, ValueError):
-            tokens = 1024
-        return max(32, tokens)
-    return 1024
+            tokens = 512
+        return max(32, min(512, tokens))
+    return 512
 
 
 def _florence_caption_batch_size() -> int:
@@ -304,8 +322,8 @@ class FlorenceRoundRobinScheduler:
                     pending_count += 1
                 camera_stats[camera_id] = {
                     "pending": is_pending,
-                    "pending_since": datetime.datetime.fromtimestamp(slot.pending_at, datetime.timezone.utc).isoformat() if slot.pending_at else None,
-                    "last_captioned_at": datetime.datetime.fromtimestamp(slot.last_captioned_at, datetime.timezone.utc).isoformat() if slot.last_captioned_at else None,
+                    "pending_since": datetime.datetime.fromtimestamp(slot.pending_at, IST_TZ).isoformat() if slot.pending_at else None,
+                    "last_captioned_at": datetime.datetime.fromtimestamp(slot.last_captioned_at, IST_TZ).isoformat() if slot.last_captioned_at else None,
                     "last_caption": slot.last_caption,
                     "last_error": slot.last_error,
                 }
@@ -368,7 +386,12 @@ def generate_scene_captions(frames: list[np.ndarray], corr_id: str | None = None
             if frame is None or frame.size == 0:
                 pil_images.append(None)
                 continue
-            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w = frame.shape[:2]
+            if w > 640 or h > 360:
+                proc_frame = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_AREA)
+            else:
+                proc_frame = frame
+            rgb_image = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGB)
             pil_images.append(Image.fromarray(rgb_image))
 
         valid_indexes = [index for index, image in enumerate(pil_images) if image is not None]
@@ -403,8 +426,9 @@ def generate_scene_captions(frames: list[np.ndarray], corr_id: str | None = None
                 "pad_token_id": pad_id
             }
 
-            with torch.inference_mode():
-                generated_ids = model.generate(**gen_kwargs)
+            # Run Florence on its dedicated CUDA stream so YOLO's default stream
+            # can proceed in parallel. Falls back to default stream on any error.
+            generated_ids = _run_florence_on_stream(model, gen_kwargs, corr_id=corr_id)
             logger.warning(f"[Florence-2 Debug] corr={corr_id} model.generate() took {time.time()-t_gen0:.2f}s")
             logger.warning(f"[Florence-2 Debug] corr={corr_id} 6. model.generate completed successfully!")
 
@@ -425,6 +449,41 @@ def generate_scene_captions(frames: list[np.ndarray], corr_id: str | None = None
         return [None for _ in frames]
 
 
+def _run_florence_on_stream(
+    model,
+    gen_kwargs: dict,
+    corr_id: str | None = None,
+):
+    """
+    Run Florence model.generate() on the dedicated CUDA stream.
+    Falls back gracefully:
+      - OOM on stream      → clear cache, retry on default stream
+      - Any other error    → log warning, retry on default stream
+      - No dedicated stream (CPU or creation failed) → default stream
+    """
+    if _florence_cuda_stream is not None:
+        try:
+            with torch.cuda.stream(_florence_cuda_stream):
+                with torch.inference_mode():
+                    result = model.generate(**gen_kwargs)
+            # Synchronise only the Florence stream — YOLO's default stream is unaffected.
+            _florence_cuda_stream.synchronize()
+            logger.debug(f"[Florence stream] corr={corr_id} inference completed on dedicated stream.")
+            return result
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            logger.warning(
+                f"[Florence stream OOM] corr={corr_id} — cache cleared, retrying on default stream."
+            )
+        except Exception as stream_err:
+            logger.warning(
+                f"[Florence stream error] corr={corr_id} {stream_err!r} — falling back to default stream."
+            )
+    # Default stream fallback (handles CPU, stream creation failure, or retry after OOM)
+    with torch.inference_mode():
+        return model.generate(**gen_kwargs)
+
+
 def generate_scene_caption(frame: np.ndarray, corr_id: str | None = None) -> str | None:
     captions = generate_scene_captions([frame], corr_id=corr_id)
     return captions[0] if captions else None
@@ -436,25 +495,77 @@ def get_florence_queue_stats() -> dict:
     return stats
 
 
-yolo_correlation_map: dict[str, str] = {}
+# ---------------------------------------------------------------------------
+# YOLO ↔ Florence frame-binding map (strict TTL-based, no count eviction)
+#
+# Each entry: corr_id → (yolo_summary, inserted_at_monotonic)
+# TTL = 3 minutes.  If Florence hasn't processed the frame within 3 minutes the
+# YOLO summary is considered stale and the caption is stored Florence-only.
+# This prevents any possibility of mismatched YOLO+Florence captions.
+# ---------------------------------------------------------------------------
+_YOLO_SUMMARY_TTL_SECONDS: float = 180.0  # 3 minutes
+yolo_correlation_map: dict[str, tuple[str, float]] = {}
 _yolo_lock = threading.Lock()
 
-def record_yolo_frame_summary(corr_id: str, yolo_summary: str):
-    """Stores YOLO summary for a given frame correlation ID so parallel Florence can bind with it."""
+
+def record_yolo_frame_summary(corr_id: str, yolo_summary: str) -> None:
+    """Stores YOLO summary bound to a frame corr_id for later Florence pairing.
+
+    Strict rule: only stored when both corr_id and summary are non-empty.
+    Map is TTL-pruned (3 min) on every write when size exceeds 2 000 entries.
+    Never raises — YOLO pipeline must not be disrupted by map errors.
+    """
     if not corr_id or not yolo_summary:
         return
-    with _yolo_lock:
-        yolo_correlation_map[corr_id] = yolo_summary
-        if len(yolo_correlation_map) > 500:
-            oldest_keys = list(yolo_correlation_map.keys())[:200]
-            for k in oldest_keys:
-                yolo_correlation_map.pop(k, None)
+    try:
+        now = time.monotonic()
+        with _yolo_lock:
+            yolo_correlation_map[corr_id] = (yolo_summary, now)
+            # TTL-prune when map is large (avoids unbounded growth on long-running servers)
+            if len(yolo_correlation_map) > 2000:
+                cutoff = now - _YOLO_SUMMARY_TTL_SECONDS
+                expired_keys = [
+                    k for k, (_, ts) in yolo_correlation_map.items() if ts < cutoff
+                ]
+                for k in expired_keys:
+                    yolo_correlation_map.pop(k, None)
+        with _round_robin_scheduler._lock:
+            for slot in _round_robin_scheduler._slots.values():
+                if slot.latest_metadata and slot.latest_metadata.get("corr_id") == corr_id:
+                    slot.latest_metadata["yolo_summary"] = yolo_summary
+    except Exception:
+        pass  # Never crash the YOLO pipeline due to a map bookkeeping error
+
 
 def get_yolo_frame_summary(corr_id: str) -> str:
+    """Retrieves the YOLO summary bound to corr_id, enforcing the 3-minute TTL.
+
+    Returns empty string (Florence-only path) on any failure:
+      - corr_id not found (unknown frame)
+      - entry expired (> 3 min since YOLO ran)
+      - any internal error
+    This guarantees YOLO and Florence captions are NEVER spliced from different frames.
+    """
     if not corr_id:
-        return ""
-    with _yolo_lock:
-        return yolo_correlation_map.get(corr_id, "")
+        return ""  # No corr_id → always Florence-only
+    try:
+        now = time.monotonic()
+        with _yolo_lock:
+            entry = yolo_correlation_map.get(corr_id)
+            if entry is None:
+                return ""  # Unknown frame → Florence stores alone
+            summary, inserted_at = entry
+            if (now - inserted_at) > _YOLO_SUMMARY_TTL_SECONDS:
+                # Expired: remove and return empty — do not splice stale YOLO data
+                yolo_correlation_map.pop(corr_id, None)
+                logger.info(
+                    f"[YOLO-MAP] corr={corr_id} TTL expired ({_YOLO_SUMMARY_TTL_SECONDS:.0f}s) "
+                    "— Florence caption stored without YOLO binding."
+                )
+                return ""
+            return summary
+    except Exception:
+        return ""  # Any map error → Florence stores alone safely, no mismatch
 
 
 def _async_caption_persister(florence_cap: str, metadata: dict):
@@ -486,13 +597,19 @@ def _async_caption_persister(florence_cap: str, metadata: dict):
         from ...messaging.kafka_client import event_client
 
         # Retrieve bound YOLO summary for the exact frame correlation ID
+        # Strict frame binding: YOLO summary retrieved by exact corr_id match.
+        # If expired or not found, caption is stored Florence-only — never spliced.
         yolo_summary = metadata.get("yolo_summary") or get_yolo_frame_summary(corr_id)
         f_text = florence_cap if florence_cap else "Active surveillance scene"
-        
+
+        # Embed frame capture timestamp so the UI can show "captured X ago"
+        frame_ts = metadata.get("frame_ts", "")
+        ts_suffix = f" | ts={frame_ts}" if frame_ts else ""  # omit if not available (old frames / fallback)
+
         if yolo_summary:
-            full_caption = f"[YOLO]: {yolo_summary} | [Florence-2]: {f_text} | camera {camera_id}"
+            full_caption = f"[YOLO]: {yolo_summary} | [Florence-2]: {f_text} | camera {camera_id}{ts_suffix}"
         else:
-            full_caption = f"[Florence-2]: {f_text} | camera {camera_id}"
+            full_caption = f"[Florence-2]: {f_text} | camera {camera_id}{ts_suffix}"
 
         embedding = None
         try:
@@ -530,6 +647,16 @@ def _async_caption_persister(florence_cap: str, metadata: dict):
 
         if embedding is not None:
             try:
+                # BUG-05 FIX: Extract dominant YOLO class from the caption prefix so the
+                # Qdrant payload carries a structured yolo_class field for cross-class filtering.
+                _yolo_class = None
+                if yolo_summary:
+                    # yolo_summary is like "1 black motorcycle, 2 person" — grab first noun
+                    import re as _re
+                    _match = _re.search(r'\b(car|motorcycle|truck|bus|bicycle|person|van|suv|rickshaw|scooter|moped)\b', yolo_summary.lower())
+                    if _match:
+                        _yolo_class = _match.group(1)
+
                 from ...workers.ai_worker import index_vector
                 index_vector(
                     vector_id=vid,
@@ -539,7 +666,8 @@ def _async_caption_persister(florence_cap: str, metadata: dict):
                         "camera_id": camera_id,
                         "caption": full_caption,
                         "snapshot_url": snap_url,
-                        "timestamp": now_ist.isoformat()
+                        "timestamp": now_ist.isoformat(),
+                        "yolo_class": _yolo_class,
                     }
                 )
                 logger.info(f"[FLORENCE-TRACE] corr={corr_id} PERSISTER vector indexed "
@@ -564,7 +692,23 @@ def _async_caption_persister(florence_cap: str, metadata: dict):
         logger.warning(f"[Florence-2 Async] Persistence error: {exc}")
 
 
-def submit_async_scene_caption(frame: np.ndarray, camera_id: str, yolo_summary: str = "", corr_id: str | None = None) -> bool:
+def submit_async_scene_caption(
+    frame: np.ndarray,
+    camera_id: str,
+    yolo_summary: str = "",
+    corr_id: str | None = None,
+    frame_ts: str = "",
+) -> bool:
+    """Submit a frame to the async Florence caption queue.
+
+    Args:
+        frame:        Raw BGR numpy frame from the camera.
+        camera_id:    Camera identifier string.
+        yolo_summary: YOLO detection summary for this exact frame (bound by corr_id).
+        corr_id:      Unique correlation ID for this frame (used for strict YOLO binding).
+        frame_ts:     IST wall-clock timestamp string of when the frame was captured
+                      (embedded in the stored caption as ``ts=...`` for UI staleness display).
+    """
     from backend.ai.captioning.caption_integrity import caption_integrity_validator
     image_id, envelope = caption_integrity_validator.create_envelope(
         frame=frame,
@@ -581,6 +725,7 @@ def submit_async_scene_caption(frame: np.ndarray, camera_id: str, yolo_summary: 
         "camera_id": camera_id,
         "yolo_summary": yolo_summary,
         "corr_id": image_id,
+        "frame_ts": frame_ts,   # wall-clock capture time — embedded in stored caption
         "frame": frame.copy() if frame is not None else None
     }
     return _round_robin_scheduler.register_pending_frame(camera_id, frame, metadata)

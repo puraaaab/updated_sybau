@@ -179,7 +179,8 @@ def soft_delete_user(
     if target.username == current_user.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account.")
 
-    target.deleted_at = datetime.datetime.now(datetime.timezone.utc)
+    from ..utils.timezone import get_ist_now
+    target.deleted_at = get_ist_now()
     target.status = "disabled"
 
     db.add(AuditLog(

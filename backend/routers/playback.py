@@ -14,8 +14,23 @@ router = APIRouter(tags=["Playback & Alerts"])
 
 @router.get("/alerts")
 def get_alerts_history(db: Session = Depends(get_db), user=Depends(verify_viewer)):
+    from ..utils.timezone import format_ist_str
     alerts = db.query(Alert).order_by(Alert.timestamp.desc()).limit(100).all()
-    return alerts
+    results = []
+    for a in alerts:
+        results.append({
+            "id": a.id,
+            "camera_id": a.camera_id,
+            "type": a.type,
+            "message": a.message,
+            "severity": a.severity,
+            "confidence": a.confidence,
+            "timestamp": format_ist_str(a.timestamp),
+            "latency_ms": a.latency_ms,
+            "snapshot_url": a.snapshot_url,
+            "is_acknowledged": a.is_acknowledged
+        })
+    return results
 
 
 @router.post("/alerts/{alert_id}/acknowledge")
@@ -52,22 +67,8 @@ def serve_snapshot(snap_id: str, user=Depends(verify_media_access)):
         if p and os.path.exists(p):
             return FileResponse(p, media_type="image/jpeg")
 
-    # Special handling for full scene frame requests (full_*)
-    if snap_id.startswith("full_"):
-        if os.path.exists(snap_dir):
-            for f in os.listdir(snap_dir):
-                if (f.startswith("full_cam_") or f.startswith("full_frame_")) and f.endswith(('.jpg', '.png')):
-                    return FileResponse(os.path.join(snap_dir, f), media_type="image/jpeg")
-
-    # Fallback to any snapshot file in storage matching camera/track prefix
-    try:
-        prefix = snap_id.split('_')[0] if '_' in snap_id else snap_id[:8]
-        if os.path.exists(snap_dir):
-            for f in os.listdir(snap_dir):
-                if not f.startswith("full_") and f.startswith(prefix) and f.endswith(('.jpg', '.png')):
-                    return FileResponse(os.path.join(snap_dir, f), media_type="image/jpeg")
-    except Exception:
-        pass
+    # For full_* requests that don't have a matching file, fall through to the SVG placeholder
+    # (do NOT search for any full_cam_* file — that would leak other cameras' frames)
             
     # Return SVG placeholder response to prevent broken image icons on frontend
     svg_placeholder = (

@@ -76,7 +76,8 @@ def get_suspect_co_occurrence(
         from ..config.service import get_models
         cfg = get_models()
         if cfg.get("demo_mode", False):
-            now = datetime.datetime.now(datetime.timezone.utc)
+            from ..utils.timezone import get_ist_now
+            now = get_ist_now()
             groups = [
                 {
                     "group_id": "GRP_DEMO_001",
