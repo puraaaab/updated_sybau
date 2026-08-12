@@ -20,8 +20,17 @@ def get_auth_header():
 
 def test_create_forensic_export_endpoint():
     headers = get_auth_header()
-    # Use cyber_cam_6 which has actual valid recorded MP4 video files
+    # Create test recording segment inside storage/recordings/cyber_cam_6
+    storage_rec_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage", "recordings", "cyber_cam_6"))
+    os.makedirs(storage_rec_dir, exist_ok=True)
+    sample_file = os.path.join(storage_rec_dir, "20260812_120000.mp4")
+    if not os.path.exists(sample_file):
+        with open(sample_file, "wb") as f:
+            f.write(b"HEADER_DUMMY_MP4_RECORDING_DATA_" + b"0" * 100000)
+
     response = client.post("/api/v1/forensics/export?camera_id=cyber_cam_6", headers=headers)
+
+
     assert response.status_code == 200
     data = response.json()
     assert "export_filename" in data

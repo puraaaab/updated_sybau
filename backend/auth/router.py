@@ -247,15 +247,35 @@ def _seed_users(db: Session):
         ("operator", "Operator@123456", "operator", True),
         ("viewer",   "Viewer@123456",   "viewer",   True),
     ]
-    for uname, pwd, role, force_change in default_accounts:
-        existing = db.query(User).filter(User.username == uname).first()
-        if not existing:
-            db.add(User(
-                username=uname,
-                password_hash=get_password_hash(pwd),
-                role=role,
-                status="active",
-                must_change_password=force_change,
-            ))
-    db.commit()
+    try:
+        for uname, pwd, role, force_change in default_accounts:
+            existing = db.query(User).filter(User.username == uname).first()
+            if not existing:
+                db.add(User(
+                    username=uname,
+                    password_hash=get_password_hash(pwd),
+                    role=role,
+                    status="active",
+                    must_change_password=force_change,
+                ))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        try:
+            from ..database.connection import engine, Base
+            Base.metadata.create_all(bind=engine)
+            for uname, pwd, role, force_change in default_accounts:
+                existing = db.query(User).filter(User.username == uname).first()
+                if not existing:
+                    db.add(User(
+                        username=uname,
+                        password_hash=get_password_hash(pwd),
+                        role=role,
+                        status="active",
+                        must_change_password=force_change,
+                    ))
+            db.commit()
+        except Exception:
+            db.rollback()
+
 

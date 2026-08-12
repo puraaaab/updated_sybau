@@ -1,10 +1,10 @@
 services:
-  # MediaMTX Streaming Server
+  # MediaMTX Streaming Server for RTSP / WebRTC / HLS / RTMP
   mediamtx:
     image: bluenviron/mediamtx:latest
     container_name: vms_mediamtx
     ports:
-      - "9997:9997"  # MediaMTX API
+      - "9997:9997"  # API
       - "8554:8554"  # RTSP
       - "1935:1935"  # RTMP
       - "8888:8888"  # HLS
@@ -22,16 +22,17 @@ services:
       - MTX_HLSMAXPLAYLISTS=30
     restart: unless-stopped
 
-  # PostgreSQL for metadata and event history
+  # PostgreSQL 15 for metadata, canonical events, journeys & audit ledgers
   postgres:
     image: postgres:15-alpine
     container_name: vms_postgres
     environment:
       POSTGRES_DB: vms_db
       POSTGRES_USER: vms_user
-      POSTGRES_PASSWORD: vms_password
+      POSTGRES_PASSWORD: vms_prod_sec_pass_2026!
     ports:
       - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -52,7 +53,8 @@ services:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
-  # MinIO Object Storage for video files & images
+
+  # MinIO Object Storage for video clips, snapshots & redacted privacy derivatives
   minio:
     image: minio/minio:latest
     container_name: vms_minio
@@ -61,19 +63,25 @@ services:
       - "9000:9000"  # API
       - "9001:9001"  # Web Console
     environment:
-      MINIO_ROOT_USER: minio_admin
-      MINIO_ROOT_PASSWORD: minio_password
+      MINIO_ROOT_USER: vms_minio_admin
+      MINIO_ROOT_PASSWORD: vms_minio_secret_pass_2026!
     volumes:
       - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
-  # Kafka + Zookeeper for event communication
+  # Kafka + Zookeeper for asynchronous event streaming
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: vms_zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -91,25 +99,41 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     restart: unless-stopped
 
-  # FastAPI Backend Service
+  # FastAPI Production Backend Service
   backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
     container_name: vms_backend
     ports:
-      - "8000:8000"
+      - "7000:8000"
+
+
     environment:
-      - DATABASE_URL=postgresql://vms_user:vms_password@postgres:5432/vms_db
+      - APP_ENV=production
+      - DATABASE_URL=postgresql://vms_user:vms_prod_sec_pass_2026!@postgres:5432/vms_db
       - QDRANT_HOST=qdrant
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - QUEUE_FRAME_MAX_SIZE=100
+      - QUEUE_INFERENCE_MAX_SIZE=50
+      - QUEUE_RECORDING_MAX_SIZE=500
+      - QUEUE_FORENSIC_MAX_SIZE=1000
+      - QUEUE_NOTIFICATION_MAX_SIZE=200
     depends_on:
       postgres:
         condition: service_healthy
       qdrant:
         condition: service_started
+
+      minio:
+        condition: service_healthy
     volumes:
       - ./storage:/app/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
   # Nginx + Vite Frontend Service
@@ -119,9 +143,15 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: vms_frontend
     ports:
-      - "80:80"
+      - "3000:80"
+
     depends_on:
       - backend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
 volumes:

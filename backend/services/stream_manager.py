@@ -30,6 +30,12 @@ class CameraStream:
         self.is_online = False
         self.ref_count = 0
 
+        # PyAV Audio Extraction Queue (bounded)
+        from ..config.queue_config import create_queue
+        self.audio_queue = create_queue("frame", custom_name=f"audio_{camera_id}")
+        self.audio_thread: Optional[threading.Thread] = None
+
+
     def add_consumer(self):
         with self._lock:
             self.ref_count += 1
@@ -48,15 +54,55 @@ class CameraStream:
         self.running = True
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
-        logger.info(f"[StreamManager] Capture thread started for Camera {self.camera_id}")
+        self.audio_thread = threading.Thread(target=self._audio_extraction_loop, daemon=True)
+        self.audio_thread.start()
+        logger.info(f"[StreamManager] Capture and Audio threads started for Camera {self.camera_id}")
 
     def stop(self):
         self.running = False
         if self.thread:
             self.thread.join(timeout=5)
             self.thread = None
+        if self.audio_thread:
+            self.audio_thread.join(timeout=3)
+            self.audio_thread = None
         CameraStateMachine.update_state(self.camera_id, CameraStateMachine.DISCONNECTED)
         logger.info(f"[StreamManager] Capture thread stopped for Camera {self.camera_id}")
+
+    def get_audio_chunk(self, block: bool = False, timeout: Optional[float] = None) -> Optional[bytes]:
+        """Retrieves raw 16kHz mono PCM audio chunk from bounded queue."""
+        if self.audio_queue.empty():
+            return None
+        try:
+            return self.audio_queue.get(block=block, timeout=timeout)
+        except Exception:
+            return None
+
+    def _audio_extraction_loop(self):
+        """Demuxes RTSP audio stream using PyAV or FFmpeg subprocess into PCM chunks."""
+        resolved_url = resolve_stream_url(self.camera_id, self.stream_url)
+        if not resolved_url or not (resolved_url.startswith("rtsp://") or resolved_url.startswith("http://")):
+            return
+
+        try:
+            import av
+            container = av.open(resolved_url, timeout=5.0)
+            audio_stream = next((s for s in container.streams if s.type == 'audio'), None)
+            if not audio_stream:
+                return
+
+            resampler = av.AudioResampler(format='s16', layout='mono', rate=16000)
+            for packet in container.demux(audio_stream):
+                if not self.running:
+                    break
+                for frame in packet.decode():
+                    resampled_frames = resampler.resample(frame)
+                    for r_frame in resampled_frames:
+                        pcm_bytes = r_frame.to_ndarray().tobytes()
+                        self.audio_queue.put(pcm_bytes)
+        except Exception as e:
+            logger.debug(f"[StreamManager] PyAV audio demux note for Camera {self.camera_id}: {e}")
+
 
     def get_frame(self, since_ts: float = 0.0) -> Tuple[bool, Optional[np.ndarray], float]:
         """

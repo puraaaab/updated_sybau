@@ -596,20 +596,35 @@ class CameraAIWorker:
                             pending_snapshot_writes.append((snap_path, frame))
 
                             raw_lat = (time.time() - start_time) * 1000.0
-                            calc_latency = inference_latency_ms  # pure YOLO inference time, not DB write time
+                            calc_latency = inference_latency_ms  # pure YOLO inference time
                             alert_conf = float(alert.get("confidence", 0.95))
-                            db_alert = Alert(
+
+                            now_dt = datetime.datetime.now(_IST)
+                            time_block_10s = int(now_dt.timestamp() // 10)
+                            dedup_key = f"{self.camera_id}_{alert['type']}_{time_block_10s}"
+
+                            db_alert = CanonicalEvent(
+                                event_uuid=snap_id,
+                                deduplication_key=dedup_key,
                                 camera_id=self.camera_id,
-                                type=alert["type"],
-                                message=alert["message"],
+                                event_type=alert["type"],
+                                source_type="video",
+                                source_component="ai_pipeline",
+                                status="DETECTED",
+                                message=alert.get("message", f"Detected {alert['type']}"),
                                 severity=alert["severity"],
                                 confidence=alert_conf,
-                                timestamp=datetime.datetime.now(_IST),
+                                model_name="YOLOv8",
+                                model_version="v8.0",
+                                inference_backend="PyTorch/CUDA",
+                                timestamp_start=now_dt,
+                                timestamp_end=now_dt,
                                 latency_ms=calc_latency,
                                 snapshot_url=f"/api/v1/playback/snapshot/{snap_id}"
                             )
                             db.add(db_alert)
                             db.flush() # assign ID before commit
+
 
                             from ..utils.timezone import format_ist_str
                             pending_alert_events.append({
