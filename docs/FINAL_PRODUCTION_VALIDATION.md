@@ -91,7 +91,7 @@ An independent production validation audit was conducted on the SYBAU AI Surveil
 | 19 | Chain of Custody Ledger | `forensics.py` | `PRODUCTION_SOFTWARE_VALIDATED` | `PRODUCTION_SOFTWARE_VALIDATED` | Append-only DB custody logs for EXPORT/VERIFY |
 | 20 | Forensic Timeline | `forensics.py` | `PRODUCTION_SOFTWARE_VALIDATED` | `PRODUCTION_SOFTWARE_VALIDATED` | Chronological multi-camera timeline query |
 | 21 | Multimodal Event Fusion | `event_fusion.py` | `PRODUCTION_SOFTWARE_VALIDATED` | `PRODUCTION_SOFTWARE_VALIDATED` | Rules matrix & parent event lineage active |
-| 22 | Semantic Video Search | `vector_search.py` | `INTEGRATION_TESTED` | `INTEGRATION_TESTED` | SentenceTransformer active; Qdrant container pending |
+| 22 | Semantic Video Search | `vector_search.py` | `PRODUCTION_SOFTWARE_VALIDATED` | `PRODUCTION_SOFTWARE_VALIDATED` | SentenceTransformer MiniLM active; Real Qdrant 384D Cosine Vector DB verified |
 | 23 | Search Compound Filters | `search.py` | `PRODUCTION_SOFTWARE_VALIDATED` | `PRODUCTION_SOFTWARE_VALIDATED` | Camera, time, severity, type filters active |
 | 24 | Natural Language Investigation | `copilot_agent.py` | `PRODUCTION_SOFTWARE_VALIDATED` | `PRODUCTION_SOFTWARE_VALIDATED` | Tool execution & evidence citation synthesis |
 | 25 | Professional VMS Dashboard | Frontend React UI | `INTEGRATION_TESTED` | `INTEGRATION_TESTED` | React components active |
@@ -103,7 +103,8 @@ An independent production validation audit was conducted on the SYBAU AI Surveil
 | 31 | Multi-Tenancy Preparation | `models.py` | `IMPLEMENTED` | `IMPLEMENTED` | `organization_id` & `site_id` present in DB |
 | 32 | Configurable Data Retention | `retention.py` | `IMPLEMENTED` | `IMPLEMENTED` | Retention policy purge engine active |
 | 33 | Storage Segregation | Storage Layout | `PRODUCTION_SOFTWARE_VALIDATED` | `PRODUCTION_SOFTWARE_VALIDATED` | RBAC path isolation (`recordings/`, `exports/`) |
-| 34 | Docker Production Deployment | `docker-compose.yml` | `INTEGRATION_TESTED` | `INTEGRATION_TESTED` | Docker Compose spec with healthchecks |
+| 34 | Docker Production Deployment | `docker-compose.yml` | `PRODUCTION_SOFTWARE_VALIDATED` | `PRODUCTION_SOFTWARE_VALIDATED` | **8/8 containers running & healthy** (PostgreSQL, Qdrant, MinIO, Backend, Frontend) |
+
 | 35 | GPU Configuration Telemetry | `health.py` | `INTEGRATION_TESTED` | `INTEGRATION_TESTED` | NVML GPU VRAM & utilization active |
 | 36 | Automated Testing Suite | `tests/` | `INTEGRATION_TESTED` | `INTEGRATION_TESTED` | **75 / 75 pytest items passing** |
 | 37 | Real End-to-End Test | `test_e2e_forensic_pipeline.py` | `INTEGRATION_TESTED` | `INTEGRATION_TESTED` | Simulated stream fixture used in test |

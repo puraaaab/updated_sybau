@@ -1,9 +1,12 @@
 import os
 import sys
+from dotenv import load_dotenv
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '.env')))
 
 from backend.database.connection import SessionLocal, engine, Base
+
 from backend.database.models import Camera
 from sqlalchemy import text
 
@@ -29,35 +32,34 @@ for uname, pwd, role in users_to_seed:
         db.add(User(username=uname, password_hash=get_password_hash(pwd), role=role))
 db.commit()
 
-# 1. Seed video cameras ONLY if database table is completely empty
-# (prevents re-creating cameras that the user explicitly deleted from the UI)
-videos_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'Videos'))
+# Clear old sample cameras and seed ONLY the user MOV videos from videos/ directory
+videos_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'videos'))
+video_files = [f for f in os.listdir(videos_dir) if f.lower().endswith(('.mov', '.mp4', '.avi', '.mkv'))] if os.path.exists(videos_dir) else []
+sorted_vfiles = sorted(video_files)
 
-cams_def = [
-    ('cam_1', 'Central Bus Depo', 'Platform Area', os.path.join(videos_dir, 'Export__Central Bus Depo-Entry Gate Platform Area_Friday July 10 2026110138  b33bb2a.avi'), 21.2035, 72.8406),
-    ('cam_2', 'Chauta Bazaar A', 'Market Entrance', os.path.join(videos_dir, 'Export__Chauta Bazaar-003_Friday July 10 202655158  c62a714.avi'), 21.1959, 72.8194),
-    ('cam_3', 'Chauta Bazaar B', 'Market Inside', os.path.join(videos_dir, 'Export__Chauta Bazaar-003_Friday July 10 202655158  c62a714 (1).avi'), 21.1965, 72.8210),
-    ('cam_4', 'Gopi Talav', 'Gate', os.path.join(videos_dir, 'Export__Gopi Talav-Towards Gopi Talav Gate_Friday July 10 202661000  dc1f515.avi'), 21.1901, 72.8252),
-    ('cam_5', 'Mahidharpura', 'Diamond Mkt', os.path.join(videos_dir, 'Export__Mahidharpura-Pipla Sheri Diamond Mkt_Friday July 10 202655441  beb5fa4.avi'), 21.2012, 72.8315),
-    ('cam_6', 'Rly Station', 'Bismillah Rest', os.path.join(videos_dir, 'Export__Rly Station-Towards Bismillah Rest left_Friday July 10 202661242  09a94cc.avi'), 21.2052, 72.8412),
-    ('cam_7', 'Merged View', 'Custom', os.path.join(videos_dir, 'merged.mp4'), 21.2052, 72.8412),
+# Wipe all existing camera records to ensure old sample feeds are completely removed
+db.query(Camera).delete()
+db.commit()
+
+cams_locations = [
+    ("Central Bus Depo", "Platform Area", 21.2035, 72.8406),
+    ("Chauta Bazaar", "Market Entrance", 21.1959, 72.8194),
+    ("Railway Station", "Main Terminal", 21.2052, 72.8412),
+    ("Mahidharpura", "Diamond Mkt", 21.2012, 72.8315),
+    ("Gopi Talav", "Main Gate", 21.1901, 72.8252),
 ]
 
-existing_count = db.query(Camera).count()
-if existing_count == 0:
-    for cid, cname, cloc, curl, clat, clon in cams_def:
-        db.add(Camera(
-            id=cid, name=cname, location=cloc, stream_url=curl,
-            status='online', width=1920, height=1080, latitude=clat, longitude=clon
-        ))
+for idx, vf in enumerate(sorted_vfiles, start=1):
+    cid = f"cam_{idx}"
+    vpath = os.path.join(videos_dir, vf)
+    cname, cloc, clat, clon = cams_locations[(idx-1) % len(cams_locations)]
+    cname_full = f"{cname} ({vf})"
+    db.add(Camera(
+        id=cid, name=cname_full, location=cloc, stream_url=vpath,
+        status='online', width=1920, height=1080, latitude=clat, longitude=clon
+    ))
+    print(f"Seeded user video camera feed: {cid} -> {cname_full} ({vf})")
 
-    db.commit()
-    print('Base video camera feeds seeded successfully.')
-
-    from backend.scripts.seed_cyber_crime_cams import seed_cyber_crime_dataset_cameras
-    seed_cyber_crime_dataset_cameras()
-else:
-    print(f'Database already populated with {existing_count} camera(s). Preserving user camera configuration.')
-
+db.commit()
 db.close()
 

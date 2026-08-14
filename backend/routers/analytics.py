@@ -28,22 +28,35 @@ def get_ai_status(user=Depends(verify_viewer)):
     florence_loaded = "florence" in models
     embedder_loaded = is_embedder_ready()
 
-    all_ready = yolo_loaded and embedder_loaded
+    florence_cfg = get_models().get("florence", {})
+    florence_enabled = florence_cfg.get("enabled", False)
+    moondream_cfg = get_models().get("moondream", {})
+    moondream_enabled = moondream_cfg.get("enabled", True)
 
-    import os
-    yolo_cfg = get_models().get("yolo", {})
-    yolo_model_path = yolo_cfg.get("model_path", "yolo26l.pt")
-    yolo_name = os.path.basename(yolo_model_path).replace(".pt", "").upper()
+    yolo_name = getattr(model_manager, "_yolo_model_name", "YOLO")
+    
+    # All active enabled models must be loaded for overall READY status
+    all_ready = (
+        yolo_loaded 
+        and ocr_loaded 
+        and embedder_loaded 
+        and (not florence_enabled or florence_loaded)
+    )
+
+    models_dict = {
+        yolo_name: "LOADED" if yolo_loaded else "LOADING",
+        "OCR": "LOADED" if ocr_loaded else "LOADING",
+        "Embedder": "LOADED" if embedder_loaded else "LOADING",
+    }
+    if florence_enabled:
+        models_dict["Florence"] = "LOADED" if florence_loaded else "LOADING"
+    if moondream_enabled:
+        models_dict["Moondream"] = "CLOUD_READY"
 
     return {
         "status": "READY" if all_ready else "PREWARMING",
         "all_ready": all_ready,
-        "models": {
-            yolo_name: "LOADED" if yolo_loaded else "LOADING",
-            "OCR": "LOADED" if ocr_loaded else "LOADING",
-            "Embedder": "LOADED" if embedder_loaded else "LOADING",
-            "Florence": "LOADED" if florence_loaded else "LOADING"
-        }
+        "models": models_dict
     }
 
 

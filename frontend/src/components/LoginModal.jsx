@@ -35,14 +35,16 @@ export default function LoginModal({ open, onLogin, error, loading }) {
       open={open}
       fullWidth
       maxWidth="xs"
-      PaperProps={{
-        sx: {
-          bgcolor: 'background.paper',
-          color: 'text.primary',
-          border: '1px solid',
-          borderColor: 'divider',
-          borderRadius: 2,
-          boxShadow: 8
+      slotProps={{
+        paper: {
+          sx: {
+            bgcolor: 'background.paper',
+            color: 'text.primary',
+            border: '1px solid',
+            borderColor: 'divider',
+            borderRadius: 2,
+            boxShadow: 8
+          }
         }
       }}
     >

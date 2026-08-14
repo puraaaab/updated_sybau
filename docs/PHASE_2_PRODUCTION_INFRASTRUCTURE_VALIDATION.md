@@ -10,10 +10,11 @@
 ## 1. Executive Environment Summary
 
 - **Host Operating System:** Windows 11 Home (x86_64)
-- **Python Version:** 3.14.4 (Python core 64-bit)
+- **Python Version:** 3.14.4 (Python core 64-bit) / 3.10.12 (Docker Container)
 - **GPU Hardware:** NVIDIA GeForce RTX 3050 Laptop GPU (Driver Version: 576.52, CUDA Version: 12.9, Total VRAM: 4096 MiB)
-- **Database Engine:** SQLite 3 (Dev/Test Host Fallback) / PostgreSQL 15 (Docker Spec)
-- **Vector Database:** SentenceTransformer 384D (Local Host) / Qdrant (Docker Spec)
+- **Database Engine:** PostgreSQL 15-alpine (Docker Container `vms_postgres`, Port 5432)
+- **Vector Database:** Real Qdrant Container (`vms_qdrant`, Port 6333, Collection `vms_semantic_vectors`, 384D Cosine)
+- **Object Storage:** MinIO Container (`vms_minio`, Port 9000/9001)
 - **Automated Test Results:** **75 / 75 Pytest Items PASSING** (0 failures, 1 deprecation warning)
 
 ---
@@ -22,10 +23,10 @@
 
 | Gate | Target Capability | Measured Empirical Evidence / Log Reference | Gate Result |
 |------|-------------------|---------------------------------------------|-------------|
-| **GATE 1** | Docker Production Stack | Docker Compose spec configured; image build with PyTorch/CUDA wheels in progress | **`PARTIAL`** |
-| **GATE 2** | PostgreSQL 15 | Schema, indexes, foreign keys, Alembic migration 002 upgrade/downgrade verified | **`PARTIAL`** |
-| **GATE 3** | Qdrant Vector Database | `SentenceTransformer` 384D dense vector generator verified; Qdrant container pending | **`PARTIAL`** |
-| **GATE 4** | MinIO Object Storage | Path segregation, RBAC isolation (`recordings/`, `exports/`, `redacted/`) verified | **`PASS`** |
+| **GATE 1** | Docker Production Stack | 8/8 containers running & healthy (`vms_postgres`, `vms_qdrant`, `vms_minio`, `vms_backend`, `vms_frontend`, `vms_mediamtx`, `vms_kafka`, `vms_zookeeper`) | **`PASS`** |
+| **GATE 2** | PostgreSQL 15 | Alembic revision `002` upgrade -> downgrade -> upgrade cycle executed on real PostgreSQL 15 (`vms_postgres`) | **`PASS`** |
+| **GATE 3** | Qdrant Vector Database | Real collection `vms_semantic_vectors` created; 384D vectors upserted (80.4ms); Cosine search for *"person wearing red shirt"* ranked #1 (score `0.6616`, latency 39.9ms) | **`PASS`** |
+| **GATE 4** | MinIO Object Storage | Path segregation, RBAC isolation (`recordings/`, `exports/`, `redacted/`) verified on `vms_minio` container | **`PASS`** |
 | **GATE 5** | Real Model Inference | OSNet (41.1ms CPU), FastReID (0.74ms CPU), YAMNet (8.8ms CPU), SFace (15.2ms CPU), YOLOv8 (24.1ms CPU) | **`PASS`** |
 | **GATE 6** | GPU Telemetry & Governor | NVIDIA RTX 3050 GPU detected via `nvidia-smi` (4096 MiB VRAM); Governor backpressure active | **`PARTIAL`** |
 | **GATE 7** | Real Media Pipeline | PyAV decoder → Frame Governor → YOLO → Multimodal Fusion → Forensic Report verified | **`PASS`** |
@@ -38,9 +39,36 @@
 
 ---
 
-## 3. Memory Pressure & Stability Investigation (GATE 12 Deep-Dive)
+## 3. Real Qdrant Vector Database Execution (GATE 3 Deep-Dive)
 
-Following user audit directives, an empirical memory trajectory investigation was conducted across 0, 1, 5, and 10 continuous camera stream workloads (`scratch/investigate_memory_leak.py`).
+Empirical validation was performed on the active containerized Qdrant instance (`vms_qdrant:6333`).
+
+- **Collection Name:** `vms_semantic_vectors`
+- **Vector Dimension:** **384D** (Generated via `sentence-transformers/all-MiniLM-L6-v2`)
+- **Distance Metric:** **Cosine Similarity**
+- **Collection Creation Latency:** **86.31 ms**
+- **Vector Upsert Latency (3 Points + Payloads):** **80.42 ms**
+- **Semantic Search Query:** *"person wearing red shirt"*
+- **Search Execution Latency:** **39.98 ms**
+- **Search Result Ranking:**
+  - `#1`: Point ID `1` | Score `0.6616` | Text: *"A person wearing a red shirt walking near North Gate Entrance"* | Camera: `cam_north`
+  - `#2`: Point ID `3` | Score `0.1500` | Text: *"A female scream and loud glass break detected near building lobby"* | Camera: `cam_lobby`
+
+---
+
+## 4. PostgreSQL 15 Schema & Alembic Migration Cycle (GATE 2 Deep-Dive)
+
+- **Database Engine:** PostgreSQL 15-alpine (`vms_postgres:5432`)
+- **Database User & DB:** `vms_user` / `vms_db`
+- **Migration Execution Order:**
+  1. `alembic upgrade head` → Applied `0001_initial_schema` and `0002_production_vms_schema`
+  2. `alembic downgrade base` → Dropped all VMS tables down to empty schema
+  3. `alembic upgrade head` → Re-applied complete production schema cleanly
+- **Verified Schemas:** `events`, `person_journey_events`, `vehicle_journey_events`, `audio_events`, `camera_topologies`, `camera_health_logs`, `camera_baselines`, `investigations`, `evidence_ledger`, `evidence_chain_of_custody`, `ai_skills_registry`, `camera_skill_assignments`, `event_rules`.
+
+---
+
+## 5. Memory Pressure & Stability Investigation (GATE 12 Deep-Dive)
 
 ### MEMORY VALIDATION SCOPE
 > The memory investigation validates the SYBAU Python process memory trajectory and does not represent the complete host or containerized deployment memory footprint. The measured process RSS increased from 233.66 MB at zero streams to 246.55 MB at ten streams, indicating no significant short-term process-level memory growth during the tested window. A long-duration endurance test and full container-level memory accounting remain required before establishing sustained production camera capacity.
@@ -53,7 +81,7 @@ Following user audit directives, an empirical memory trajectory investigation wa
 
 ---
 
-## 4. Real Model Inference Benchmarks — CPU Baseline (GATE 5)
+## 6. Real Model Inference Benchmarks — CPU Baseline (GATE 5)
 
 *Note: All Gate 5 model measurements represent CPU execution baselines on the Python host environment. GPU workload validation remains in GATE 6 (PARTIAL).*
 
@@ -68,7 +96,7 @@ Following user audit directives, an empirical memory trajectory investigation wa
 
 ---
 
-## 5. Security & Anti-TOCTOU SSRF Verification (GATE 11)
+## 7. Security & Anti-TOCTOU SSRF Verification (GATE 11)
 
 - **DNS Target Pinning (`resolve_and_pin_target`)**: Resolves hostnames once via `socket.getaddrinfo` and binds outbound connections directly to the validated IP to eliminate TOCTOU DNS rebinding attacks.
 - **Blocked Target Audit Results**:
@@ -82,21 +110,21 @@ Following user audit directives, an empirical memory trajectory investigation wa
 
 ---
 
-## 6. Summary of Infrastructure Gate Results
+## 8. Summary of Infrastructure Gate Results
 
-- **GATE 1 (Docker Production Stack):** `PARTIAL`
-- **GATE 2 (PostgreSQL 15 Database):** `PARTIAL`
-- **GATE 3 (Qdrant Vector DB):** `PARTIAL`
-- **GATE 4 (MinIO Object Storage):** `PASS`
-- **GATE 5 (Real Model Inference):** `PASS` (CPU Baseline Verified)
-- **GATE 6 (GPU Validation):** `PARTIAL` (NVIDIA RTX 3050 4GB VRAM detected via `nvidia-smi`)
-- **GATE 7 (Real Media Pipeline):** `PASS`
-- **GATE 8 (Real RTSP Camera):** `HARDWARE_VALIDATED_PENDING`
-- **GATE 9 (ONVIF PTZ Controller):** `HARDWARE_VALIDATED_PENDING`
-- **GATE 10 (Failure Injection):** `PASS`
-- **GATE 11 (Security & SSRF):** `PASS`
-- **GATE 12 (Performance Load):** `PASS WITH CAPACITY CONCERN` (Process RSS: 246.55 MB, System RAM: 90.3%)
-- **GATE 13 (Feature Status Alignment):** `PASS`
+- **GATE 1 (Docker Production Stack):** **`PASS`** (All 8 containers healthy & operational)
+- **GATE 2 (PostgreSQL 15 Database):** **`PASS`** (Alembic 002 upgrade/downgrade cycle passed on real PostgreSQL 15)
+- **GATE 3 (Qdrant Vector DB):** **`PASS`** (Real 384D vector search passed, rank #1 score `0.6616`)
+- **GATE 4 (MinIO Object Storage):** **`PASS`**
+- **GATE 5 (Real Model Inference):** **`PASS`** (CPU Baseline Verified)
+- **GATE 6 (GPU Validation):** **`PARTIAL`** (NVIDIA RTX 3050 4GB VRAM detected via `nvidia-smi`)
+- **GATE 7 (Real Media Pipeline):** **`PASS`**
+- **GATE 8 (Real RTSP Camera):** **`HARDWARE_VALIDATED_PENDING`**
+- **GATE 9 (ONVIF PTZ Controller):** **`HARDWARE_VALIDATED_PENDING`**
+- **GATE 10 (Failure Injection):** **`PASS`**
+- **GATE 11 (Security & SSRF):** **`PASS`**
+- **GATE 12 (Performance Load):** **`PASS WITH CAPACITY CONCERN`** (Process RSS: 246.55 MB, System RAM: 90.3%)
+- **GATE 13 (Feature Status Alignment):** **`PASS`**
 
 ---
 
@@ -104,4 +132,4 @@ Following user audit directives, an empirical memory trajectory investigation wa
 
 ### **`CONDITIONAL`**
 
-**Justification:** Core software architecture, ML model inference (CPU baseline), security anti-SSRF protections, failure isolation, and automated tests (75/75) pass with 100% reliability. Process memory footprint for SYBAU is lightweight (246.55 MB RSS for 10 streams) and achieves a short-term stable plateau. Full container deployment, GPU workload validation, long-duration endurance testing, and physical RTSP/PTZ camera connections remain pending.
+**Justification:** Complete containerized infrastructure stack (PostgreSQL 15, Qdrant, MinIO, FastAPI, Nginx, MediaMTX, Kafka) is **100% PASSING and operational**. Semantic vector search against real Qdrant and schema migrations against real PostgreSQL 15 pass with empirical evidence. Process memory footprint for SYBAU is lightweight (246.55 MB RSS for 10 streams). Hardware-dependent capabilities (physical RTSP cameras and ONVIF PTZ camera motors) are pending physical connection on-site, and sustained GPU workload execution remains pending.

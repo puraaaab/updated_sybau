@@ -143,12 +143,11 @@ class ModelManager:
             cfg = get_models().get("vehicle", {})
             engine_choice = cfg.get("ocr_engine", "paddleocr").lower()
 
-            if engine_choice == "paddleocr":
+            def _try_paddleocr():
                 try:
                     import numpy as _np
-                    import torch
-                    from paddleocr import PaddleOCR
-                    import paddleocr as _pocr_mod
+                    from paddleocr import PaddleOCR  # type: ignore
+                    import paddleocr as _pocr_mod  # type: ignore
                     use_gpu = torch.cuda.is_available()
                     _pocr_ver = tuple(int(x) for x in getattr(_pocr_mod, "__version__", "2.0.0").split(".")[:2])
                     print(f"Loading PaddleOCR ultra-fast license plate engine (GPU={use_gpu})...", flush=True)
@@ -161,26 +160,52 @@ class ModelManager:
                         _probe = _np.ones((32, 128, 3), dtype=_np.uint8) * 128
                         reader.ocr(_probe, cls=False)
                     print(f"PaddleOCR inference probe passed — engine is healthy (GPU={use_gpu}).", flush=True)
-                    res = ("paddleocr", reader)
+                    return ("paddleocr", reader)
+                except Exception as e:
+                    print(f"PaddleOCR note ({e}), trying fallback OCR engine...", flush=True)
+                    return None
+
+            def _try_rapidocr():
+                try:
+                    from rapidocr_onnxruntime import RapidOCR
+                    import onnxruntime as ort
+                    providers = ort.get_available_providers()
+                    use_gpu = ("CUDAExecutionProvider" in providers or "TensorrtExecutionProvider" in providers) and torch.cuda.is_available()
+                    print(f"Loading RapidOCR Engine (GPU={use_gpu})...", flush=True)
+                    reader = RapidOCR()
+                    return ("rapidocr", reader)
+                except Exception as e:
+                    print(f"RapidOCR note ({e}), trying fallback OCR engine...", flush=True)
+                    return None
+
+            def _try_easyocr():
+                try:
+                    import easyocr
+                    use_gpu = torch.cuda.is_available()
+                    print(f"Loading EasyOCR reader (GPU={use_gpu})...", flush=True)
+                    reader = easyocr.Reader(['en'], gpu=use_gpu)
+                    return ("easyocr", reader)
+                except Exception as e:
+                    print(f"EasyOCR note ({e}), trying fallback OCR engine...", flush=True)
+                    return None
+
+            loaders = []
+            if engine_choice == "paddleocr":
+                loaders = [_try_paddleocr, _try_rapidocr, _try_easyocr]
+            elif engine_choice == "rapidocr":
+                loaders = [_try_rapidocr, _try_paddleocr, _try_easyocr]
+            else:
+                loaders = [_try_easyocr, _try_paddleocr, _try_rapidocr]
+
+            for loader in loaders:
+                res = loader()
+                if res is not None:
                     self._models["ocr"] = res
                     return res
-                except Exception as e:
-                    print(f"PaddleOCR note ({e}), falling back to EasyOCR...", flush=True)
 
-            try:
-                import easyocr
-                import torch
-                use_gpu = torch.cuda.is_available()
-                print(f"Loading EasyOCR reader (GPU={use_gpu})...", flush=True)
-                reader = easyocr.Reader(['en'], gpu=use_gpu)
-                res = ("easyocr", reader)
-                self._models["ocr"] = res
-                return res
-            except Exception as e:
-                print(f"EasyOCR note ({e}), falling back to MockOCR...", flush=True)
-                res = ("mock", MockOCR())
-                self._models["ocr"] = res
-                return res
+            res = ("mock", MockOCR())
+            self._models["ocr"] = res
+            return res
 
     def get_florence(self):
         logger.debug(f"[FLORENCE-TRACE] get_florence() called, cached={'florence' in self._models}")

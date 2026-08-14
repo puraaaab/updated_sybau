@@ -5,7 +5,7 @@ import numpy as np
 from ..detection.yolo import detect_and_track
 from ..tracking.tracker import trajectory_tracker
 from ..face.face_pipeline import process_faces
-from ..vehicle.vehicle_reid import process_vehicles
+from ..vehicle.vehicle_reid import process_vehicles, detect_vehicle_color as detect_crop_color
 from ..behavior.behavior_engine import behavior_engine
 from ..captioning.captioner import generate_scene_caption, submit_async_scene_caption
 from ..captioning.moondream_captioner import submit_moondream_caption
@@ -95,7 +95,6 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     alerts = behavior_engine.check_behaviors(tracks, zones, alerts_cfg, float(frame_width), float(frame_height))
     
     # 5. Build instant detailed frame scene caption with colors and attributes
-    from ..vehicle.vehicle_reid import detect_crop_color
     description_parts = []
     
     # 5a. Vehicles with colors and license plates

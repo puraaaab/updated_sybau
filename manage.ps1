@@ -7,13 +7,22 @@ param (
 $ErrorActionPreference = "Continue"
 $ProjectRoot = $PSScriptRoot
 
-# Path to the project's virtual environment Python executable
+# Path to Python executable (virtualenv or system python fallback)
 $VenvPython = "$ProjectRoot\.venv\Scripts\python.exe"
+if (-not (Test-Path $VenvPython)) {
+    $foundPython = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if ($foundPython) {
+        $VenvPython = $foundPython
+    } else {
+        $VenvPython = "python"
+    }
+}
+
 
 function Test-DockerAvailable {
     try {
         $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c docker info >nul 2>&1" -WindowStyle Hidden -PassThru
-        if (-not $p.WaitForExit(3000)) {
+        if (-not $p.WaitForExit(8000)) {
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
             return $false
         }
@@ -97,7 +106,7 @@ function Start-VMS {
         Set-Location $ProjectRoot
         cmd.exe /c "docker compose up -d postgres qdrant mediamtx minio zookeeper kafka"
         Write-Host "  Waiting for infrastructure services..."
-        Start-Sleep -Seconds 8
+        Start-Sleep -Seconds 1
     } else {
         Write-Host "  Docker Desktop daemon not responding - system using local fallback database." -ForegroundColor Yellow
     }
@@ -111,12 +120,13 @@ function Start-VMS {
     # Load .env so VMS_SECRET_KEY and other vars are available to uvicorn.
     # Without this every restart generates a new ephemeral JWT key, invalidating all browser sessions.
     $envFile = "$ProjectRoot\.env"
-    $envPrefix = ""
+    $envArg = ""
     if (Test-Path $envFile) {
-        $envPrefix = "set /p nul< NUL && for /f `"usebackq tokens=1,* delims==`" %%A in (`"$envFile`") do if not `"%%A`"==`"`" set `"%%A=%%B`" && "
+        $envArg = "--env-file `".env`""
     }
-    $bCmd = "/c cd /d `"$ProjectRoot`" && `"$VenvPython`" -u -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --no-access-log --env-file `".env`" > `"$LogsDir\backend.log`" 2>&1"
+    $bCmd = "/c cd /d `"$ProjectRoot`" && `"$VenvPython`" -u -m uvicorn backend.main:app --host 0.0.0.0 --port 7000 --no-access-log $envArg > `"$LogsDir\backend.log`" 2>&1"
     Start-Process cmd.exe -ArgumentList $bCmd -WindowStyle Hidden
+
 
     # 5. Start Frontend (Vite)
     Write-Host "  Starting Frontend server (Vite)... (Logging to logs\frontend.log)"
@@ -132,19 +142,21 @@ function Start-VMS {
     Write-Host "  Waiting for backend to respond..."
     $backendReady = $false
     $attempts = 0
-    while (-not $backendReady -and $attempts -lt 40) {
-        Start-Sleep -Seconds 2
+    while (-not $backendReady -and $attempts -lt 80) {
+        Start-Sleep -Milliseconds 500
         $attempts++
         try {
-            $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/docs" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-            if ($r.StatusCode -eq 200) {
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $tcp.Connect("127.0.0.1", 7000)
+            if ($tcp.Connected) {
                 $backendReady = $true
+                $tcp.Close()
             }
         } catch {
-            # Backend warming up on startup
+            # Backend starting up
         }
-        if ($attempts % 5 -eq 0) {
-            Write-Host "    Backend initialization progress... ($($attempts * 2)s elapsed)"
+        if ($attempts % 10 -eq 0) {
+            Write-Host "    Backend initialization progress... ($($attempts / 2)s elapsed)"
         }
     }
     if ($backendReady) {
@@ -156,8 +168,9 @@ function Start-VMS {
     Write-Host ""
     Write-Host "All VMS Services Started!" -ForegroundColor Green
     Write-Host "  Frontend : http://localhost:5173" -ForegroundColor Cyan
-    Write-Host "  Backend  : http://localhost:8000" -ForegroundColor Cyan
-    Write-Host "  API Docs : http://localhost:8000/docs" -ForegroundColor Cyan
+    Write-Host "  Backend  : http://localhost:7000" -ForegroundColor Cyan
+    Write-Host "  API Docs : http://localhost:7000/docs" -ForegroundColor Cyan
+
 }
 
 switch ($Action) {

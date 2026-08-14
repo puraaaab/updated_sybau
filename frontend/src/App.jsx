@@ -59,10 +59,12 @@ import WatchlistManager from './components/WatchlistManager';
 import ArchivePlayback from './components/ArchivePlayback';
 import DiscoveryScanner from './components/DiscoveryScanner';
 import ForensicsManager from './components/ForensicsManager';
-import SettingsConsole from './components/SettingsConsole';
 import TrajectoryMap from './components/TrajectoryMap';
+import CameraManagement from './components/CameraManagement';
+import SettingsConsole from './components/SettingsConsole';
 import RecordsConsole from './components/RecordsConsole';
 import LoginModal from './components/LoginModal';
+import AIChatbot from './components/AIChatbot';
 
 const drawerWidth = 240;
 
@@ -671,7 +673,7 @@ export default function App() {
                       AI Subsystem Status: {aiStatus.status}
                     </Typography>
                     {Object.entries(aiStatus.models || {}).map(([modelName, status]) => (
-                      <Typography key={modelName} variant="caption" display="block" sx={{ color: status === 'LOADED' ? '#00e676' : '#ffb300' }}>
+                      <Typography key={modelName} variant="caption" display="block" sx={{ color: (status === 'LOADED' || status === 'CLOUD_READY') ? '#00e676' : '#ffb300' }}>
                         ● {modelName}: {status}
                       </Typography>
                     ))}
@@ -686,13 +688,11 @@ export default function App() {
                       height: 9,
                       borderRadius: '50%',
                       backgroundColor: aiStatus.all_ready ? '#00e676' : '#ffb300',
-                      boxShadow: aiStatus.all_ready 
-                        ? '0 0 10px #00e676, 0 0 4px #00e676' 
-                        : '0 0 10px #ffb300, 0 0 4px #ffb300'
+                      boxShadow: aiStatus.all_ready ? '0 0 8px #00e676' : '0 0 8px #ffb300',
                     }}
                   />
-                  <Typography variant="caption" sx={{ fontSize: '0.7rem', fontWeight: 700, color: aiStatus.all_ready ? '#00e676' : '#ffb300', letterSpacing: '0.5px' }}>
-                    {aiStatus.all_ready ? 'AI ONLINE' : 'AI LOADING'}
+                  <Typography variant="caption" sx={{ fontWeight: 'bold', color: aiStatus.all_ready ? '#00e676' : '#ffb300' }}>
+                    {aiStatus.all_ready ? 'AI ONLINE' : 'AI PREWARMING'}
                   </Typography>
                 </Box>
               </Tooltip>
@@ -967,6 +967,7 @@ export default function App() {
             </Button>
           </DialogActions>
         </Dialog>
+        <AIChatbot />
       </Box>
     </ThemeProvider>
   );

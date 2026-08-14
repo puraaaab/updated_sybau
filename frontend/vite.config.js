@@ -6,11 +6,22 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
+      // WebSocket alerts channel (must precede /api)
+      '/api/v1/ws': {
+        target: 'ws://127.0.0.1:7000',
+        ws: true,
+        changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('error', (err) => {
+            if (err.code === 'ECONNREFUSED' || err.code === 'ECONNABORTED') return;
+            console.error('[vite] ws proxy error:', err.message);
+          });
+        },
+      },
       // All /api/* calls from the frontend are rewritten to /api/v1/* on the backend.
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://127.0.0.1:7000',
         changeOrigin: true,
-        ws: true,
         rewrite: (path) => path.startsWith('/api/v1') ? path : path.replace(/^\/api/, '/api/v1'),
         configure: (proxy) => {
           proxy.on('error', (err, _req, res) => {
@@ -22,19 +33,6 @@ export default defineConfig({
               return;
             }
             console.error('[vite] proxy error:', err.message);
-          });
-        },
-      },
-      // WebSocket alerts channel
-      '/ws': {
-        target: 'ws://127.0.0.1:8000',
-        ws: true,
-        changeOrigin: true,
-        rewrite: (path) => path.startsWith('/api/v1/ws') ? path : path.replace(/^\/ws/, '/api/v1/ws'),
-        configure: (proxy) => {
-          proxy.on('error', (err) => {
-            if (err.code === 'ECONNREFUSED' || err.code === 'ECONNABORTED') return;
-            console.error('[vite] ws proxy error:', err.message);
           });
         },
       },

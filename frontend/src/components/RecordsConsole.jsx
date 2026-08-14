@@ -807,8 +807,10 @@ export default function RecordsConsole({ token }) {
               onClose={() => setPreviewImage(null)}
               maxWidth="lg"
               fullWidth
-              PaperProps={{
-                sx: { backgroundColor: '#0f172a', color: '#fff', border: '1px solid #334155' }
+              slotProps={{
+                paper: {
+                  sx: { backgroundColor: '#0f172a', color: '#fff', border: '1px solid #334155' }
+                }
               }}
             >
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', p: 2, borderBottom: '1px solid #334155' }}>

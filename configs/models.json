@@ -3,7 +3,9 @@
   "yolo": {
     "model_path": "yolo26l.pt",
     "device": "cuda",
-    "confidence": 0.25
+    "imgsz": 960,
+    "confidence": 0.20,
+    "sampling_rate_fps": 10
   },
   "face": {
     "enabled": true,
@@ -14,14 +16,14 @@
   "vehicle": {
     "enabled": true,
     "reid_model": "market1501",
-    "ocr_engine": "paddleocr",
+    "ocr_engine": "rapidocr",
     "device": "cuda"
   },
   "person": {
     "device": "cuda"
   },
   "florence": {
-    "enabled": true,
+    "enabled": false,
     "model_id": "microsoft/Florence-2-base",
     "device": "cuda",
     "invoke_every_n_frames": 4,

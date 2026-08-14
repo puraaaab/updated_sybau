@@ -939,11 +939,13 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
         onClose={() => setExpandedCamera(null)}
         maxWidth="lg"
         fullWidth
-        PaperProps={{
-          sx: {
-            backgroundColor: '#090d16',
-            border: '1px solid rgba(0, 230, 118, 0.4)',
-            borderRadius: 2,
+        slotProps={{
+          paper: {
+            sx: {
+              backgroundColor: '#090d16',
+              border: '1px solid rgba(0, 230, 118, 0.4)',
+              borderRadius: 2,
+            }
           }
         }}
       >

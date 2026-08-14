@@ -15,7 +15,8 @@ router = APIRouter(tags=["Playback & Alerts"])
 @router.get("/alerts")
 def get_alerts_history(db: Session = Depends(get_db), user=Depends(verify_viewer)):
     from ..utils.timezone import format_ist_str
-    alerts = db.query(Alert).order_by(Alert.timestamp.desc()).limit(100).all()
+    alerts = db.query(Alert).order_by(Alert.timestamp_start.desc()).limit(100).all()
+
     results = []
     for a in alerts:
         results.append({
@@ -26,9 +27,10 @@ def get_alerts_history(db: Session = Depends(get_db), user=Depends(verify_viewer
             "severity": a.severity,
             "confidence": a.confidence,
             "timestamp": format_ist_str(a.timestamp),
-            "latency_ms": a.latency_ms,
+            "latency_ms": getattr(a, 'latency_ms', 0.0),
             "snapshot_url": a.snapshot_url,
             "is_acknowledged": a.is_acknowledged
+
         })
     return results
 

@@ -2,25 +2,18 @@ import os
 import subprocess
 import time
 import sys
+from dotenv import load_dotenv
 
 # Force stdout to flush immediately so logs appear in nvr.log (pipe buffering fix)
 sys.stdout.reconfigure(line_buffering=True)
 
 # Ensure the backend module is discoverable
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-
-# ---------------------------------------------------------------------------
-# Load all cameras from the database and publish local file sources to
-# MediaMTX via RTSP so that MediaMTX can serve them as HLS streams.
-#
-# Each camera whose stream_url is a local file path gets published to:
-#   rtsp://127.0.0.1:8554/{camera_id}
-# MediaMTX then exposes it as:
-#   http://localhost:8888/{camera_id}/index.m3u8  (HLS)
-# ---------------------------------------------------------------------------
+load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '.env')))
 
 def get_local_file_cameras():
-    """Query the DB for cameras whose source is a local file path."""
+    """Query the DB for cameras whose source is a local file path or synthetic stream."""
+    cams = []
     try:
         from backend.database.connection import engine
         from sqlalchemy import text
@@ -28,30 +21,29 @@ def get_local_file_cameras():
             rows = conn.execute(text(
                 "SELECT id, stream_url FROM cameras WHERE stream_url IS NOT NULL"
             )).fetchall()
-        result = []
         for row in rows:
             cam_id, url = row[0], row[1]
             if not url:
                 continue
-            # Skip YouTube / HTTP / RTSP external sources — only local files
             lower = url.lower()
             if lower.startswith("http") or lower.startswith("rtsp://") or "youtube" in lower or "youtu.be" in lower:
                 continue
-            # Normalize Windows path separators
             normalized = url.replace("\\", "/")
-            if os.path.isfile(normalized) or os.path.isfile(url):
-                actual_path = normalized if os.path.isfile(normalized) else url
-                result.append((cam_id, actual_path))
-            else:
-                print(f"[NVR] Warning: file not found for camera {cam_id}: {url}")
-        return result
+            actual_path = normalized if os.path.isfile(normalized) else url
+            cams.append((cam_id, actual_path))
     except Exception as e:
-        print(f"[NVR] DB lookup failed, falling back to static list: {e}")
-        return _static_fallback()
+        print(f"[NVR] DB lookup failed: {e}")
+        cams = _static_fallback()
+
+    if not cams:
+        cams = [
+            ("cam_1", ""), ("cam_2", ""), ("cam_3", ""), ("cam_4", ""),
+            ("cam_5", ""), ("cam_6", ""), ("cam_7", "")
+        ]
+    return cams
 
 
 def _static_fallback():
-    """Original static list as a fallback if DB is unavailable."""
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'Videos'))
     entries = [
         ("cam_1", "Export__Central Bus Depo-Entry Gate Platform Area_Friday July 10 2026110138  b33bb2a.avi"),
@@ -65,8 +57,8 @@ def _static_fallback():
     return [
         (cam_id, os.path.join(base_dir, filename))
         for cam_id, filename in entries
-        if os.path.isfile(os.path.join(base_dir, filename))
     ]
+
 
 
 # Target ~30fps sources; keyframe every 1s keeps HLS/WHEP startup + live-edge latency low.
@@ -106,13 +98,19 @@ def start_ffmpeg(video_path, rtsp_url, cam_id):
         "-bufsize", "1M",
     ]
 
+    is_file = video_path and os.path.isfile(video_path)
+    if is_file:
+        input_args = ["-noautorotate", "-re", "-stream_loop", "-1", "-i", video_path]
+    else:
+        input_args = ["-f", "lavfi", "-i", f"testsrc=size=1280x720:rate={FPS}"]
+
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-fflags", "+genpts+igndts+nobuffer",
         "-flags", "low_delay",
         "-err_detect", "ignore_err",
-        "-re", "-stream_loop", "-1", "-i", video_path,
-    ] + vcodec_args + [
+    ] + input_args + vcodec_args + [
+        "-pix_fmt", "yuv420p",
         "-g", str(KEYFRAME_INTERVAL),
         "-bf", "0",
         "-forced-idr", "1",

@@ -168,7 +168,7 @@ _http_lock = threading.Lock()
 
 def _get_http_client() -> httpx.Client:
     global _http_client
-    api_key = _get_api_key()
+    api_key, _, _ = _get_next_api_key()
     with _http_lock:
         if _http_client is None or _http_client.is_closed:
             _http_client = httpx.Client(
@@ -184,10 +184,10 @@ def _get_http_client() -> httpx.Client:
 
 
 # ── Image encoding ────────────────────────────────────────────────────────────
-def _encode_frame(frame: np.ndarray, max_dim: int = 1280) -> str:
+def _encode_frame(frame: np.ndarray, max_dim: int = 1920) -> str:
     """
     Resize to max_dim on longest side, JPEG-encode, return data-URI base64 string.
-    1280px gives maximum clarity for reading small text and small objects.
+    1920px (Full HD) with 95% JPEG quality ensures fine details, small objects, and signs are fully preserved.
     """
     h, w = frame.shape[:2]
     if max(h, w) > max_dim:
@@ -195,7 +195,7 @@ def _encode_frame(frame: np.ndarray, max_dim: int = 1280) -> str:
         frame = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))),
                            interpolation=cv2.INTER_LINEAR)
     # OpenCV imencode expects native BGR array. Passing frame directly preserves correct color channels in JPEG.
-    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
     if not ok:
         raise RuntimeError("JPEG encode failed")
     b64 = base64.b64encode(buf.tobytes()).decode("ascii")
@@ -270,12 +270,20 @@ def _worker_thread():
             logger.info(f"[Moondream INTEGRITY PASS] corr={corr_id} cam={camera_id} caption complete")
 
         except Exception as e:
-            logger.error(f"[Moondream] corr={corr_id} cam={camera_id} ERROR: {e}", exc_info=True)
+            err_msg = str(e)
+            if "No valid Moondream API Key" in err_msg:
+                # Log clean warning once per minute without stack trace noise
+                now_mono = time.monotonic()
+                if not hasattr(_worker_thread, "_last_key_warn") or (now_mono - getattr(_worker_thread, "_last_key_warn", 0)) > 60:
+                    logger.warning("[Moondream] MOONDREAM_API_KEY not configured in .env yet — cloud captioning paused until key is added.")
+                    setattr(_worker_thread, "_last_key_warn", now_mono)
+            else:
+                logger.error(f"[Moondream] corr={corr_id} cam={camera_id} ERROR: {e}", exc_info=True)
             with _slots_lock:
                 slot = _slots.get(camera_id)
                 if slot:
                     slot.pending    = False
-                    slot.last_error = str(e)
+                    slot.last_error = err_msg
             with _stats_lock:
                 _stats["errors"] += 1
         finally:

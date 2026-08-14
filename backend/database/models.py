@@ -8,8 +8,9 @@ Evidence Chain of Custody, AI Skill Registry, and Event Rules.
 
 import datetime
 from sqlalchemy import Column, Index, Integer, String, Float, Boolean, DateTime, Text, ForeignKey
-from sqlalchemy.orm import relationship
+from sqlalchemy.ext.hybrid import hybrid_property
 from .connection import Base
+
 
 # Timezone-aware IST helper — Indian Standard Time (+05:30)
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -111,13 +112,24 @@ class CanonicalEvent(Base):
             kwargs["deduplication_key"] = f"{cam}_{ev_type}_{int(time.time())}"
         super().__init__(**kwargs)
 
-    @property
+    @hybrid_property
     def timestamp(self):
         return self.timestamp_start
 
-    @property
+    @hybrid_property
     def type(self):
         return self.event_type
+
+    @hybrid_property
+    def message(self):
+        try:
+            import json
+            meta = json.loads(self.metadata_json or "{}")
+            return meta.get("message", f"{self.event_type} on {self.camera_id}")
+        except Exception:
+            return f"{self.event_type} on {self.camera_id}"
+
+
 
 
 # For backward compatibility with legacy endpoints querying `Alert`
@@ -475,3 +487,30 @@ class SceneCaption(Base):
     caption = Column(Text, nullable=False)
     snapshot_url = Column(String, nullable=True)
     timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)
+
+
+class ChatSession(Base):
+    """Stores persistent AI Chatbot investigation sessions."""
+    __tablename__ = "chat_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_uuid = Column(String, unique=True, index=True, nullable=False)
+    username = Column(String, default="operator", index=True)
+    title = Column(String, default="Surveillance AI Chat")
+    created_at = Column(DateTime(timezone=True), default=_istnow, index=True)
+    updated_at = Column(DateTime(timezone=True), default=_istnow, index=True)
+
+
+class ChatMessage(Base):
+    """Stores individual user & AI messages with citations, image attachments, and timeline data."""
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_uuid = Column(String, index=True, nullable=False)
+    sender = Column(String, nullable=False)  # 'user' or 'assistant'
+    text = Column(Text, nullable=False)
+    image_url = Column(String, nullable=True)  # uploaded image attachment if any
+    timeline_json = Column(Text, default="[]", nullable=False)  # JSON array of trajectory sightings
+    citations_json = Column(Text, default="[]", nullable=False)
+    timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)
+

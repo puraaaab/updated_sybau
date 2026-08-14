@@ -164,6 +164,11 @@ async def lifespan(app: FastAPI):
             def _delayed_florence_prewarm():
                 import time as _t
                 _t.sleep(5)  # Let YOLO process a few frames first
+                from .config.service import get_models
+                cfg = get_models().get("florence", {})
+                if not cfg.get("enabled", False):
+                    print("[Florence] Disabled in configs/models.json — skipping local model pre-warm to free GPU VRAM.", flush=True)
+                    return
                 from .ai.captioning.captioner import pre_warm as pre_warm_captioner
                 pre_warm_captioner()
             threading.Thread(target=_delayed_florence_prewarm, daemon=True, name="Florence_Prewarm").start()
@@ -230,6 +235,8 @@ app.include_router(proxy_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 from .routers.copilot import router as copilot_router
 app.include_router(copilot_router, prefix="/api/v1")
+from .routers.chat import router as chat_router
+app.include_router(chat_router, prefix="/api/v1")
 
 
 from fastapi.responses import PlainTextResponse

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from ..config.service import get_cameras, get_zones, get_alerts, get_models
 from ..ai.pipeline.orchestrator import process_frame
 from ..database.connection import SessionLocal
-from ..database.models import Track, Face, Vehicle, Alert, Camera, Zone, AlertConfig, SceneCaption, CustomAlertRule, RawOCR
+from ..database.models import Track, Face, Vehicle, Alert, Camera, Zone, AlertConfig, SceneCaption, CustomAlertRule, RawOCR, CanonicalEvent
 from ..messaging.kafka_client import event_client
 from ..services.stream_manager import stream_manager
 from ..ai.model_manager import model_manager
@@ -113,7 +113,11 @@ class CameraAIWorker:
         self.stream_url = stream_url
         self.running = False
         self.thread = None
-        self.sampling_rate = 3.0 # Lower churn to reduce CPU/memory backlog while Florence is busy
+        yolo_fps = get_models().get("yolo", {}).get("sampling_rate_fps", 15.0)
+        try:
+            self.sampling_rate = max(1.0, float(yolo_fps))
+        except (TypeError, ValueError):
+            self.sampling_rate = 15.0  # High-framerate 15-20 FPS tracking when Florence is disabled
         self._cached_zones = None
         self._cached_alerts_cfg = None
         self._last_cfg_fetch = 0.0
@@ -478,7 +482,7 @@ class CameraAIWorker:
                         new_db_vehs = []
                         for veh in results.get("vehicles", []):
                             resolved_identity = GlobalIdentityManager.get_or_create_vehicle_identity(
-                                veh["track_uuid"], self.camera_id, veh["reid_vector"], veh["license_plate"]
+                                veh["track_uuid"], self.camera_id, veh["reid_vector"], veh.get("license_plate")
                             )
                             plate_str = veh.get("license_plate")
                             if plate_str and str(plate_str).strip():

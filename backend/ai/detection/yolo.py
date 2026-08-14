@@ -77,21 +77,31 @@ def _parse_result_boxes(result) -> List[Dict[str, Any]]:
     return detections
 
 
+def _yolo_imgsz() -> int:
+    try:
+        return int(get_models().get("yolo", {}).get("imgsz", 960))
+    except (TypeError, ValueError):
+        return 960
+
+
 def detect_and_track(frame: np.ndarray):
-    """Executes YOLO detection on one camera frame."""
+    """Executes YOLO detection on one camera frame. FP16 on CUDA for speed."""
     yolo_model = None
     device_target = "cuda" if torch.cuda.is_available() else "cpu"
+    use_half = device_target == "cuda"
     try:
         yolo_model = model_manager.get_yolo()
         with model_manager.gpu_lock:
-            results = yolo_model.predict(
-                frame,
-                imgsz=960,
+            predict_kwargs = dict(
+                imgsz=_yolo_imgsz(),
                 classes=COCO_CLASS_IDS,
                 conf=_confidence_threshold(),
                 device=device_target,
                 verbose=False,
             )
+            if use_half:
+                predict_kwargs["half"] = True  # FP16 on GPU
+            results = yolo_model.predict(frame, **predict_kwargs)
         if results:
             return _parse_result_boxes(results[0])
     except Exception as e:
@@ -105,7 +115,7 @@ def detect_and_track_batch(
     frame_counters: List[int],
     skip_interval: int = 1,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Executes batched YOLO detection across multiple camera streams with selective frame skipping."""
+    """Executes batched YOLO detection across multiple camera streams with full FP32 precision."""
     batch_detections = {stream_id: [] for stream_id in stream_ids}
     safe_skip_interval = max(1, int(skip_interval or 1))
     frames_to_process = []
@@ -122,15 +132,18 @@ def detect_and_track_batch(
     try:
         yolo_model = model_manager.get_yolo()
         device_target = "cuda" if torch.cuda.is_available() else "cpu"
+        use_half = device_target == "cuda"
         with model_manager.gpu_lock:
-            results = yolo_model.predict(
-                frames_to_process,
-                imgsz=960,
+            predict_kwargs = dict(
+                imgsz=_yolo_imgsz(),
                 classes=COCO_CLASS_IDS,
                 conf=_confidence_threshold(),
                 device=device_target,
                 verbose=False,
             )
+            if use_half:
+                predict_kwargs["half"] = True  # FP16 on GPU
+            results = yolo_model.predict(frames_to_process, **predict_kwargs)
         for batch_idx, result in enumerate(results or []):
             if batch_idx >= len(active_stream_indices):
                 break
