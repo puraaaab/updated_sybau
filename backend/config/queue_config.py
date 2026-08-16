@@ -37,39 +37,16 @@ class BoundedQueue:
 
     def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> bool:
         """Puts an item into the bounded queue adhering to overflow policy."""
-        if self.overflow_policy == self.DROP_OLDEST:
-            if self._queue.full():
+        if self.overflow_policy == self.DROP_OLDEST or self.overflow_policy == self.COALESCE:
+            while True:
                 try:
-                    _evicted = self._queue.get_nowait()
-                except queue.Empty:
-                    pass
-            try:
-                self._queue.put_nowait(item)
-                return True
-            except queue.Full:
-                return False
-
-        elif self.overflow_policy == self.NEVER_DROP or self.overflow_policy == self.PERSIST:
-            try:
-                self._queue.put(item, block=block, timeout=timeout)
-                return True
-            except queue.Full:
-                if self.overflow_policy == self.PERSIST and not block:
-                    logger.error(f"[BoundedQueue:{self.name}] Forensic/Persist queue full (size={self.max_size})")
-                    raise BoundedQueueOverflowError(f"Persist queue '{self.name}' is full")
-                return False
-
-        elif self.overflow_policy == self.COALESCE:
-            if self._queue.full():
-                try:
-                    _evicted = self._queue.get_nowait()
-                except queue.Empty:
-                    pass
-            try:
-                self._queue.put_nowait(item)
-                return True
-            except queue.Full:
-                return False
+                    self._queue.put_nowait(item)
+                    return True
+                except queue.Full:
+                    try:
+                        self._queue.get_nowait()
+                    except queue.Empty:
+                        pass
 
         else:
             try:

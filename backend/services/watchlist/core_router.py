@@ -5,23 +5,23 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy.orm import Session
-from ..database.connection import get_db
-from ..database.models import GlobalIdentity
-from ..auth.helpers import verify_viewer, verify_operator, verify_admin
-from ..ai.face.face_pipeline import get_face_models
-from ..workers.ai_worker import index_vector
+from ...database.connection import get_db
+from ...database.models import GlobalIdentity
+from ...auth.helpers import verify_viewer, verify_operator, verify_admin, verify_media_access
+from ...ai.face.face_pipeline import get_face_models
+from ...workers.ai_worker import index_vector
 
-router = APIRouter(prefix="/watchlist", tags=["Watchlist"])
+router = APIRouter(tags=["Watchlist"])
 
 from fastapi.responses import FileResponse
-from ..database.models import Face, Track, Camera
+from ...database.models import Face, Track, Camera
 
-@router.get("")
+@router.get("/")
 def get_watchlist(user=Depends(verify_viewer), db: Session = Depends(get_db)):
     """
     Retrieve all target POIs registered in the live watchlist along with captured camera history and face crop URLs.
     """
-    from ..utils.timezone import get_ist_now, IST_TZ
+    from ...utils.timezone import get_ist_now, IST_TZ
     now = get_ist_now()
     identities = db.query(GlobalIdentity).filter(GlobalIdentity.type == "person").all()
     cams_dict = {c.id: c.name for c in db.query(Camera).all()}
@@ -79,8 +79,8 @@ def purge_expired_watchlist_entries(
     All deletions are logged in AuditLog for forensic compliance.
     This separates destructive operations from read-only GET endpoints.
     """
-    from ..utils.audit import log_audit_event
-    from ..utils.timezone import get_ist_now, IST_TZ
+    from ...utils.audit import log_audit_event
+    from ...utils.timezone import get_ist_now, IST_TZ
     now = get_ist_now()
     identities = db.query(GlobalIdentity).filter(GlobalIdentity.type == "person").all()
 
@@ -98,6 +98,8 @@ def purge_expired_watchlist_entries(
                 username=user.username,
                 ip_address=getattr(user, "_client_ip", None),
             )
+            from ...search.qdrant_utils import purge_poi_vectors
+            purge_poi_vectors(i.identity_uuid, i.embedding_id)
             db.delete(i)
 
     db.commit()
@@ -106,7 +108,7 @@ def purge_expired_watchlist_entries(
         "purged": purged,
     }
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_watchlist_poi(
     name: str = Form(...),
     description: str = Form(""),
@@ -127,8 +129,6 @@ async def create_watchlist_poi(
 
     ret, faces = detector.detect(img)
     if faces is None or len(faces) == 0:
-        # Fallback: if YuNet missed the face crop, process the entire image through SFace directly if small enough
-        # or resize to 112x112 standard input for SFace recognizer
         resized = cv2.resize(img, (112, 112))
         embedding_feats = recognizer.feature(resized)
     else:
@@ -137,16 +137,11 @@ async def create_watchlist_poi(
         embedding_feats = recognizer.feature(aligned)
 
     embedding_list = embedding_feats[0].tolist()
-    # AI-02 FIX: Store the actual SFace embedding at its real dimension (128).
-    # Previously, 384 zero dimensions were appended which degraded cosine similarity
-    # by adding pure noise to 75% of the vector space.
-    # The Qdrant face collection uses 128-dim vectors to match SFace output exactly.
 
     short_uuid = str(uuid.uuid4())[:6].upper()
     identity_uuid = f"POI_{short_uuid}"
 
-    # Save cropped face image to storage/snapshots
-    storage_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
+    storage_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage", "snapshots"))
     os.makedirs(storage_dir, exist_ok=True)
     crop_filename = f"poi_{identity_uuid}.jpg"
     crop_path = os.path.join(storage_dir, crop_filename)
@@ -157,7 +152,7 @@ async def create_watchlist_poi(
     else:
         cv2.imwrite(crop_path, img)
 
-    from ..utils.timezone import get_ist_now
+    from ...utils.timezone import get_ist_now
     now = get_ist_now()
     new_poi = GlobalIdentity(
         identity_uuid=identity_uuid,
@@ -169,11 +164,10 @@ async def create_watchlist_poi(
         snapshot_path=crop_filename
     )
     db.add(new_poi)
-    from ..utils.audit import log_audit_event
+    from ...utils.audit import log_audit_event
     log_audit_event(db, action="WATCHLIST_CREATE", detail=f"Added POI target profile '{name}' ({identity_uuid})", username=user.username)
     db.commit()
 
-    # Index into vector storage
     index_vector(
         vector_id=short_uuid,
         vector=embedding_list,
@@ -196,16 +190,18 @@ async def create_watchlist_poi(
 
 
 @router.get("/{identity_uuid}/snapshot")
-def get_poi_face_snapshot(identity_uuid: str, db: Session = Depends(get_db)):
+def get_poi_face_snapshot(
+    identity_uuid: str,
+    user=Depends(verify_media_access),
+    db: Session = Depends(get_db)
+):
     """Return the cropped face photo for a POI target identity."""
-    storage_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
+    storage_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage", "snapshots"))
     
-    # 1. Direct POI crop file (manually registered POI profile)
     crop_path = os.path.join(storage_dir, f"poi_{identity_uuid}.jpg")
     if os.path.exists(crop_path):
         return FileResponse(crop_path, media_type="image/jpeg")
 
-    # 2. Check Face records associated with this POI identity
     face = (
         db.query(Face)
         .filter((Face.label == identity_uuid) | (Face.label.ilike(f"%{identity_uuid}%")))
@@ -222,7 +218,6 @@ def get_poi_face_snapshot(identity_uuid: str, db: Session = Depends(get_db)):
             if os.path.exists(trk_path):
                 return FileResponse(trk_path, media_type="image/jpeg")
 
-    # 3. Fallback scan for any file containing identity_uuid
     if os.path.exists(storage_dir):
         for fname in os.listdir(storage_dir):
             if identity_uuid in fname and fname.endswith(('.jpg', '.png')):
@@ -255,10 +250,11 @@ def update_watchlist_poi(
     if new_name:
         old_name = poi.name
         poi.name = new_name
-        # Update linked face records so AI Search & Trajectory map find the renamed person
         db.query(Face).filter((Face.label == old_name) | (Face.label == poi.identity_uuid)).update({Face.label: new_name})
-        from ..utils.audit import log_audit_event
+        from ...utils.audit import log_audit_event
         log_audit_event(db, action="WATCHLIST_RENAME", detail=f"Renamed POI {poi.identity_uuid} from '{old_name}' to '{new_name}'", username=user.username)
+        from ...search.qdrant_utils import update_poi_vector_payload
+        update_poi_vector_payload(poi.identity_uuid, new_name)
         db.commit()
         db.refresh(poi)
 
@@ -267,13 +263,15 @@ def update_watchlist_poi(
 
 @router.delete("/{poi_id}")
 def delete_watchlist_poi(poi_id: int, user=Depends(verify_admin), db: Session = Depends(get_db)):
-    """Delete a target POI profile from live watchlist."""
+    """Delete a target POI profile from live watchlist and purge vectors."""
     poi = db.query(GlobalIdentity).filter(GlobalIdentity.id == poi_id).first()
     if not poi:
         raise HTTPException(status_code=404, detail="POI profile not found.")
 
-    from ..utils.audit import log_audit_event
+    from ...utils.audit import log_audit_event
     log_audit_event(db, action="WATCHLIST_DELETE", detail=f"Deleted POI profile '{poi.name}' ({poi.identity_uuid})", username=user.username)
+    from ...search.qdrant_utils import purge_poi_vectors
+    purge_poi_vectors(poi.identity_uuid, poi.embedding_id)
     db.delete(poi)
     db.commit()
     return {"message": "POI profile removed successfully."}

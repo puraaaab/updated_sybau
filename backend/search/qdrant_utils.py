@@ -202,3 +202,74 @@ def _qdrant_batch_worker():
             )
         except Exception as e:
             logger.warning(f"Qdrant batch upsert error ({len(batch)} points): {e}")
+
+
+def purge_poi_vectors(identity_uuid: str, embedding_id: Optional[str] = None):
+    """
+    Purges vector points matching a deleted POI identity from both in-memory
+    fallback storage and live Qdrant collection.
+    """
+    # 1. Purge from in-memory fallback cache
+    from ..ai.model_manager import model_manager
+    model_manager.vector_db = [
+        item for item in model_manager.vector_db
+        if item.get("payload", {}).get("identity_uuid") != identity_uuid
+        and item.get("id") != embedding_id
+    ]
+
+    # 2. Purge from live Qdrant collection
+    try:
+        from qdrant_client.http import models as qmodels
+        with qdrant_client_with_timeout(2.0) as client:
+            client.delete(
+                collection_name="vms_embeddings",
+                points_selector=qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key="identity_uuid",
+                            match=qmodels.MatchValue(value=identity_uuid)
+                        )
+                    ]
+                )
+            )
+            if embedding_id:
+                try:
+                    q_id = str(_uuid_mod.UUID(embedding_id))
+                except Exception:
+                    q_id = str(_uuid_mod.uuid5(_uuid_mod.NAMESPACE_DNS, embedding_id))
+                client.delete(
+                    collection_name="vms_embeddings",
+                    points_selector=qmodels.PointIdsList(points=[q_id])
+                )
+    except Exception as e:
+        logger.debug(f"Qdrant point deletion notice for POI {identity_uuid}: {e}")
+
+
+def update_poi_vector_payload(identity_uuid: str, new_name: str):
+    """
+    Updates POI metadata in both in-memory cache and live Qdrant collection.
+    """
+    # 1. Update in-memory fallback cache
+    from ..ai.model_manager import model_manager
+    for item in model_manager.vector_db:
+        if item.get("payload", {}).get("identity_uuid") == identity_uuid:
+            item["payload"]["label"] = new_name
+
+    # 2. Update live Qdrant collection payload
+    try:
+        from qdrant_client.http import models as qmodels
+        with qdrant_client_with_timeout(2.0) as client:
+            client.set_payload(
+                collection_name="vms_embeddings",
+                payload={"label": new_name},
+                points=qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key="identity_uuid",
+                            match=qmodels.MatchValue(value=identity_uuid)
+                        )
+                    ]
+                )
+            )
+    except Exception as e:
+        logger.debug(f"Qdrant payload update notice for POI {identity_uuid}: {e}")

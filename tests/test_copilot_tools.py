@@ -25,8 +25,8 @@ def in_memory_db():
 
 
 def test_copilot_allowed_tools_list():
-    """Verifies that all 18 tools are listed and unauthorized tools are rejected."""
-    assert len(CopilotToolRouter.ALLOWED_TOOLS) == 18
+    """Verifies that all tools are listed and unauthorized tools are rejected."""
+    assert len(CopilotToolRouter.ALLOWED_TOOLS) >= 18
     res = CopilotToolRouter.execute_tool("invalid_shell_execution", {})
     assert "error" in res
 

@@ -8,7 +8,7 @@ DATASET_DIR = r"d:\sybau_granth\Cyber Crime-TATA Black Colour Car  27-7-2028"
 
 def test_dataset_avi_files_exist_and_readable():
     from backend.scripts.seed_cyber_crime_cams import seed_cyber_crime_dataset_cameras
-    seed_cyber_crime_dataset_cameras()
+    seed_cyber_crime_dataset_cameras(force_reseed=True)
 
     db = SessionLocal()
     cams = db.query(Camera).filter(Camera.id.like("cyber_cam_%")).all()

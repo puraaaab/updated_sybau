@@ -2,63 +2,43 @@ import os
 import subprocess
 import time
 import sys
+import socket
 from dotenv import load_dotenv
 
-# Force stdout to flush immediately so logs appear in nvr.log (pipe buffering fix)
+# Force stdout to flush immediately so logs appear in nvr.log
 sys.stdout.reconfigure(line_buffering=True)
 
-# Ensure the backend module is discoverable
+# Ensure backend modules are discoverable
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '.env')))
 
+
 def get_local_file_cameras():
-    """Query the DB for cameras whose source is a local file path or synthetic stream."""
+    """Query the database for all active camera sources."""
     cams = []
     try:
-        from backend.database.connection import engine
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            rows = conn.execute(text(
-                "SELECT id, stream_url FROM cameras WHERE stream_url IS NOT NULL"
-            )).fetchall()
-        for row in rows:
-            cam_id, url = row[0], row[1]
-            if not url:
-                continue
-            lower = url.lower()
-            if lower.startswith("http") or lower.startswith("rtsp://") or "youtube" in lower or "youtu.be" in lower:
-                continue
-            normalized = url.replace("\\", "/")
-            actual_path = normalized if os.path.isfile(normalized) else url
-            cams.append((cam_id, actual_path))
+        from backend.database.connection import SessionLocal
+        from backend.database.models import Camera
+        db = SessionLocal()
+        try:
+            db_cams = db.query(Camera).order_by(Camera.id).all()
+            for c in db_cams:
+                url = c.stream_url
+                if not url:
+                    continue
+                lower = url.lower()
+                if lower.startswith("http") or lower.startswith("rtsp://") or "youtube" in lower or "youtu.be" in lower:
+                    continue
+                normalized = url.replace("\\", "/")
+                actual_path = normalized if os.path.isfile(normalized) else url
+                cams.append((c.id, actual_path))
+        finally:
+            db.close()
     except Exception as e:
-        print(f"[NVR] DB lookup failed: {e}")
-        cams = _static_fallback()
+        print(f"[NVR] Dynamic DB camera lookup note: {e}")
+        return None
 
-    if not cams:
-        cams = [
-            ("cam_1", ""), ("cam_2", ""), ("cam_3", ""), ("cam_4", ""),
-            ("cam_5", ""), ("cam_6", ""), ("cam_7", "")
-        ]
     return cams
-
-
-def _static_fallback():
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'Videos'))
-    entries = [
-        ("cam_1", "Export__Central Bus Depo-Entry Gate Platform Area_Friday July 10 2026110138  b33bb2a.avi"),
-        ("cam_2", "Export__Chauta Bazaar-003_Friday July 10 202655158  c62a714 (1).avi"),
-        ("cam_3", "Export__Chauta Bazaar-003_Friday July 10 202655158  c62a714.avi"),
-        ("cam_4", "Export__Gopi Talav-Towards Gopi Talav Gate_Friday July 10 202661000  dc1f515.avi"),
-        ("cam_5", "Export__Mahidharpura-Pipla Sheri Diamond Mkt_Friday July 10 202655441  beb5fa4.avi"),
-        ("cam_6", "Export__Rly Station-Towards Bismillah Rest left_Friday July 10 202661242  09a94cc.avi"),
-        ("cam_7", "merged.mp4"),
-    ]
-    return [
-        (cam_id, os.path.join(base_dir, filename))
-        for cam_id, filename in entries
-    ]
-
 
 
 # Target ~30fps sources; keyframe every 1s keeps HLS/WHEP startup + live-edge latency low.
@@ -67,53 +47,75 @@ FPS = 30
 KEYFRAME_INTERVAL = GOP_SECONDS * FPS
 
 
-def check_nvenc_support():
-    try:
-        res = subprocess.run(
-            ["ffmpeg", "-f", "lavfi", "-i", "color=c=black:s=256x256", "-c:v", "h264_nvenc", "-frames:v", "1", "-f", "null", "-"],
-            capture_output=True,
-            text=True,
-            timeout=3
-        )
-        return res.returncode == 0
-    except Exception:
-        return False
+def detect_best_encoder():
+    # Prefer Windows Media Foundation (h264_mf) or libx264 to support 20+ concurrent streams
+    # without hitting NVIDIA GeForce consumer driver concurrent session caps.
+    for enc in ["h264_mf", "libx264", "h264_qsv", "h264_nvenc"]:
+        try:
+            res = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=256x256", "-c:v", enc, "-frames:v", "1", "-f", "null", "-"],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            if res.returncode == 0:
+                return enc
+        except Exception:
+            pass
+    return "libx264"
 
-HAS_NVENC = check_nvenc_support()
+HW_ENCODER = detect_best_encoder()
+
 
 def start_ffmpeg(video_path, rtsp_url, cam_id):
-    vcodec_args = [
-        "-c:v", "h264_nvenc",
-        "-preset", "p1",
-        "-tune", "ll",
-        "-b:v", "1500k",
-        "-maxrate", "1500k",
-        "-bufsize", "1500k",
-    ] if HAS_NVENC else [
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
-        "-b:v", "1M",
-        "-maxrate", "1M",
-        "-bufsize", "1M",
-    ]
+    # Select hardware GPU encoder (h264_nvenc / h264_mf) to offload 100% of encoding to GPU
+    if HW_ENCODER == "h264_nvenc":
+        vcodec_args = [
+            "-c:v", "h264_nvenc",
+            "-preset", "p1",
+            "-tune", "ull",
+            "-b:v", "2000k",
+            "-g", str(KEYFRAME_INTERVAL),
+            "-pix_fmt", "yuv420p",
+        ]
+    elif HW_ENCODER == "h264_mf":
+        vcodec_args = [
+            "-c:v", "h264_mf",
+            "-b:v", "1500k",
+            "-g", str(KEYFRAME_INTERVAL),
+            "-pix_fmt", "yuv420p",
+        ]
+    else:
+        vcodec_args = [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-threads", "1",
+            "-s", "640x360",
+            "-b:v", "600k",
+            "-pix_fmt", "yuv420p",
+            "-g", str(KEYFRAME_INTERVAL),
+        ]
 
     is_file = video_path and os.path.isfile(video_path)
     if is_file:
-        input_args = ["-noautorotate", "-re", "-stream_loop", "-1", "-i", video_path]
+        input_args = [
+            "-fflags", "+genpts+discardcorrupt",
+            "-re",
+            "-stream_loop", "-1",
+            "-i", video_path,
+            "-map", "0:v:0"
+        ]
     else:
         input_args = ["-f", "lavfi", "-i", f"testsrc=size=1280x720:rate={FPS}"]
 
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-fflags", "+genpts+igndts+nobuffer",
         "-flags", "low_delay",
         "-err_detect", "ignore_err",
     ] + input_args + vcodec_args + [
         "-pix_fmt", "yuv420p",
-        "-g", str(KEYFRAME_INTERVAL),
         "-bf", "0",
-        "-forced-idr", "1",
         "-r", str(FPS),
         "-an",
         "-f", "rtsp", "-rtsp_transport", "tcp",
@@ -122,45 +124,111 @@ def start_ffmpeg(video_path, rtsp_url, cam_id):
 
     return subprocess.Popen(
         cmd,
-        stderr=None,        # inherit parent's stderr (flows to nvr.log)
+        stderr=None,
         stdout=subprocess.DEVNULL,
     )
 
 
-print("Starting NVR Emulator... Loading camera sources from database.")
-cameras = get_local_file_cameras()
+if __name__ == "__main__":
+    print(f"Starting NVR Emulator on GPU Hardware Encoder ({HW_ENCODER})...")
+    cameras = get_local_file_cameras()
 
-if not cameras:
-    print("[NVR] No local file cameras found in database. Exiting.")
-    sys.exit(0)
+    if not cameras:
+        print("[NVR] No local file cameras found in database. Entering event-driven listener mode.")
+        cameras = []
 
-print(f"[NVR] Found {len(cameras)} local-file camera(s) to broadcast.")
-processes = []
+    print(f"[NVR] Found {len(cameras)} database camera(s) to broadcast.")
+    processes = {}
 
-try:
-    for cam_id, video_path in cameras:
-        rtsp_url = f"rtsp://127.0.0.1:8554/{cam_id}"
-        p = start_ffmpeg(video_path, rtsp_url, cam_id)
-        processes.append({"cam_id": cam_id, "p": p, "url": rtsp_url, "path": video_path})
-        print(f"[NVR] Broadcasting {cam_id} -> {rtsp_url}  (src: {os.path.basename(video_path)})")
-        time.sleep(0.5)  # Stagger startup to avoid MediaMTX path-registration races
+    marker_file = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'storage', '.cameras_sync_event'))
+    last_marker_mtime = os.path.getmtime(marker_file) if os.path.exists(marker_file) else 0
 
-    print("\n[NVR] All streams actively broadcasting. Press Ctrl+C to stop.")
+    # Setup non-blocking local UDP event receiver for instant zero-load IPC triggers
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind(("127.0.0.1", 8555))
+        sock.settimeout(2.0)
+    except Exception as e:
+        print(f"[NVR] Note: UDP sync listener bound with fallback: {e}")
+        sock = None
 
-    # Keep main thread alive and watch for crashed processes
-    while True:
-        time.sleep(2)
-        for state in processes:
-            if state["p"].poll() is not None:
-                exit_code = state["p"].returncode
-                print(f"[NVR] {state['cam_id']} died (exit={exit_code}). Restarting in 3s...")
-                time.sleep(3)
-                state["p"] = start_ffmpeg(state["path"], state["url"], state["cam_id"])
-                print(f"[NVR] {state['cam_id']} restarted.")
+    try:
+        for cam_id, video_path in cameras:
+            rtsp_url = f"rtsp://127.0.0.1:8554/{cam_id}"
+            display_src = os.path.basename(video_path) if video_path else "synthetic testsrc"
+            print(f"[NVR] Broadcasting {cam_id} -> {rtsp_url}  (src: {display_src}, enc: {HW_ENCODER})")
+            p = start_ffmpeg(video_path, rtsp_url, cam_id)
+            processes[cam_id] = {"proc": p, "path": video_path, "url": rtsp_url}
+            time.sleep(0.1)
 
-except KeyboardInterrupt:
-    print("\n[NVR] Shutting down streams...")
-    for state in processes:
-        if state["p"].poll() is None:
-            state["p"].terminate()
-    print("[NVR] Shutdown complete.")
+        print(f"\n[NVR] All {len(processes)} streams actively broadcasting on {HW_ENCODER}. Event-driven sync active.")
+
+        def sync_active_streams():
+            raw_cams = get_local_file_cameras()
+            if raw_cams is not None:
+                current_db_cams = dict(raw_cams)
+
+                # Terminate streams for cameras that were deleted from DB
+                for cid in list(processes.keys()):
+                    if cid not in current_db_cams:
+                        print(f"[NVR Event] Camera {cid} deleted from database. Terminating broadcast stream...")
+                        try:
+                            processes[cid]["proc"].terminate()
+                        except Exception:
+                            pass
+                        del processes[cid]
+
+                # Start streams for new cameras added to DB
+                for cid, vpath in current_db_cams.items():
+                    if cid not in processes:
+                        r_url = f"rtsp://127.0.0.1:8554/{cid}"
+                        print(f"[NVR Event] New camera {cid} added in database. Starting broadcast stream...")
+                        p = start_ffmpeg(vpath, r_url, cid)
+                        processes[cid] = {"proc": p, "path": vpath, "url": r_url}
+
+        while True:
+            trigger_sync = False
+            # 1. Listen on UDP event socket
+            if sock is not None:
+                try:
+                    data, _ = sock.recvfrom(1024)
+                    if data:
+                        trigger_sync = True
+                except socket.timeout:
+                    pass
+                except Exception:
+                    pass
+            else:
+                time.sleep(2.0)
+
+            # 2. Check sync marker file change (O(1) inode stat, 0 DB queries)
+            if not trigger_sync and os.path.exists(marker_file):
+                try:
+                    mtime = os.path.getmtime(marker_file)
+                    if mtime > last_marker_mtime:
+                        last_marker_mtime = mtime
+                        trigger_sync = True
+                except Exception:
+                    pass
+
+            # 3. Only perform DB query when an actual camera modification event happened
+            if trigger_sync:
+                sync_active_streams()
+
+            # 4. Local fast in-memory process health check (0 DB load)
+            for cid, info in list(processes.items()):
+                if info["proc"].poll() is not None:
+                    print(f"[NVR WARNING] Stream worker for {cid} exited (code {info['proc'].returncode}). Restarting...")
+                    new_p = start_ffmpeg(info["path"], info["url"], cid)
+                    processes[cid]["proc"] = new_p
+
+    except KeyboardInterrupt:
+        print("\n[NVR] Stopping all FFmpeg broadcast streams...")
+        for cid, info in processes.items():
+            try:
+                info["proc"].terminate()
+            except Exception:
+                pass
+        if sock:
+            sock.close()
+        print("[NVR] All streams stopped cleanly.")

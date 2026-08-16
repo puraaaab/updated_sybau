@@ -96,15 +96,15 @@ def get_cameras(user=Depends(verify_viewer), db: Session = Depends(get_db)):
             cam_dict["webrtc_url"] = raw
             cam_dict["is_youtube"] = True
         else:
-            cam_dict["hls_url"] = f"http://localhost:8888/{c.id}/index.m3u8"
-            cam_dict["webrtc_url"] = f"http://localhost:8889/{c.id}/whep"
+            cam_dict["hls_url"] = f"/hls/{c.id}/index.m3u8"
+            cam_dict["webrtc_url"] = f"/webrtc/{c.id}/whep"
             cam_dict["is_youtube"] = False
         result.append(cam_dict)
     return result
 
 
 @router.post("/scan")
-def scan_onvif_cameras(user=Depends(verify_viewer)):
+def scan_onvif_cameras(user=Depends(verify_operator)):
     ws_probe = """<?xml version="1.0" encoding="UTF-8"?>
     <e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope"
                 xmlns:w="http://schemas.xmlsoap.org/ws/2004/08/addressing"
@@ -144,21 +144,11 @@ def scan_onvif_cameras(user=Depends(verify_viewer)):
     except Exception as e:
         pass
 
-    devices = discovered_real
-    if len(devices) == 0:
-        cfg = get_models()
-        if cfg.get("demo_mode", False):
-            devices = [
-                {"name": "Hikvision NVR Channel 1", "ip": "192.168.1.101", "port": 80, "mac": "00:1A:2B:3C:4D:01"},
-                {"name": "Dahua Body-Worn Cam Relay", "ip": "192.168.1.102", "port": 80, "mac": "00:1A:2B:3C:4D:02"},
-                {"name": "Axis Dome Camera P3245", "ip": "192.168.1.103", "port": 80, "mac": "00:1A:2B:3C:4D:03"},
-                {"name": "CP PLUS Speed Dome", "ip": "192.168.1.104", "port": 80, "mac": "00:1A:2B:3C:4D:04"}
-            ]
-    return {"status": "success", "count": len(devices), "is_real": len(discovered_real) > 0, "devices": devices}
+    return {"status": "success", "count": len(discovered_real), "is_real": len(discovered_real) > 0, "devices": discovered_real}
 
 
 @router.post("/resolve-onvif")
-def resolve_onvif_stream_uri(payload: dict, user=Depends(verify_viewer)):
+def resolve_onvif_stream_uri(payload: dict, user=Depends(verify_operator)):
     ip = payload.get("onvif_ip", "127.0.0.1")
     port = payload.get("onvif_port", 80)
     uname = payload.get("onvif_username", "admin")
@@ -190,6 +180,24 @@ def resolve_onvif_stream_uri(payload: dict, user=Depends(verify_viewer)):
         "stream_url": rtsp_url,
         "is_real_soap": is_real
     }
+
+
+def notify_nvr_camera_sync():
+    """Notify the NVR broadcast daemon asynchronously via local UDP socket signal and sync file marker."""
+    try:
+        marker_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", ".cameras_sync_event"))
+        os.makedirs(os.path.dirname(marker_path), exist_ok=True)
+        with open(marker_path, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(b"CAMERAS_SYNC", ("127.0.0.1", 8555))
+        sock.close()
+    except Exception:
+        pass
 
 
 @router.post("")
@@ -232,6 +240,7 @@ def add_camera(camera: dict, user=Depends(verify_operator), db: Session = Depend
         ai_worker.active_ai_workers[camera["id"]] = worker
         worker.start()
 
+    notify_nvr_camera_sync()
     return {"message": "Camera added and workers spawned successfully"}
 
 
@@ -271,6 +280,7 @@ def update_camera(camera_id: str, camera: dict, user=Depends(verify_operator), d
         ai_worker.active_ai_workers[camera_id] = worker
         worker.start()
         
+    notify_nvr_camera_sync()
     return {"message": "Camera updated successfully"}
 
 
@@ -293,6 +303,7 @@ def delete_camera(camera_id: str, user=Depends(verify_operator), db: Session = D
         ai_worker.active_ai_workers[camera_id].stop()
         del ai_worker.active_ai_workers[camera_id]
 
+    notify_nvr_camera_sync()
     return {"message": "Camera removed successfully"}
 
 

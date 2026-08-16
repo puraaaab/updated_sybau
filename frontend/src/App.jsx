@@ -19,6 +19,8 @@ import AccountCircleIcon from '@mui/icons-material/AccountCircle';
 import MenuIcon from '@mui/icons-material/Menu';
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
+import HubIcon from '@mui/icons-material/Hub';
+import AltRouteIcon from '@mui/icons-material/AltRoute';
 
 function ISTClock() {
   const [timeStr, setTimeStr] = useState('');
@@ -65,6 +67,7 @@ import SettingsConsole from './components/SettingsConsole';
 import RecordsConsole from './components/RecordsConsole';
 import LoginModal from './components/LoginModal';
 import AIChatbot from './components/AIChatbot';
+import TopologyEditor from './components/TopologyEditor';
 
 const drawerWidth = 240;
 
@@ -82,6 +85,8 @@ export default function App() {
   const [forcePwdLoading, setForcePwdLoading] = useState(false);
 
   const [wsAlert, _setWsAlert] = useState(null);
+  const [latestAlert, setLatestAlert] = useState(null);
+  const [unreadAlertCount, setUnreadAlertCount] = useState(0);
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [anchorEl, setAnchorEl] = useState(null);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -108,6 +113,22 @@ export default function App() {
     return () => clearInterval(interval);
   }, [token]);
 
+  // Initial fetch for latest alert
+  useEffect(() => {
+    if (!token) return;
+    fetch('/api/v1/alerts?limit=1', {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        const items = Array.isArray(data) ? data : (data?.items || []);
+        if (items.length > 0) {
+          setLatestAlert(items[0]);
+        }
+      })
+      .catch(() => {});
+  }, [token]);
+
   // WebSocket real-time alerts client
   useEffect(() => {
     if (!token) return;
@@ -127,6 +148,8 @@ export default function App() {
           const payload = JSON.parse(event.data);
           if (payload && payload.topic === 'alerts' && payload.data) {
             _setWsAlert(payload.data);
+            setLatestAlert(payload.data);
+            setUnreadAlertCount(prev => prev + 1);
             setSnackbarOpen(true);
           }
         } catch (e) {}
@@ -592,7 +615,7 @@ export default function App() {
     { id: 'records', label: 'Captured Records Ledger', icon: <ReceiptLongIcon /> },
     { id: 'alerts', label: 'Surveillance Alerts', icon: <NotificationsActiveIcon /> },
     { id: 'search', label: 'AI Forensic Search', icon: <SearchIcon /> },
-    { id: 'trajectory', label: 'Route Suspect Tracking', icon: <GridViewIcon /> },
+    { id: 'trajectory', label: 'Route Suspect Tracking & Topology', icon: <AltRouteIcon /> },
     { id: 'watchlist', label: 'POI Target Watchlist', icon: <AccountCircleIcon />, adminOnly: false },
     { id: 'forensics', label: 'Police FIR & Evidence', icon: <CameraAltIcon />, operatorOnly: true },
     { id: 'discovery', label: 'Auto-Scan IP Cameras', icon: <MonitorHeartIcon />, adminOnly: true },
@@ -725,7 +748,7 @@ export default function App() {
               />
             </Box>
 
-            {/* Session Actions & Switchers */}
+            {/* Session Actions & Tactical Alert HUD */}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               {/* Mobile Search Toggle Icon */}
               <IconButton
@@ -736,6 +759,64 @@ export default function App() {
               >
                 <SearchIcon />
               </IconButton>
+
+              {/* Top Header Live Alert Notification HUD */}
+              <Tooltip
+                title={
+                  latestAlert ? (
+                    <Box sx={{ p: 0.75, maxWidth: 320 }}>
+                      <Typography variant="caption" sx={{ fontWeight: 'bold', color: '#ff5252', display: 'block', mb: 0.5 }}>
+                        🚨 LATEST THREAT DETECTED ({latestAlert.camera_id || 'CAM'}):
+                      </Typography>
+                      <Typography variant="caption" sx={{ color: '#fff', display: 'block', mb: 0.5 }}>
+                        {latestAlert.message || latestAlert.type || 'Surveillance Event'}
+                      </Typography>
+                      <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>
+                        Click to open Surveillance Alerts console
+                      </Typography>
+                    </Box>
+                  ) : "Surveillance Alert Radar: All Perimeters Secure"
+                }
+                arrow
+              >
+                <Chip
+                  icon={<NotificationsActiveIcon sx={{
+                    fontSize: '1rem !important',
+                    color: latestAlert ? '#ff5252 !important' : '#00e676 !important'
+                  }} />}
+                  label={
+                    latestAlert
+                      ? `🚨 [${(latestAlert.type || 'ALERT').toUpperCase()}] ${latestAlert.camera_id ? `• ${latestAlert.camera_id}` : ''}`
+                      : `🛡️ 0 ACTIVE THREATS`
+                  }
+                  onClick={() => {
+                    setActiveTab('alerts');
+                    setUnreadAlertCount(0);
+                  }}
+                  size="small"
+                  sx={{
+                    cursor: 'pointer',
+                    fontWeight: 'bold',
+                    fontFamily: 'monospace',
+                    backgroundColor: latestAlert
+                      ? (latestAlert.severity === 'high' ? 'rgba(239, 68, 68, 0.22)' : 'rgba(245, 158, 11, 0.22)')
+                      : 'rgba(0, 230, 118, 0.10)',
+                    color: latestAlert
+                      ? (latestAlert.severity === 'high' ? '#ef4444' : '#f59e0b')
+                      : '#00e676',
+                    border: '1px solid',
+                    borderColor: latestAlert
+                      ? (latestAlert.severity === 'high' ? 'rgba(239, 68, 68, 0.55)' : 'rgba(245, 158, 11, 0.55)')
+                      : 'rgba(0, 230, 118, 0.35)',
+                    borderRadius: `${settings.borderRadius}px`,
+                    transition: 'all 0.2s ease-in-out',
+                    '&:hover': {
+                      transform: 'scale(1.03)',
+                      boxShadow: latestAlert ? '0 0 12px rgba(239, 68, 68, 0.4)' : '0 0 12px rgba(0, 230, 118, 0.3)'
+                    }
+                  }}
+                />
+              </Tooltip>
 
               <Chip
                 label={role.toUpperCase()}
@@ -820,9 +901,9 @@ export default function App() {
         </Box>
 
         {/* Main Viewport Content Area */}
-        <Box component="main" sx={{ flexGrow: 1, p: settings.density === 'compact' ? 2 : 4, minWidth: 0 }}>
+        <Box component="main" sx={{ flexGrow: 1, p: settings.density === 'compact' ? 2 : 4, minWidth: 0, minHeight: '100vh', overflowY: 'auto' }}>
           <Toolbar /> {/* Spacer to prevent content from rendering under the fixed AppBar */}
-          <Box sx={{ display: activeTab === 'live' ? 'block' : 'none', height: '100%' }}>
+          <Box sx={{ display: activeTab === 'live' ? 'block' : 'none', width: '100%' }}>
             <LiveGrid
               token={token}
               role={role}
@@ -874,6 +955,11 @@ export default function App() {
               token={token}
             />
           </Box>
+          <Box sx={{ display: activeTab === 'topology' ? 'block' : 'none', height: '100%' }}>
+            <TopologyEditor
+              token={token}
+            />
+          </Box>
           <Box sx={{ display: activeTab === 'admin' ? 'block' : 'none', height: '100%' }}>
             <AdminConsole
               token={token}
@@ -905,19 +991,20 @@ export default function App() {
           </Box>
         </Box>
 
-        {/* WebSocket Alert Snacker */}
+        {/* WebSocket Alert Snacker — Top Right Tactical Notification HUD */}
         <Snackbar
           open={snackbarOpen}
           autoHideDuration={settings.alertTimeout || 6000}
           onClose={() => setSnackbarOpen(false)}
-          anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+          anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+          sx={{ top: '80px !important', zIndex: 10000 }}
         >
           {wsAlert && (
             <Alert
               onClose={() => setSnackbarOpen(false)}
               severity={wsAlert.severity === 'high' ? 'error' : wsAlert.severity === 'medium' ? 'warning' : 'info'}
               variant="filled"
-              sx={{ width: '100%', fontWeight: 'bold', borderRadius: `${settings.borderRadius}px` }}
+              sx={{ width: '100%', fontWeight: 'bold', borderRadius: `${settings.borderRadius}px`, boxShadow: '0 8px 32px rgba(0,0,0,0.5)' }}
             >
               {`[NEW ALERT - ${(wsAlert?.type || 'EVENT').toUpperCase()}] ${wsAlert?.message || ''}`}
             </Alert>
@@ -967,7 +1054,7 @@ export default function App() {
             </Button>
           </DialogActions>
         </Dialog>
-        <AIChatbot />
+        <AIChatbot token={token} />
       </Box>
     </ThemeProvider>
   );

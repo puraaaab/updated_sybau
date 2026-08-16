@@ -66,8 +66,11 @@ def get_text_embedding(text: str):
             if _sentence_transformer_model is None:
                 with _model_lock:
                     if _sentence_transformer_model is None:
+                        import torch
                         model_name = cfg.get("embeddings", {}).get("model_name", "BAAI/bge-large-en-v1.5")
-                        device = cfg.get("embeddings", {}).get("device", "cpu")
+                        device = cfg.get("embeddings", {}).get("device", "cuda" if torch.cuda.is_available() else "cpu")
+                        if device == "cuda" and not torch.cuda.is_available():
+                            device = "cpu"
                         logger.info(f"Loading SentenceTransformer text embedder ({model_name}) on {device}...")
                         
                         st_class = None
@@ -85,19 +88,26 @@ def get_text_embedding(text: str):
                             st_class = SentenceTransformer
 
                         _sentence_transformer_model = st_class(model_name, device=device)
-                        if device == "cuda" and hasattr(_sentence_transformer_model, "half"):
-                            try:
-                                _sentence_transformer_model.half()
-                            except Exception:
-                                pass
                         EMBEDDING_DIM = _sentence_transformer_model.get_sentence_embedding_dimension() or 1024
 
             import torch
-            with torch.inference_mode():
-                embedding = _sentence_transformer_model.encode(text, show_progress_bar=False)
-            vec = embedding.tolist()
+            with _model_lock:
+                try:
+                    with torch.inference_mode():
+                        embedding = _sentence_transformer_model.encode(text, show_progress_bar=False)
+                    vec = embedding.tolist()
+                except (torch.cuda.OutOfMemoryError, RuntimeError) as cuda_err:
+                    if "CUDA" in str(cuda_err) or "out of memory" in str(cuda_err) or "CUBLAS" in str(cuda_err):
+                        logger.warning("CUDA memory pressure in SentenceTransformer, falling back to CPU...")
+                        torch.cuda.empty_cache()
+                        _sentence_transformer_model = _sentence_transformer_model.to("cpu")
+                        with torch.inference_mode():
+                            embedding = _sentence_transformer_model.encode(text, show_progress_bar=False)
+                        vec = embedding.tolist()
+                    else:
+                        raise
         except Exception:
-            logger.exception("Error loading SentenceTransformer. Falling back to hash seed simulation.")
+            logger.exception("Error in SentenceTransformer text embedding. Falling back to hash seed simulation.")
             vec = _mock_embedding(text, EMBEDDING_DIM)
 
     with _cache_lock_dict:

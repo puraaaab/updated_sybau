@@ -112,8 +112,8 @@ def generate_fir_case_report(
                 'font-size:12px; color:#9ca3af;">NO TRACKS</span>'
             )
 
-        lat = getattr(cam, "latitude", 21.2000)
-        lng = getattr(cam, "longitude", 72.8300)
+        lat = float(cam.latitude) if (cam and getattr(cam, "latitude", None) is not None) else 21.2000
+        lng = float(cam.longitude) if (cam and getattr(cam, "longitude", None) is not None) else 72.8300
         timeline_rows += f"""
         <tr>
             <td style="padding:10px; border:1px solid #334155; text-align:center;">{idx + 1}</td>

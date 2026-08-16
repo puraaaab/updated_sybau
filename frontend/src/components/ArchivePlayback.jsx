@@ -13,6 +13,19 @@ function toStreamName(name) {
   return name.toLowerCase().replace(/[^a-z0-9]/g, '_');
 }
 
+function parseClipTimestamp(tsStr) {
+  if (!tsStr) return null;
+  const d = new Date(tsStr);
+  if (!isNaN(d.getTime())) return d.getTime();
+  const match = tsStr.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+  if (match) {
+    const [_, y, m, day, h, min, s] = match;
+    const parsed = new Date(`${y}-${m}-${day}T${h}:${min}:${s}`);
+    if (!isNaN(parsed.getTime())) return parsed.getTime();
+  }
+  return null;
+}
+
 function fmtBytes(b) {
   if (b < 1024) return `${b}B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)}KB`;
@@ -76,8 +89,8 @@ function CameraArchivePanel({ camera, token, syncTimestamp, onSyncRequest, onExp
     if (!videoRef.current || !selectedClip) return;
     const base = selectedClip.timestamp;
     const sec = Math.floor(videoRef.current.currentTime);
-    const baseMs = new Date(base).getTime();
-    if (!isNaN(baseMs)) {
+    const baseMs = parseClipTimestamp(base);
+    if (baseMs !== null && !isNaN(baseMs)) {
       const derived = new Date(baseMs + sec * 1000).toISOString();
       onSyncRequest(derived);
     }

@@ -70,6 +70,12 @@ class MockYOLO:
 
         return [MockResult(all_boxes)]
 
+    def predict(self, source, verbose=False, classes=None, conf=None, **kwargs):
+        return self.track(source, verbose=verbose, classes=classes, conf=conf, **kwargs)
+
+    def to(self, device):
+        return self
+
 
 class MockOCR:
     def readtext(self, img_crop, *args, **kwargs):
@@ -251,7 +257,7 @@ class ModelManager:
                                 return []
                             raise
                     _dmu.check_imports = _patched_ci
-                    _dmu._flash_attn_patched = True
+                    setattr(_dmu, "_flash_attn_patched", True)
             except Exception:
                 pass
 

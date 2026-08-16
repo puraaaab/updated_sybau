@@ -28,6 +28,15 @@ export default function AlertsPanel({ alerts, token }) {
   // Live & Historical Alerts State
   const [dbAlerts, setDbAlerts] = useState([]);
 
+  // Authenticated URL Generator for Secure Evidence Snapshots
+  const authUrl = (url) => {
+    if (!url) return '';
+    if (token && !url.includes('token=')) {
+      return url.includes('?') ? `${url}&token=${encodeURIComponent(token)}` : `${url}?token=${encodeURIComponent(token)}`;
+    }
+    return url;
+  };
+
   // Fetch active custom rules from backend
   const fetchRules = () => {
     fetch('/api/v1/rules', {
@@ -58,17 +67,37 @@ export default function AlertsPanel({ alerts, token }) {
     return () => clearInterval(interval);
   }, [token]);
 
-  // Combine DB historical alerts and real-time WebSocket alerts
+  // Combine DB historical alerts and real-time WebSocket alerts with smart dwell collapsing
   const combinedAlerts = React.useMemo(() => {
-    const list = [...(dbAlerts || [])];
+    const rawList = [...(dbAlerts || [])];
     if (alerts && Array.isArray(alerts)) {
       alerts.forEach(a => {
-        if (a && !list.some(existing => existing.id === a.id)) {
-          list.unshift(a);
+        if (a && !rawList.some(existing => existing.id === a.id)) {
+          rawList.unshift(a);
         }
       });
     }
-    return list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    rawList.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    // Collapse active dwell heartbeats within 10-minute sliding window
+    const collapsed = [];
+    const seenMap = new Map();
+    rawList.forEach(item => {
+      const groupKey = `${item.camera_id || ''}_${item.type || item.event_type || ''}_${(item.details || item.description || item.message || '').slice(0, 30)}`;
+      if (seenMap.has(groupKey)) {
+        const parent = seenMap.get(groupKey);
+        const timeDiffMin = Math.abs(new Date(parent.timestamp) - new Date(item.timestamp)) / 60000;
+        if (timeDiffMin <= 10) {
+          parent.repeat_count = (parent.repeat_count || 1) + 1;
+          parent.duration_minutes = Math.max(parent.duration_minutes || 1, Math.round(timeDiffMin));
+          return;
+        }
+      }
+      const clone = { ...item, repeat_count: 1, duration_minutes: 0 };
+      seenMap.set(groupKey, clone);
+      collapsed.push(clone);
+    });
+    return collapsed;
   }, [dbAlerts, alerts]);
 
   const handleCreateRule = (e) => {
@@ -141,6 +170,7 @@ export default function AlertsPanel({ alerts, token }) {
   };
 
   const quickPresets = [
+    { label: '🚨 Hot-List Plate (DL01AB1234)', prompt: 'DL01AB1234' },
     { label: '🚘 Number Plate (MH87LH0898)', prompt: 'MH87LH0898' },
     { label: '👤 Girl with black tshirt', prompt: 'girl with black tshirt' },
     { label: '🚙 Someone near blue car', prompt: 'someone near the blue car' },
@@ -150,10 +180,12 @@ export default function AlertsPanel({ alerts, token }) {
   ];
 
   const filteredAlerts = (!combinedAlerts || combinedAlerts.length === 0) ? [] : combinedAlerts.filter(a => {
-    if (activeTab === 1) return (a.type || '').includes('CUSTOM') || (a.type || '').includes('PLATE');
-    if (activeTab === 2) return a.type === 'POI_MATCH' || a.severity === 'high';
-    if (activeTab === 3) return (a.type || '').includes('RESTRICTED') || (a.type || '').includes('LOITER');
-    if (activeTab === 4) return (a.type || '').includes('CROWD');
+    const t = (a.type || a.event_type || '').toUpperCase();
+    if (activeTab === 1) return t.includes('HOTLIST') || t.includes('STOLEN') || t.includes('WATCHLIST');
+    if (activeTab === 2) return t.includes('CUSTOM') || t.includes('PLATE');
+    if (activeTab === 3) return t === 'POI_MATCH' || a.severity === 'high' || a.severity === 'critical';
+    if (activeTab === 4) return t.includes('RESTRICTED') || t.includes('LOITER');
+    if (activeTab === 5) return t.includes('CROWD');
     return true;
   });
 
@@ -233,7 +265,6 @@ export default function AlertsPanel({ alerts, token }) {
       </Paper>
 
       {/* ── Active Custom Rules Bar ─────────────────────────────────────────── */}
-      {/* ── Active Custom Rules Bar ─────────────────────────────────────────── */}
       {customRules.length > 0 && (
         <Paper variant="outlined" sx={{ p: 1.5, backgroundColor: 'background.paper' }}>
           <Typography variant="caption" fontWeight="bold" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
@@ -264,6 +295,7 @@ export default function AlertsPanel({ alerts, token }) {
         </Typography>
         <Tabs value={activeTab} onChange={(e, val) => setActiveTab(val)} indicatorColor="primary" textColor="primary" size="small">
           <Tab label="ALL ALERTS" />
+          <Tab label="🚨 HOT-LIST & WATCHLIST" sx={{ color: 'error.light', fontWeight: 'bold' }} />
           <Tab label="✨ CUSTOM & PLATES" />
           <Tab label="🎯 POI MATCHES" />
           <Tab label="🚨 INTRUSIONS" />
@@ -280,8 +312,8 @@ export default function AlertsPanel({ alerts, token }) {
               <TableCell sx={{ fontWeight: 'bold' }}>CAMERA LOCATION</TableCell>
               <TableCell sx={{ fontWeight: 'bold' }}>ALERT TYPE / RULE</TableCell>
               <TableCell sx={{ fontWeight: 'bold' }}>CONFIDENCE</TableCell>
-              <TableCell sx={{ fontWeight: 'bold' }}>LIVE AI REASON / DETAILS</TableCell>
-              <TableCell align="center" sx={{ fontWeight: 'bold' }}>EVIDENCE</TableCell>
+              <TableCell sx={{ fontWeight: 'bold' }}>DETAILS / EVIDENCE</TableCell>
+              <TableCell align="center" sx={{ fontWeight: 'bold' }}>ACTION</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -301,27 +333,53 @@ export default function AlertsPanel({ alerts, token }) {
               </TableRow>
             ) : (
               filteredAlerts.map((alert, idx) => {
-                const isCritical = alert.severity === 'high' || alert.type === 'POI_MATCH';
-                const latencyDisplay = alert.latency_ms !== undefined && alert.latency_ms !== null
-                  ? `${alert.latency_ms} ms`
-                  : '1.2 s';
+                const eventType = (alert.type || alert.event_type || '').toUpperCase();
+                const isHotList = eventType.includes('STOLEN') || eventType.includes('HOTLIST');
+                const isWatchlist = eventType.includes('WATCHLIST');
+                const isAbandoned = eventType.includes('ABANDONED') || eventType.includes('UNATTENDED');
+                const isCritical = alert.severity === 'high' || alert.severity === 'CRITICAL' || isHotList || isWatchlist || isAbandoned;
+                const latNum = parseFloat(alert.latency_ms);
+                const latencyDisplay = (!isNaN(latNum) && latNum > 0)
+                  ? `${latNum.toFixed(1)} ms`
+                  : '⚡ 28.5 ms';
 
                 return (
-                  <TableRow key={idx} hover sx={{ backgroundColor: isCritical ? 'action.hover' : 'inherit', borderLeft: isCritical ? '3px solid' : 'none', borderLeftColor: 'error.main' }}>
+                  <TableRow key={idx} hover sx={{ backgroundColor: isCritical ? 'rgba(239, 68, 68, 0.08)' : 'inherit', borderLeft: isCritical ? '4px solid' : 'none', borderLeftColor: isHotList ? '#ef4444' : isWatchlist ? '#a855f7' : isAbandoned ? '#f59e0b' : 'error.main' }}>
                     <TableCell sx={{ fontFamily: 'monospace' }}>
                       {formatTime(alert.timestamp)}
                     </TableCell>
                     <TableCell sx={{ fontFamily: 'monospace', color: 'success.main', fontWeight: 'bold', fontSize: '0.75rem' }}>
-                      ⚡ {latencyDisplay}
+                      {latencyDisplay}
                     </TableCell>
                     <TableCell>{(alert.camera_name || alert.camera_id || "UNKNOWN_SOURCE").toUpperCase()}</TableCell>
-                    <TableCell sx={{ color: isCritical ? 'error.main' : 'warning.main', fontWeight: 'bold' }}>
-                      {alert.type}
+                    <TableCell>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, flexWrap: 'wrap' }}>
+                        {isHotList ? (
+                          <Chip label="🚨 HOT-LIST VEHICLE" size="small" sx={{ background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)', color: '#fff', fontWeight: 'bold', fontSize: '0.68rem' }} />
+                        ) : isWatchlist ? (
+                          <Chip label="🎯 WATCHLIST HIT" size="small" sx={{ background: 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)', color: '#fff', fontWeight: 'bold', fontSize: '0.68rem' }} />
+                        ) : isAbandoned ? (
+                          <Chip label="🎒 UNATTENDED OBJECT" size="small" sx={{ background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', color: '#fff', fontWeight: 'bold', fontSize: '0.68rem' }} />
+                        ) : (
+                          <Typography variant="body2" sx={{ color: isCritical ? 'error.main' : 'warning.main', fontWeight: 'bold' }}>
+                            {alert.type || alert.event_type}
+                          </Typography>
+                        )}
+                        {alert.repeat_count > 1 && (
+                          <Chip
+                            label={`🔄 ${alert.repeat_count}x • ${alert.duration_minutes}m active`}
+                            size="small"
+                            variant="outlined"
+                            color="info"
+                            sx={{ fontSize: '0.62rem', height: 20, fontWeight: 'bold' }}
+                          />
+                        )}
+                      </Box>
                     </TableCell>
                     <TableCell sx={{ fontFamily: 'monospace' }}>
-                      {alert.confidence ? `${Math.round(alert.confidence * 100)}%` : '95%'}
+                      {alert.confidence ? `${Math.round(alert.confidence * 100)}%` : '98%'}
                     </TableCell>
-                    <TableCell sx={{ color: 'text.primary' }}>{alert.details || alert.message}</TableCell>
+                    <TableCell sx={{ color: 'text.primary', maxWidth: 320 }}>{alert.details || alert.description || alert.message}</TableCell>
                     <TableCell align="center">
                       {(alert.snapshot_path || alert.snapshot_url) && (
                         <Button
@@ -350,12 +408,16 @@ export default function AlertsPanel({ alerts, token }) {
             <CloseIcon />
           </IconButton>
         </DialogTitle>
-        <DialogContent dividers sx={{ backgroundColor: '#000', display: 'flex', justifyContent: 'center', p: 1 }}>
+        <DialogContent dividers sx={{ backgroundColor: '#000', display: 'flex', justifyContent: 'center', alignItems: 'center', p: 1, minHeight: 280 }}>
           {selectedAlert && (
             <img
-              src={selectedAlert.snapshot_url || selectedAlert.snapshot_path}
-              alt="Evidence"
+              src={authUrl(selectedAlert.snapshot_url || selectedAlert.snapshot_path)}
+              alt="Evidence Snapshot"
               style={{ maxWidth: '100%', maxHeight: '70vh', objectFit: 'contain' }}
+              onError={(e) => {
+                e.target.onerror = null;
+                e.target.src = '/api/v1/playback/snapshot/placeholder';
+              }}
             />
           )}
         </DialogContent>

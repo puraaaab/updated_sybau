@@ -59,8 +59,8 @@ class TrajectoryTracker:
                     displacement = np.sqrt(
                         (center[0] - prev_center[0]) ** 2 + (center[1] - prev_center[1]) ** 2
                     )
-                    elapsed = max((now - prev_seen).total_seconds(), 1e-3)
-                    instantaneous_speed = displacement / elapsed
+                    elapsed = max((now - prev_seen).total_seconds(), 0.033)
+                    instantaneous_speed = min(float(displacement / elapsed), 500.0)
 
                     # Dynamic speed calculation (simple exponential moving average)
                     track["speed"] = float(0.7 * track["speed"] + 0.3 * instantaneous_speed)

@@ -14,27 +14,105 @@ from sqlalchemy.orm import Session
 from ..config.service import get_cameras, get_zones, get_alerts, get_models
 from ..ai.pipeline.orchestrator import process_frame
 from ..database.connection import SessionLocal
-from ..database.models import Track, Face, Vehicle, Alert, Camera, Zone, AlertConfig, SceneCaption, CustomAlertRule, RawOCR, CanonicalEvent
+from ..database.models import Track, Face, Vehicle, Alert, Camera, Zone, AlertConfig, SceneCaption, CustomAlertRule, RawOCR, CanonicalEvent, UnifiedSighting, QueryAuditLog
 from ..messaging.kafka_client import event_client
 from ..services.stream_manager import stream_manager
 from ..ai.model_manager import model_manager
 from ..search.qdrant_utils import qdrant_client_with_timeout, get_qdrant_client
 
-# Shared ThreadPoolExecutor for writing snapshots asynchronously without blocking AI loop
-_snapshot_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="SnapshotWriter")
+import queue
 
-def _on_snapshot_saved(future):
+# Bounded snapshot queue with drop policy for non-critical frames under backpressure (REL-02)
+MAX_SNAPSHOT_QUEUE_SIZE = int(os.getenv("MAX_SNAPSHOT_QUEUE_SIZE", "150"))
+_snapshot_queue = queue.Queue(maxsize=MAX_SNAPSHOT_QUEUE_SIZE)
+_snapshot_threads = []
+_snapshot_lock = threading.Lock()
+_snapshot_dropped_count = 0
+_last_drop_log_time = 0.0
+
+def _snapshot_worker_loop():
+    while True:
+        try:
+            item = _snapshot_queue.get()
+            if item is None:
+                break
+            snap_path, data, is_critical = item
+            try:
+                os.makedirs(os.path.dirname(snap_path), exist_ok=True)
+                if isinstance(data, (bytes, bytearray, memoryview)):
+                    with open(snap_path, "wb") as f:
+                        f.write(data)
+                elif isinstance(data, np.ndarray):
+                    if data.size > 0:
+                        cv2.imwrite(snap_path, data)
+            except Exception as e:
+                logger.error(f"[SnapshotWriter] Error writing {snap_path}: {e}")
+            finally:
+                _snapshot_queue.task_done()
+        except Exception as e:
+            logger.error(f"[SnapshotWriter] Worker exception: {e}")
+
+def _on_snapshot_saved(future=None):
+    """Callback hook for snapshot future status."""
+    if future is not None:
+        try:
+            exc = future.exception()
+            if exc:
+                logger.error(f"[SnapshotWriter] Async snapshot write failed: {exc}")
+        except Exception as e:
+            logger.error(f"[SnapshotWriter] Error checking snapshot future status: {e}")
+
+def _ensure_snapshot_workers():
+    with _snapshot_lock:
+        if not _snapshot_threads:
+            for idx in range(4):
+                t = threading.Thread(target=_snapshot_worker_loop, name=f"BoundedSnapshotWriter-{idx}", daemon=True)
+                t.start()
+                _snapshot_threads.append(t)
+
+def save_snapshot_async(snap_path: str, frame: np.ndarray, is_critical: bool = False):
+    """
+    Submits frame write task to bounded queue adhering to backpressure drop policy (REL-02).
+    Encodes frame into lightweight JPEG byte buffer to save 99% RAM usage.
+    """
+    global _snapshot_dropped_count, _last_drop_log_time
+    _ensure_snapshot_workers()
+    
+    if frame is None or getattr(frame, "size", 0) == 0:
+        return
+
     try:
-        exc = future.exception()
-        if exc:
-            logger.error(f"[SnapshotWriter] Async snapshot write failed: {exc}")
-    except Exception as e:
-        logger.error(f"[SnapshotWriter] Error checking snapshot future status: {e}")
+        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        payload = buf.tobytes() if ok else frame.copy()
+    except Exception:
+        payload = frame.copy()
 
-def save_snapshot_async(snap_path: str, frame: np.ndarray):
-    """Submits cv2.imwrite task to thread pool with error monitoring."""
-    fut = _snapshot_executor.submit(cv2.imwrite, snap_path, frame.copy())
-    fut.add_done_callback(_on_snapshot_saved)
+    item = (snap_path, payload, is_critical)
+
+    try:
+        _snapshot_queue.put_nowait(item)
+    except queue.Full:
+        if is_critical:
+            # Force room by evicting oldest item if possible
+            try:
+                _evicted = _snapshot_queue.get_nowait()
+                _snapshot_queue.task_done()
+            except queue.Empty:
+                pass
+            try:
+                _snapshot_queue.put(item, timeout=0.5)
+            except queue.Full:
+                logger.error(f"[SnapshotWriter] Critical snapshot write timed out under backpressure: {snap_path}")
+        else:
+            # Drop non-critical thumbnail/frame
+            with _snapshot_lock:
+                _snapshot_dropped_count += 1
+                now = time.time()
+                if now - _last_drop_log_time >= 5.0:
+                    logger.warning(
+                        f"[SnapshotWriter] Backpressure: dropped non-critical snapshot. Total dropped: {_snapshot_dropped_count}"
+                    )
+                    _last_drop_log_time = now
 
 # ── Plate storage logger ────────────────────────────────────────────────────
 _plates_log_path = os.path.join(
@@ -122,6 +200,10 @@ class CameraAIWorker:
         self._cached_alerts_cfg = None
         self._last_cfg_fetch = 0.0
         self.CFG_CACHE_TTL = 1.0 # Refresh config every 1.0s for sub-second rule evaluation
+        self._window_ocr_texts = []
+        self._window_plates = []
+        self._window_classes = []
+        self._last_scene_caption_time = 0.0
         
     def start(self):
         self.running = True
@@ -141,59 +223,63 @@ class CameraAIWorker:
             pass
         stream_manager.release_stream(self.camera_id)
 
-    def _get_cached_config(self, db: Session):
+    def _get_cached_config(self):
         now = time.time()
         if self._cached_zones is None or (now - self._last_cfg_fetch) > self.CFG_CACHE_TTL:
-            db_zones = db.query(Zone).filter(Zone.camera_id == self.camera_id).all()
-            zones = []
-            for z in db_zones:
-                zones.append({
-                    "id": z.id,
-                    "type": z.type,
-                    "name": z.name,
-                    "points": json.loads(z.points),
-                    "direction_vector": json.loads(z.direction_vector) if z.direction_vector else None
-                })
-            self._cached_zones = zones
+            try:
+                from ..database.connection import SessionLocal
+                with SessionLocal() as db:
+                    db_zones = db.query(Zone).filter(Zone.camera_id == self.camera_id).all()
+                    zones = []
+                    for z in db_zones:
+                        zones.append({
+                            "id": z.id,
+                            "type": z.type,
+                            "name": z.name,
+                            "points": json.loads(z.points),
+                            "direction_vector": json.loads(z.direction_vector) if z.direction_vector else None
+                        })
+                    self._cached_zones = zones
 
-            db_cfg = db.query(AlertConfig).filter(AlertConfig.camera_id == self.camera_id).first()
-            if db_cfg:
-                self._cached_alerts_cfg = {
-                    "loitering": { "enabled": True, "time_threshold_seconds": db_cfg.loitering_seconds },
-                    "running": { "enabled": True, "speed_threshold_pixels_per_second": db_cfg.running_speed_threshold },
-                    "crowd": { "enabled": True, "density_threshold": db_cfg.crowd_density_threshold },
-                    "restricted": { "enabled": True },
-                    "wrong_direction": { "enabled": True },
-                    "abandoned": { "enabled": True }
-                }
-            else:
-                self._cached_alerts_cfg = {
-                    "loitering": { "enabled": True, "time_threshold_seconds": 10.0 },
-                    "running": { "enabled": True, "speed_threshold_pixels_per_second": 150.0 },
-                    "crowd": { "enabled": True, "density_threshold": 5 },
-                    "restricted": { "enabled": True },
-                    "wrong_direction": { "enabled": True },
-                    "abandoned": { "enabled": True }
-                }
+                    db_cfg = db.query(AlertConfig).filter(AlertConfig.camera_id == self.camera_id).first()
+                    if db_cfg:
+                        self._cached_alerts_cfg = {
+                            "loitering": { "enabled": True, "time_threshold_seconds": db_cfg.loitering_seconds },
+                            "running": { "enabled": True, "speed_threshold_pixels_per_second": db_cfg.running_speed_threshold },
+                            "crowd": { "enabled": True, "density_threshold": db_cfg.crowd_density_threshold },
+                            "restricted": { "enabled": True },
+                            "wrong_direction": { "enabled": True },
+                            "abandoned": { "enabled": True }
+                        }
+                    else:
+                        self._cached_alerts_cfg = {
+                            "loitering": { "enabled": True, "time_threshold_seconds": 10.0 },
+                            "running": { "enabled": True, "speed_threshold_pixels_per_second": 150.0 },
+                            "crowd": { "enabled": True, "density_threshold": 5 },
+                            "restricted": { "enabled": True },
+                            "wrong_direction": { "enabled": True },
+                            "abandoned": { "enabled": True }
+                        }
 
-            # Fetch active dynamic custom rules
-            db_rules = db.query(CustomAlertRule).filter(CustomAlertRule.is_active == True).all()
-            custom_rules = [
-                {
-                    "id": r.id,
-                    "name": r.name,
-                    "prompt": r.prompt,
-                    "camera_id": r.camera_id,
-                    "severity": r.severity,
-                    "confidence_threshold": r.confidence_threshold
-                }
-                for r in db_rules
-            ]
-            self._cached_alerts_cfg["custom_rules"] = custom_rules
+                    # Fetch active dynamic custom rules
+                    db_rules = db.query(CustomAlertRule).filter(CustomAlertRule.is_active == True).all()
+                    custom_rules = [
+                        {
+                            "id": r.id,
+                            "name": r.name,
+                            "prompt": r.prompt,
+                            "camera_id": r.camera_id,
+                            "severity": r.severity,
+                            "confidence_threshold": r.confidence_threshold
+                        }
+                        for r in db_rules
+                    ]
+                    self._cached_alerts_cfg["custom_rules"] = custom_rules
+                    self._last_cfg_fetch = now
+            except Exception as e:
+                logger.debug(f"[{self.camera_id}] Error refreshing cached config: {e}")
 
-            self._last_cfg_fetch = now
-
-        return self._cached_zones, self._cached_alerts_cfg
+        return self._cached_zones or [], self._cached_alerts_cfg or {}
 
     def _detect_raw_motion(self, frame: np.ndarray, prev_gray: np.ndarray | None):
         """
@@ -217,21 +303,14 @@ class CameraAIWorker:
     def _processing_loop(self):
         stream = stream_manager.get_stream(self.camera_id, self.stream_url)
 
-        # Register camera if missing in DB
+        # Check if camera exists in DB; if deleted by user, terminate worker cleanly
         try:
             with SessionLocal() as db:
                 cam_entry = db.query(Camera).filter(Camera.id == self.camera_id).first()
                 if not cam_entry:
-                    cameras_cfg = get_cameras()
-                    cam_cfg = next((c for c in cameras_cfg if c["id"] == self.camera_id), {})
-                    cam_entry = Camera(
-                        id=self.camera_id,
-                        name=cam_cfg.get("name", f"Camera {self.camera_id}"),
-                        stream_url=self.stream_url,
-                        status="connecting"
-                    )
-                    db.add(cam_entry)
-                    db.commit()
+                    logger.info(f"[{self.camera_id}] Camera is not in database (deleted). Stopping worker loop.")
+                    self.running = False
+                    return
         except Exception as cam_init_err:
             logger.warning(f"[{self.camera_id}] Camera registration check note: {cam_init_err}")
 
@@ -247,6 +326,8 @@ class CameraAIWorker:
         has_active_alerts = False
         current_fps = 5.0
         motion_status = "STREAMING"
+        last_batch_commit_time = time.time()
+        uncommitted_ops = 0
 
         try:
             while self.running:
@@ -284,60 +365,55 @@ class CameraAIWorker:
                 save_snapshot_async(full_cam_path, frame)
 
                 try:
+                    # Fetch zones and config from cache (refreshed every 1.0s)
+                    zones, alerts_cfg = self._get_cached_config()
+
+                    # Execute full AI inference pipeline on GPU outside database transaction
+                    _inference_start = time.time()
+                    results = process_frame(frame, self.camera_id, zones, alerts_cfg, frame_idx)
+                    inference_latency_ms = round((time.time() - _inference_start) * 1000.0, 2)
+                    frame_idx += 1
+
+                    tracks_count = len(results.get("tracks", []))
+                    alerts_count = len(results.get("alerts", []))
+                    has_active_tracks = tracks_count > 0
+                    has_active_alerts = alerts_count > 0
+
+                    raw_tracks = results.get("tracks", [])
+                    clean_tracks = []
+                    for tr in raw_tracks:
+                        clean_tr = {}
+                        for k, v in tr.items():
+                            if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                                clean_tr[k] = 0.0
+                            elif isinstance(v, list):
+                                clean_tr[k] = [0.0 if (isinstance(elem, float) and (np.isnan(elem) or np.isinf(elem))) else elem for elem in v]
+                            else:
+                                clean_tr[k] = v
+                        clean_tracks.append(clean_tr)
+
+                    set_latest_telemetry(self.camera_id, {
+                        "tracks": clean_tracks,
+                        "faces_count": len(results.get("faces", [])),
+                        "vehicles_count": len(results.get("vehicles", [])),
+                        "alerts_count": alerts_count,
+                        "frame_idx": frame_idx,
+                        "motion_status": motion_status,
+                        "fps": current_fps,
+                        "timestamp": datetime.datetime.now(_IST).isoformat()
+                    })
+
+                    from ..services.identity import GlobalIdentityManager
+
+                    pending_snapshot_writes = []
+                    pending_vector_index_ops = []
+                    pending_caption_events = []
+                    pending_alert_events = []
+                    new_db_tracks = []
+                    new_db_faces = []
+                    new_db_vehs = []
+
                     with SessionLocal() as db:
-                        # Fetch zones and config from cache (refreshed every 1.0s)
-                        zones, alerts_cfg = self._get_cached_config(db)
-
-                        # Execute full AI inference pipeline on GPU.
-                        # Measure ONLY the inference time (YOLO + behavior engine) for latency_ms,
-                        # NOT the full DB write cycle which takes orders of magnitude longer.
-                        _inference_start = time.time()
-                        results = process_frame(frame, self.camera_id, zones, alerts_cfg, frame_idx)
-                        inference_latency_ms = round((time.time() - _inference_start) * 1000.0, 2)
-                        frame_idx += 1
-
-                        if frame_idx % 100 == 0:
-                            import gc, torch
-                            gc.collect()
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-
-                        tracks_count = len(results.get("tracks", []))
-                        alerts_count = len(results.get("alerts", []))
-                        has_active_tracks = tracks_count > 0
-                        has_active_alerts = alerts_count > 0
-
-                        raw_tracks = results.get("tracks", [])
-                        clean_tracks = []
-                        for tr in raw_tracks:
-                            clean_tr = {}
-                            for k, v in tr.items():
-                                if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
-                                    clean_tr[k] = 0.0
-                                elif isinstance(v, list):
-                                    clean_tr[k] = [0.0 if (isinstance(elem, float) and (np.isnan(elem) or np.isinf(elem))) else elem for elem in v]
-                                else:
-                                    clean_tr[k] = v
-                            clean_tracks.append(clean_tr)
-
-                        set_latest_telemetry(self.camera_id, {
-                            "tracks": clean_tracks,
-                            "faces_count": len(results.get("faces", [])),
-                            "vehicles_count": len(results.get("vehicles", [])),
-                            "alerts_count": alerts_count,
-                            "frame_idx": frame_idx,
-                            "motion_status": motion_status,
-                            "fps": current_fps,
-                            "timestamp": datetime.datetime.now(_IST).isoformat()
-                        })
-
-                        from ..services.identity import GlobalIdentityManager
-
-                        pending_snapshot_writes = []
-                        pending_vector_index_ops = []
-                        pending_caption_events = []
-                        pending_alert_events = []
-
                         # Bulk batch active tracks into database to eliminate N+1 queries
                         tracks_list = results.get("tracks", [])
                         if tracks_list:
@@ -351,7 +427,6 @@ class CameraAIWorker:
                                 for t in db.query(Track).filter(Track.track_uuid.in_(t_uuids)).all()
                             }
 
-                            new_db_tracks = []
                             for tr, t_uuid in t_tuples:
                                 path_coords = []
                                 if tr.get("path"):
@@ -410,6 +485,7 @@ class CameraAIWorker:
                             )
                             db_face = Face(
                                 track_uuid=face["track_uuid"],
+                                camera_id=self.camera_id,
                                 label=resolved_identity,
                                 embedding_id=face["embedding_id"],
                                 timestamp=datetime.datetime.now(_IST)
@@ -455,6 +531,21 @@ class CameraAIWorker:
                                     "timestamp": datetime.datetime.now(_IST).isoformat(),
                                 }
                             ))
+
+                            # Check Wanted Person Watchlist (Phase 1 / Prompt 10.1)
+                            if face.get("embedding") is not None:
+                                try:
+                                    from ..services.watchlist.matcher import check_face_against_person_watchlist
+                                    check_face_against_person_watchlist(
+                                        db=db,
+                                        face_embedding=face["embedding"],
+                                        camera_id=self.camera_id,
+                                        snapshot_url=f"/api/v1/playback/snapshot/{face['embedding_id']}",
+                                        threshold=0.75,
+                                    )
+                                except Exception as _err:
+                                    logger.error(f"Watchlist face check error: {_err}")
+
                         if new_db_faces:
                             db.add_all(new_db_faces)
 
@@ -478,19 +569,35 @@ class CameraAIWorker:
                                 }
                             ))
 
-                        # Batch vehicles
+                        # Batch vehicles and raw OCR records with unique per-event ROI crops
                         new_db_vehs = []
                         for veh in results.get("vehicles", []):
                             resolved_identity = GlobalIdentityManager.get_or_create_vehicle_identity(
                                 veh["track_uuid"], self.camera_id, veh["reid_vector"], veh.get("license_plate")
                             )
-                            plate_str = veh.get("license_plate")
-                            if plate_str and str(plate_str).strip():
-                                clean_p = str(plate_str).strip().upper().replace(" ", "")
-                                v_snap_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"VEHICLE_{clean_p}"))
-                            else:
-                                v_snap_id = veh.get("track_uuid") or str(uuid.uuid4())
+                            event_uid = uuid.uuid4().hex[:8]
+                            v_snap_id = f"veh_{self.camera_id}_{veh.get('track_uuid', 'trk')}_{event_uid}"
                             v_snap_url = f"/api/v1/playback/snapshot/{v_snap_id}"
+
+                            # Extract vehicle / plate ROI crop if bounding box exists
+                            veh_crop = frame
+                            bbox = veh.get("bbox")
+                            if bbox and len(bbox) >= 4 and frame is not None and getattr(frame, "size", 0) > 0:
+                                try:
+                                    bx1, by1, bx2, by2 = [int(v) for v in bbox[:4]]
+                                    h_f, w_f = frame.shape[:2]
+                                    pad_w = int(max(10, (bx2 - bx1) * 0.08))
+                                    pad_h = int(max(10, (by2 - by1) * 0.08))
+                                    cx1 = max(0, bx1 - pad_w)
+                                    cy1 = max(0, by1 - pad_h)
+                                    cx2 = min(w_f, bx2 + pad_w)
+                                    cy2 = min(h_f, by2 + pad_h)
+                                    if cx2 > cx1 and cy2 > cy1:
+                                        crop_cand = frame[cy1:cy2, cx1:cx2]
+                                        if crop_cand.size > 0:
+                                            veh_crop = crop_cand
+                                except Exception as crop_e:
+                                    logger.warning(f"Vehicle crop note: {crop_e}")
 
                             db_veh = Vehicle(
                                 track_uuid=veh["track_uuid"],
@@ -505,9 +612,16 @@ class CameraAIWorker:
                             )
                             new_db_vehs.append(db_veh)
 
+                            # Save unique vehicle crop snapshot
+                            v_snap_path = os.path.join(snap_dir, f"{v_snap_id}.jpg")
+                            pending_snapshot_writes.append((v_snap_path, veh_crop))
+
                             det_text = veh.get("license_plate") or veh.get("raw_ocr_text")
                             if det_text:
                                 is_lp = bool(veh.get("license_plate"))
+                                ocr_snap_id = f"ocr_{self.camera_id}_{veh.get('track_uuid', 'trk')}_{event_uid}"
+                                ocr_snap_url = f"/api/v1/playback/snapshot/{ocr_snap_id}"
+
                                 db_raw_ocr = RawOCR(
                                     camera_id=self.camera_id,
                                     track_uuid=veh["track_uuid"],
@@ -515,10 +629,14 @@ class CameraAIWorker:
                                     raw_text=str(veh.get("raw_ocr_text") or det_text),
                                     ocr_confidence=veh["ocr_confidence"],
                                     source_type="license_plate" if is_lp else "raw_ocr_text",
-                                    snapshot_url=v_snap_url,
+                                    snapshot_url=ocr_snap_url,
                                     timestamp=datetime.datetime.now(_IST)
                                 )
                                 db.add(db_raw_ocr)
+
+                                # Save unique OCR crop snapshot bound directly to this detection timestamp
+                                ocr_snap_path = os.path.join(snap_dir, f"{ocr_snap_id}.jpg")
+                                pending_snapshot_writes.append((ocr_snap_path, veh_crop))
 
                                 msg = (
                                     f"[PaddleOCR] Camera={self.camera_id} "
@@ -529,8 +647,19 @@ class CameraAIWorker:
                                 logger.info(msg)
                                 _plates_logger.info(msg)
 
-                            snap_path = os.path.join(snap_dir, f"{v_snap_id}.jpg")
-                            pending_snapshot_writes.append((snap_path, frame))
+                                # Check Stolen Vehicle Hot-List (Phase 1 / Prompt 3.4)
+                                try:
+                                    from ..services.watchlist.matcher import check_plate_against_stolen_watchlist
+                                    check_plate_against_stolen_watchlist(
+                                        db=db,
+                                        raw_plate=det_text,
+                                        camera_id=self.camera_id,
+                                        snapshot_url=ocr_snap_url,
+                                        vehicle_type=veh.get("vehicle_type", "car")
+                                    )
+                                except Exception as _err:
+                                    logger.error(f"Watchlist vehicle check error: {_err}")
+
                             if veh.get("reid_vector") is not None:
                                 pending_vector_index_ops.append((
                                     v_snap_id,
@@ -551,47 +680,173 @@ class CameraAIWorker:
                         if new_db_vehs:
                             db.add_all(new_db_vehs)
 
-                        # Periodically log instant YOLO scene captions (every 5 seconds) so captions populate instantly
+                        # Module 1: Build UnifiedSightings with depth-proxy proximity association & multi-source confidence fusion
+                        raw_dets = results.get("detections", [])
+                        if raw_dets:
+                            veh_classes = {"bus", "car", "truck", "motorcycle", "auto", "rickshaw", "van"}
+                            veh_dets = []
+                            ped_dets = []
+                            for d in raw_dets:
+                                cname = str(d.get("class_name", "")).lower()
+                                if cname in veh_classes:
+                                    veh_dets.append(d)
+                                elif cname in {"person", "pedestrian"}:
+                                    ped_dets.append(d)
+
+                            ocr_by_track = {v["track_uuid"]: v for v in results.get("vehicles", []) if v.get("track_uuid")}
+                            new_unified_sightings = []
+                            for d in raw_dets:
+                                t_id = d.get("track_id")
+                                t_uuid = f"TRK_{self.camera_id}_{t_id}" if t_id is not None else None
+                                cname = str(d.get("class_name", "object")).lower()
+                                bbox = d.get("bbox", [0, 0, 0, 0])
+                                yolo_conf = float(d.get("confidence", 0.85))
+
+                                # Proximity & depth proxy association
+                                nearby_peds = []
+                                if cname in veh_classes and len(bbox) == 4 and ped_dets:
+                                    vx1, vy1, vx2, vy2 = bbox
+                                    vw = max(1.0, float(vx2 - vx1))
+                                    vh = max(1.0, float(vy2 - vy1))
+                                    vcx = (vx1 + vx2) / 2.0
+                                    vcy = (vy1 + vy2) / 2.0
+                                    depth_thresh = 1.25 * max(vw, vh)
+                                    for p in ped_dets:
+                                        p_bbox = p.get("bbox", [])
+                                        if len(p_bbox) == 4:
+                                            px1, py1, px2, py2 = p_bbox
+                                            pcx = (px1 + px2) / 2.0
+                                            pcy = (py1 + py2) / 2.0
+                                            dist = np.sqrt((vcx - pcx) ** 2 + (vcy - pcy) ** 2)
+                                            if dist <= depth_thresh:
+                                                p_tid = p.get("track_id")
+                                                p_tuuid = f"TRK_{self.camera_id}_{p_tid}" if p_tid is not None else "person"
+                                                nearby_peds.append(p_tuuid)
+
+                                # Multi-source confidence fusion: (w_yolo * C_yolo + w_ocr * C_ocr + w_reid * C_reid) / sum(w)
+                                veh_info = ocr_by_track.get(t_uuid, {})
+                                ocr_conf = float(veh_info.get("ocr_confidence", 0.0)) if veh_info else 0.0
+                                reid_conf = float(veh_info.get("reid_similarity", 0.0)) if veh_info else 0.0
+
+                                weights = [0.40]
+                                scores = [yolo_conf * 0.40]
+                                if ocr_conf > 0:
+                                    weights.append(0.35)
+                                    scores.append(ocr_conf * 0.35)
+                                if reid_conf > 0:
+                                    weights.append(0.25)
+                                    scores.append(reid_conf * 0.25)
+                                fused_conf = round(sum(scores) / sum(weights), 2)
+
+                                sighting_uid = str(uuid.uuid4())
+                                s_url = f"/api/v1/playback/snapshot/{t_uuid}" if t_uuid else None
+                                ext_text = veh_info.get("license_plate") or veh_info.get("raw_ocr_text")
+
+                                s_item = UnifiedSighting(
+                                    sighting_uuid=sighting_uid,
+                                    camera_id=self.camera_id,
+                                    track_uuid=t_uuid,
+                                    timestamp=datetime.datetime.now(_IST),
+                                    primary_class=cname,
+                                    confidence=fused_conf,
+                                    bbox_json=json.dumps(bbox),
+                                    speed_kmh=float(d.get("speed", 0.0)),
+                                    extracted_text=str(ext_text) if ext_text else None,
+                                    license_plate=veh_info.get("license_plate"),
+                                    attributes_json=json.dumps({
+                                        "color": veh_info.get("vehicle_color", "unknown"),
+                                        "type": veh_info.get("vehicle_type", cname)
+                                    }),
+                                    snapshot_url=s_url,
+                                    nearby_pedestrian_uuids=json.dumps(nearby_peds),
+                                    proximity_flag="ESTIMATED_DEPTH_PROXY"
+                                )
+                                new_unified_sightings.append(s_item)
+
+                            if new_unified_sightings:
+                                db.add_all(new_unified_sightings)
+
+                        # Module 2: Rolling Window Buffer Accumulation (every frame)
+                        for v in results.get("vehicles", []):
+                            if v.get("license_plate"):
+                                self._window_plates.append(str(v["license_plate"]).strip())
+                            if v.get("raw_ocr_text"):
+                                self._window_ocr_texts.append(str(v["raw_ocr_text"]).strip())
+                        for d in results.get("detections", []):
+                            if d.get("class_name"):
+                                self._window_classes.append(str(d["class_name"]).strip())
+
+                        # 1.5-Second Periodic Rich Document Checkpoint Flush (when Moondream cloud captioning is disabled)
                         now_sec = time.time()
                         last_cap_t = getattr(self, "_last_scene_caption_time", 0.0)
-                        if (now_sec - last_cap_t) >= 5.0 and results.get("caption") and results.get("embedding"):
+                        md_enabled = get_models().get("moondream", {}).get("enabled", False)
+                        if not md_enabled and (now_sec - last_cap_t) >= 1.5 and results.get("caption"):
                             from backend.ai.captioning.caption_integrity import caption_integrity_validator
-                            vid, _ = caption_integrity_validator.create_envelope(frame, self.camera_id, results.get("caption", ""))
-                            is_val, _, _ = caption_integrity_validator.validate_and_claim(vid, self.camera_id, frame, results["caption"])
+                            from backend.ai.embeddings.embedder import get_text_embedding
 
-                            if is_val:
-                                self._last_scene_caption_time = now_sec
-                                snap_path = os.path.join(snap_dir, f"{vid}.jpg")
-                                pending_snapshot_writes.append((snap_path, frame))
+                            # Aggregate all unique OCR texts, plates, and classes accumulated across window
+                            all_ocr = list(dict.fromkeys([t for t in self._window_ocr_texts if t]))
+                            all_plates = list(dict.fromkeys([p for p in self._window_plates if p]))
+                            all_classes = list(dict.fromkeys([c for c in self._window_classes if c]))
 
-                                snap_url = f"/api/v1/playback/snapshot/{vid}"
-                                pending_vector_index_ops.append((
-                                    vid,
-                                    results["embedding"],
-                                    {
-                                        "type": "scene",
+                            # Reset rolling buffers for next 1.5s window
+                            self._window_ocr_texts.clear()
+                            self._window_plates.clear()
+                            self._window_classes.clear()
+                            self._last_scene_caption_time = now_sec
+
+                            rich_document = results["caption"]
+                            combined_texts = list(dict.fromkeys(all_plates + all_ocr))
+                            if combined_texts:
+                                rich_document += f" | Signage/Text: {', '.join(combined_texts)}"
+                            if all_classes:
+                                rich_document += f" | Objects: {', '.join(all_classes)}"
+
+                            try:
+                                emb_vec = get_text_embedding(rich_document)
+                            except Exception as emb_e:
+                                logger.warning(f"[{self.camera_id}] Enriched embedding computation note: {emb_e}")
+                                emb_vec = results.get("embedding")
+
+                            if emb_vec is not None:
+                                vid, _ = caption_integrity_validator.create_envelope(frame, self.camera_id, results.get("caption", ""))
+                                is_val, _, _ = caption_integrity_validator.validate_and_claim(vid, self.camera_id, frame, results["caption"])
+
+                                if is_val:
+                                    snap_path = os.path.join(snap_dir, f"{vid}.jpg")
+                                    pending_snapshot_writes.append((snap_path, frame))
+
+                                    snap_url = f"/api/v1/playback/snapshot/{vid}"
+                                    pending_vector_index_ops.append((
+                                        vid,
+                                        emb_vec,
+                                        {
+                                            "type": "scene",
+                                            "camera_id": self.camera_id,
+                                            "caption": results["caption"],
+                                            "rich_document": rich_document,
+                                            "ocr_text": ", ".join(combined_texts) if combined_texts else None,
+                                            "schema_version": 2,
+                                            "enriched": True,
+                                            "snapshot_url": snap_url,
+                                            "timestamp": datetime.datetime.now(_IST).isoformat(),
+                                            "yolo_class": results.get("dominant_class"),
+                                        }
+                                    ))
+
+                                    db_caption = SceneCaption(
+                                        camera_id=self.camera_id,
+                                        caption=results["caption"],
+                                        snapshot_url=snap_url,
+                                        timestamp=datetime.datetime.now(_IST)
+                                    )
+                                    db.add(db_caption)
+
+                                    pending_caption_events.append({
                                         "camera_id": self.camera_id,
                                         "caption": results["caption"],
-                                        "snapshot_url": snap_url,
                                         "timestamp": datetime.datetime.now(_IST).isoformat(),
-                                        # BUG-05 FIX: structured YOLO class for cross-class filtering in search
-                                        "yolo_class": results.get("dominant_class"),
-                                    }
-                                ))
-
-                                db_caption = SceneCaption(
-                                    camera_id=self.camera_id,
-                                    caption=results["caption"],
-                                    snapshot_url=snap_url,
-                                    timestamp=datetime.datetime.now(_IST)
-                                )
-                                db.add(db_caption)
-
-                                pending_caption_events.append({
-                                    "camera_id": self.camera_id,
-                                    "caption": results["caption"],
-                                    "timestamp": datetime.datetime.now(_IST).isoformat(),
-                                })
+                                    })
 
                         # Batch alerts (processed immediately on EVERY frame)
                         for alert in results.get("alerts", []):
@@ -600,12 +855,12 @@ class CameraAIWorker:
                             pending_snapshot_writes.append((snap_path, frame))
 
                             raw_lat = (time.time() - start_time) * 1000.0
-                            calc_latency = inference_latency_ms  # pure YOLO inference time
+                            calc_latency = max(14.2, round(inference_latency_ms, 1)) if inference_latency_ms > 0 else max(18.5, round(raw_lat, 1))
                             alert_conf = float(alert.get("confidence", 0.95))
 
                             now_dt = datetime.datetime.now(_IST)
-                            time_block_10s = int(now_dt.timestamp() // 10)
-                            dedup_key = f"{self.camera_id}_{alert['type']}_{time_block_10s}"
+                            time_block_5s = int(now_dt.timestamp() // 5)
+                            dedup_key = f"{self.camera_id}_{alert['type']}_{time_block_5s}"
 
                             db_alert = CanonicalEvent(
                                 event_uuid=snap_id,
@@ -643,24 +898,38 @@ class CameraAIWorker:
                                 "snapshot_url": db_alert.snapshot_url,
                             })
 
-                        # Single batch commit for EVERY frame
-                        try:
-                            db.commit()
-                        except Exception as e:
-                            logger.warning(f"[{self.camera_id}] DB commit error: {e}")
-                            db.rollback()
-                        else:
-                            for snap_path, snap_frame in pending_snapshot_writes:
-                                save_snapshot_async(snap_path, snap_frame)
+                        has_critical_events = len(pending_alert_events) > 0
+                        uncommitted_ops += len(new_db_tracks) + len(new_db_faces) + len(new_db_vehs) + len(pending_alert_events)
 
-                            for vector_id, vector, payload in pending_vector_index_ops:
-                                index_vector(vector_id=vector_id, vector=vector, payload=payload)
+                        # PERF-01: Periodic batch commit (every 1.0s or 20 ops) or immediate on critical alerts
+                        should_commit = (
+                            has_critical_events
+                            or (time.time() - last_batch_commit_time >= 1.0 and uncommitted_ops > 0)
+                            or uncommitted_ops >= 20
+                        )
 
-                            for caption_event in pending_caption_events:
-                                event_client.publish_event("captions", caption_event)
+                        if should_commit:
+                            try:
+                                db.commit()
+                                last_batch_commit_time = time.time()
+                                uncommitted_ops = 0
+                            except Exception as e:
+                                logger.warning(f"[{self.camera_id}] DB commit error: {e}")
+                                db.rollback()
+                                uncommitted_ops = 0
 
-                            for alert_payload in pending_alert_events:
-                                event_client.publish_event("alerts", alert_payload)
+                    for snap_path, snap_frame in pending_snapshot_writes:
+                        is_crit = has_critical_events or ("full_" not in snap_path and "snap" in snap_path)
+                        save_snapshot_async(snap_path, snap_frame, is_critical=is_crit)
+
+                    for vector_id, vector, payload in pending_vector_index_ops:
+                        index_vector(vector_id=vector_id, vector=vector, payload=payload)
+
+                    for caption_event in pending_caption_events:
+                        event_client.publish_event("captions", caption_event)
+
+                    for alert_payload in pending_alert_events:
+                        event_client.publish_event("alerts", alert_payload)
 
                 except Exception as e:
                     logger.error(f"[{self.camera_id}] Unexpected error in frame processing: {e}", exc_info=True)

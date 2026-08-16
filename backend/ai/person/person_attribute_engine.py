@@ -58,11 +58,12 @@ def _get_clip_model():
 
 
 def get_clip_text_embedding(text_query: str) -> list:
-    """Computes a 512-dimensional CLIP text embedding vector for natural language search."""
+    """Computes a CLIP text embedding vector for natural language search."""
     model = _get_clip_model()
     if model is not None:
         try:
-            return model.encode(text_query).tolist()
+            with _clip_lock:
+                return model.encode(text_query).tolist()
         except Exception as e:
             logger.warning(f"CLIP text encoding failed: {e}")
 
@@ -71,6 +72,21 @@ def get_clip_text_embedding(text_query: str) -> list:
     vec = rng.normal(0, 1, 768)
     vec = vec / np.linalg.norm(vec)
     return vec.tolist()
+
+
+def get_clip_image_embedding(image_bgr: np.ndarray) -> list | None:
+    """Computes OpenCLIP vision embedding vector from a BGR image."""
+    model = _get_clip_model()
+    if model is not None and image_bgr is not None and image_bgr.size > 0:
+        try:
+            crop_rgb = cv2.resize(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB), (224, 224))
+            pil_img = Image.fromarray(crop_rgb)
+            with _clip_lock:
+                with torch.inference_mode():
+                    return model.encode(pil_img, show_progress_bar=False).tolist()  # type: ignore[arg-type]
+        except Exception as e:
+            logger.warning(f"CLIP image encoding failed: {e}")
+    return None
 
 
 def extract_dominant_colors(crop_bgr: np.ndarray) -> dict:
@@ -174,13 +190,26 @@ def process_person_crops(frame: np.ndarray, tracks: list, max_crop_embeddings: i
             colors = cached_entry["colors"]
         else:
             colors = extract_dominant_colors(crop)
-            vec = None
+            vec: list | None = None
             if model is not None:
                 try:
                     crop_rgb = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), (224, 224))
                     pil_img = Image.fromarray(crop_rgb)
-                    with torch.inference_mode():
-                        vec = model.encode(pil_img, show_progress_bar=False).tolist()
+                    with _clip_lock:
+                        try:
+                            with torch.inference_mode():
+                                vec = model.encode(pil_img, show_progress_bar=False).tolist()  # type: ignore[arg-type]
+                        except (torch.cuda.OutOfMemoryError, RuntimeError) as cuda_err:
+                            if "CUDA" in str(cuda_err) or "out of memory" in str(cuda_err) or "CUBLAS" in str(cuda_err):
+                                logger.warning("CUDA memory pressure in CLIP model, falling back to CPU...")
+                                torch.cuda.empty_cache()
+                                if _clip_model is not None:
+                                    _clip_model = _clip_model.to("cpu")
+                                    model = _clip_model
+                                with torch.inference_mode():
+                                    vec = model.encode(pil_img, show_progress_bar=False).tolist()  # type: ignore[arg-type]
+                            else:
+                                raise
                 except Exception as e:
                     logger.warning(f"CLIP encoding error for person crop: {e}")
 

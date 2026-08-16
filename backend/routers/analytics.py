@@ -1,10 +1,12 @@
 import json
+from typing import Optional, List, Dict, Any
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..database.connection import get_db
 from ..database.models import Track
-from ..auth.helpers import verify_viewer
+from ..auth.helpers import verify_viewer, verify_operator
 from ..monitoring import health as monitoring_health
 from ..ai.model_manager import model_manager
 from ..ai.embeddings.embedder import is_embedder_ready
@@ -67,7 +69,7 @@ def get_cameras_telemetry(user=Depends(verify_viewer)):
 
 @router.get("/analytics/heatmap")
 def get_spatial_heatmap_data(camera_id: str = Query(default="cam_1"), user=Depends(verify_viewer), db: Session = Depends(get_db)):
-    recent_tracks = db.query(Track).filter(Track.camera_id == camera_id).limit(40).all()
+    recent_tracks = db.query(Track).filter(Track.camera_id == camera_id).order_by(Track.last_seen.desc()).limit(40).all()
     points = []
     
     if recent_tracks:
@@ -100,7 +102,7 @@ def get_spatial_heatmap_data(camera_id: str = Query(default="cam_1"), user=Depen
 
 @router.get("/analytics/traffic-speed")
 def get_traffic_speed_analytics(camera_id: str = Query(default="cam_1"), user=Depends(verify_viewer), db: Session = Depends(get_db)):
-    recent_tracks = db.query(Track).filter(Track.camera_id == camera_id).limit(50).all()
+    recent_tracks = db.query(Track).filter(Track.camera_id == camera_id).order_by(Track.last_seen.desc()).limit(50).all()
     tracks_payload = []
     for tr in recent_tracks:
         tracks_payload.append({
@@ -121,3 +123,94 @@ def natural_language_video_qa(question: str = Query(...), camera_id: str = Query
 
     res = answer_video_question(question, camera_id=camera_id)
     return res
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Audio Intelligence & Acoustic Anomaly Endpoints (FEAT-01)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/analytics/audio-events")
+def list_audio_events(
+    camera_id: Optional[str] = Query(default=None),
+    event_type: Optional[str] = Query(default=None),
+    is_anomaly: Optional[bool] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    user=Depends(verify_viewer),
+    db: Session = Depends(get_db)
+):
+    """Retrieves paginated audio intelligence events and acoustic anomaly telemetry (RBAC: Viewer+)."""
+    from ..database.models import AudioEvent
+    q = db.query(AudioEvent)
+    if camera_id:
+        q = q.filter(AudioEvent.camera_id == camera_id)
+    if event_type:
+        q = q.filter(AudioEvent.event_type == event_type.lower())
+    if is_anomaly is not None:
+        q = q.filter(AudioEvent.is_anomaly == is_anomaly)
+
+    total = q.count()
+    records = q.order_by(AudioEvent.timestamp.desc()).offset(offset).limit(limit).all()
+
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": r.id,
+                "event_uuid": r.event_uuid,
+                "camera_id": r.camera_id,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "duration_seconds": r.duration_seconds,
+                "event_type": r.event_type,
+                "is_anomaly": r.is_anomaly,
+                "classifier_name": r.classifier_name,
+                "confidence": r.confidence,
+                "anomaly_score": r.anomaly_score,
+                "decibels": r.decibels,
+                "peak_frequency_hz": r.peak_frequency_hz,
+            }
+            for r in records
+        ]
+    }
+
+
+@router.post("/cameras/{camera_id}/audio-chunk")
+def ingest_camera_audio_chunk(
+    camera_id: str,
+    payload: dict,
+    user=Depends(verify_operator),
+):
+    """
+    Ingests a raw 16kHz mono 16-bit PCM audio chunk for real-time acoustic AI processing (RBAC: Operator+).
+    Payload can contain base64_pcm (string) or simulated decibels/frequency params.
+    """
+    import base64
+    from ..ai.audio.acoustic_engine import production_audio_engine
+
+    base64_data = payload.get("base64_pcm")
+    if base64_data:
+        try:
+            pcm_bytes = base64.b64decode(base64_data)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64_pcm payload.")
+    else:
+        # Generate synthetic 16kHz sine wave PCM chunk from provided frequency and decibel level
+        freq = float(payload.get("frequency_hz", 1000.0))
+        db = float(payload.get("decibels", 70.0))
+        duration_sec = float(payload.get("duration_sec", 1.0))
+        sample_rate = 16000
+        t = np.linspace(0, duration_sec, int(sample_rate * duration_sec), endpoint=False)
+        # Amplitude derived from dB RMS: 0 dB = 1.0, 90 dB = 10^(90/20) scaled to int16 range
+        rms_target = 10.0 ** (db / 20.0)
+        amplitude = min(32767.0, rms_target * np.sqrt(2))
+        waveform = (amplitude * np.sin(2 * np.pi * freq * t)).astype(np.int16)
+        pcm_bytes = waveform.tobytes()
+
+    events = production_audio_engine.process_pcm_chunk(camera_id, pcm_bytes)
+    return {
+        "status": "success",
+        "camera_id": camera_id,
+        "bytes_processed": len(pcm_bytes),
+        "events_detected": len(events),
+        "events": events
+    }

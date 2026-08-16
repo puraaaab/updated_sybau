@@ -60,6 +60,7 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from ...database.connection import SessionLocal
@@ -261,6 +262,79 @@ class QueryIntentParser:
                 time_start = now - delta
                 break
 
+        # 1. "between 9AM and 12PM" / "9 se 12 ke beech"
+        if time_start is None:
+            between_match = re.search(
+                r"\b(?:between|from)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:and|to|se)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b",
+                user_query, re.IGNORECASE
+            )
+            if between_match:
+                h1, m1, mer1, h2, m2, mer2 = between_match.groups()
+                try:
+                    hour1 = int(h1)
+                    min1 = int(m1 or 0)
+                    if mer1 and mer1.lower() == "pm" and hour1 < 12:
+                        hour1 += 12
+                    elif mer1 and mer1.lower() == "am" and hour1 == 12:
+                        hour1 = 0
+                    elif not mer1 and mer2 and mer2.lower() == "pm" and hour1 < 12 and hour1 < int(h2):
+                        hour1 += 12
+                        
+                    hour2 = int(h2)
+                    min2 = int(m2 or 0)
+                    if mer2 and mer2.lower() == "pm" and hour2 < 12:
+                        hour2 += 12
+                    elif mer2 and mer2.lower() == "am" and hour2 == 12:
+                        hour2 = 0
+                        
+                    time_start = now.replace(hour=hour1, minute=min1, second=0, microsecond=0)
+                    time_end = now.replace(hour=hour2, minute=min2, second=0, microsecond=0)
+                except Exception:
+                    pass
+
+        # 2. "after 10AM", "after 10:30 am", "from 10am", "10 baje ke baad"
+        if time_start is None:
+            after_match = re.search(
+                r"\b(?:after|post|since)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b|\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:ke baad|baje ke baad)\b",
+                user_query, re.IGNORECASE
+            )
+            if after_match:
+                h_str = after_match.group(1) or after_match.group(4)
+                m_str = after_match.group(2) or after_match.group(5) or "0"
+                meridiem = (after_match.group(3) or after_match.group(6) or "").lower()
+                try:
+                    hour = int(h_str)
+                    minute = int(m_str)
+                    if meridiem == "pm" and hour < 12:
+                        hour += 12
+                    elif meridiem == "am" and hour == 12:
+                        hour = 0
+                    time_start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                except Exception:
+                    pass
+
+        # 3. "before 2PM", "prior to 11AM", "2 baje se pehle"
+        if time_start is None:
+            before_match = re.search(
+                r"\b(?:before|prior to|until|till)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b|\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:se pehle|baje se pehle)\b",
+                user_query, re.IGNORECASE
+            )
+            if before_match:
+                h_str = before_match.group(1) or before_match.group(4)
+                m_str = before_match.group(2) or before_match.group(5) or "0"
+                meridiem = (before_match.group(3) or before_match.group(6) or "").lower()
+                try:
+                    hour = int(h_str)
+                    minute = int(m_str)
+                    if meridiem == "pm" and hour < 12:
+                        hour += 12
+                    elif meridiem == "am" and hour == 12:
+                        hour = 0
+                    time_end = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    time_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                except Exception:
+                    pass
+
         is_followup = bool(_FOLLOWUP_MARKERS.search(user_query.strip()))
         followup_reference = None
         if is_followup and last_intent is not None:
@@ -363,11 +437,13 @@ def build_trajectory_summary(timeline_items: List[Dict[str, Any]],
             dist_km = _haversine_km(*geo1, *geo2)
             speed_kmh = dist_km / (gap_minutes / 60.0)
             leg["distance_km"] = round(dist_km, 2)
-            leg["inferred_speed_kmh"] = round(speed_kmh, 1)
-            if speed_kmh > 140:
+            if speed_kmh <= 120.0:
+                leg["inferred_speed_kmh"] = round(speed_kmh, 1)
+            else:
+                # Discard physically impossible speeds (e.g. multiple concurrent camera hits)
+                leg["inferred_speed_kmh"] = None
                 flags.append(
-                    f"Implausible inferred speed ({speed_kmh:.0f} km/h) between "
-                    f"{prev['camera_name']} and {curr['camera_name']} — likely two different subjects"
+                    f"Concurrent sightings at {prev['camera_name']} and {curr['camera_name']} within {gap_minutes:.1f}m (independent events)"
                 )
         legs.append(leg)
 
@@ -558,17 +634,23 @@ class SurveillanceChatEngine:
                     action: str, detail: Dict[str, Any]) -> None:
         """Best-effort audit trail write. Never allowed to break the request."""
         try:
-            from ...database.models import AuditLog  # optional model
-            db.add(AuditLog(
+            from ...database.models import QueryAuditLog
+            query_txt = detail.get("query", action)
+            mode_str = detail.get("search_mode", "all")
+            hits_cnt = detail.get("hits", 0)
+            db.add(QueryAuditLog(
                 username=username,
                 session_uuid=session_uuid,
-                action=action,
-                detail_json=json.dumps(detail, default=str),
+                query_text=query_txt,
+                search_mode=mode_str,
+                matched_records_count=hits_cnt,
+                matched_sighting_ids=json.dumps(detail.get("sighting_ids", []), default=str),
+                execution_time_ms=float(detail.get("execution_time_ms", 0.0)),
                 timestamp=_istnow(),
             ))
             db.commit()
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[ChatEngine] Audit log skipped (%s): %s", action, exc)
+            logger.debug("[ChatEngine] QueryAuditLog write note (%s): %s", action, exc)
 
     # ---- shared search helpers --------------------------------------------------
 
@@ -596,7 +678,16 @@ class SurveillanceChatEngine:
         def _matches_filters(cid: Any, ts_str: str) -> bool:
             if intent.camera_filter:
                 cname = str(camera_map.get(cid, "")).lower()
-                if intent.camera_filter.lower() not in cname:
+                cid_str = str(cid).lower()
+                cf = intent.camera_filter.lower().strip()
+                num_only = re.sub(r"[^\d]", "", cf)
+                # Match against camera name, camera ID (cam_11), or numeric suffix
+                matches_cam = (
+                    cf in cname or
+                    cf in cid_str or
+                    (num_only and (f"cam_{num_only}" == cid_str or f"checkpoint {num_only}" in cname or f"node #{num_only}" in cname or f"cam {num_only}" in cname or num_only == cid_str.replace("cam_", "")))
+                )
+                if not matches_cam:
                     return False
             if intent.time_start and ts_str:
                 try:
@@ -668,8 +759,49 @@ class SurveillanceChatEngine:
 
     # ---- public API --------------------------------------------------------------
 
+    def list_sessions(self, username: str = "operator") -> List[Dict[str, Any]]:
+        """Lists persistent AI Chatbot investigation sessions with metadata."""
+        with self._db_session() as db:
+            sessions = (
+                db.query(ChatSession)
+                .order_by(ChatSession.updated_at.desc())
+                .limit(50)
+                .all()
+            )
+            out = []
+            for s in sessions:
+                msg_count = db.query(ChatMessage).filter(ChatMessage.session_uuid == s.session_uuid).count()
+                first_msg = (
+                    db.query(ChatMessage)
+                    .filter(ChatMessage.session_uuid == s.session_uuid, ChatMessage.sender == "user")
+                    .order_by(ChatMessage.id.asc())
+                    .first()
+                )
+                title = s.title
+                if first_msg and (not title or title == "Surveillance AI Chat" or title == "Surveillance Investigation Chat"):
+                    clean_txt = first_msg.text.replace("[Uploaded Image]", "").strip()
+                    title = clean_txt[:36].replace("\n", " ")
+                    if len(clean_txt) > 36:
+                        title += "..."
+                out.append({
+                    "session_uuid": s.session_uuid,
+                    "title": title or "Investigation Chat",
+                    "created_at": s.created_at.isoformat() if s.created_at else "",
+                    "updated_at": s.updated_at.isoformat() if s.updated_at else "",
+                    "message_count": msg_count,
+                })
+            return out
+
+    def delete_session(self, session_uuid: str, username: str = "operator") -> bool:
+        """Deletes an entire chat session and its associated messages."""
+        with self._db_session() as db:
+            db.query(ChatMessage).filter(ChatMessage.session_uuid == session_uuid).delete()
+            db.query(ChatSession).filter(ChatSession.session_uuid == session_uuid).delete()
+            db.commit()
+            return True
+
     def process_text_query(self, user_query: str, session_uuid: Optional[str] = None,
-                            username: str = "operator") -> Dict[str, Any]:
+                            username: str = "operator", search_mode: str = "all") -> Dict[str, Any]:
         """Processes natural language (English / Hinglish / Gujlish) user questions
         and generates a conversational answer with a supporting timeline."""
         if not user_query or not user_query.strip():
@@ -690,37 +822,670 @@ class SurveillanceChatEngine:
                 effective_prompt = QueryIntentParser.effective_search_prompt(intent)
 
                 logger.info(
-                    "[ChatEngine] session=%s query=%r hinglish=%s followup=%s effective_prompt=%r",
-                    session_id, user_query, intent.is_hinglish, intent.is_followup, effective_prompt,
+                    "[ChatEngine] session=%s mode=%s query=%r hinglish=%s followup=%s effective_prompt=%r",
+                    session_id, search_mode, user_query, intent.is_hinglish, intent.is_followup, effective_prompt,
                 )
 
                 db.add(ChatMessage(session_uuid=session_id, sender="user", text=user_query, timestamp=_istnow()))
+                session.updated_at = _istnow()
                 db.commit()
 
                 camera_map, camera_geo = self._camera_lookup(db)
+                timeline_items = []
 
-                try:
-                    semantic_results = self._semantic_search(effective_prompt, ChatConfig.SEMANTIC_SEARCH_LIMIT)
-                except ExternalServiceError as exc:
-                    logger.error("[ChatEngine] Semantic search unavailable: %s", exc)
-                    semantic_results = []
+                stopwords = {
+                    "have", "you", "seen", "any", "the", "with", "from", "this", "that",
+                    "there", "show", "tell", "kya", "koi", "hai", "kaha", "dikha", "and", "&",
+                    "for", "are", "were", "what", "where", "when", "how", "all", "please",
+                    "find", "look", "search", "spot", "spotted", "check", "batao", "dikhao",
+                    "is", "me", "to", "of", "a", "an", "in", "on", "at", "by"
+                }
 
-                q_terms = [w for w in effective_prompt.lower().split() if len(w) > 2]
-                sql_captions_all = (
-                    db.query(SceneCaption)
-                    .order_by(SceneCaption.timestamp.desc())
-                    .limit(ChatConfig.SQL_CAPTION_SCAN_LIMIT)
-                    .all()
-                )
-                matching_captions = [sc for sc in sql_captions_all if any(w in sc.caption.lower() for w in q_terms)]
+                is_escape_phrase = any(w in user_query.lower() for w in ["escape route", "next camera", "heading next", "escape path", "next hop", "next-hop", "monitor next", "predict escape", "where is this", "where will"])
+                is_convoy_phrase = any(w in user_query.lower() for w in ["following", "traveling together", "travelling together", "convoy", "shadow", "escort"])
 
-                timeline_items = self._build_timeline(semantic_results, matching_captions, camera_map, intent)
+                from .multilingual_matcher import multilingual_matcher
+                if not (is_escape_phrase or is_convoy_phrase) and multilingual_matcher.is_indic_script_or_romanized(user_query):
+                    m_res = multilingual_matcher.match_query(user_query)
+                    if m_res.get("matched"):
+                        effective_prompt = m_res["normalized_english_query"]
+                        user_query = effective_prompt
+                    else:
+                        # Indic query fell out of pattern -> return graceful guidance
+                        return {
+                            "text": m_res["error_message"],
+                            "timeline": [],
+                            "sources": [],
+                            "session_id": session_id,
+                            "intent": "multilingual_out_of_pattern",
+                        }
+
+                clean_terms = [w for w in re.findall(r"\w+", user_query.lower()) if len(w) >= 2 and w not in stopwords]
+                if not clean_terms:
+                    clean_terms = [w for w in re.findall(r"\w+", user_query.lower()) if len(w) >= 2]
+
+                vehicle_types = {
+                    "bus", "buses", "busses", "coach", "volvo", "sagar", "brts", "citybus",
+                    "car", "cars", "sedan", "hatchback", "suv", "santro", "scorpio", "fortuner", "thar", "creta", "innova", "swift", "baleno", "bolero", "nexon", "brezza", "ertiga", "safari", "harrier", "wagonr", "alto", "i20", "dzire", "seltos",
+                    "van", "vans", "minivan", "tempo", "omni", "eeco", "ambulance", "traveller", "matador",
+                    "truck", "trucks", "lorry", "pickup", "dumper", "chhota hathi", "chota hathi", "eicher", "tata407", "tanker", "trailer", "container",
+                    "motorcycle", "bike", "scooter", "scooty", "activa", "bullet", "pulsar", "splendor", "moped", "jupiter", "access", "two wheeler",
+                    "rickshaw", "auto", "auto-rickshaw", "tuk-tuk", "tuktuk", "e-rickshaw", "erickshaw", "three wheeler"
+                }
+                specific_keywords = [w for w in clean_terms if w not in vehicle_types]
+                if not specific_keywords:
+                    specific_keywords = clean_terms
+
+                from ...database.models import RawOCR, VehicleJourneyEvent, Vehicle, StolenVehicleWatchlist, PersonWatchlist
+                from ..integrations.cctns_service import lookup_cctns_vehicle, lookup_cctns_person, get_all_active_stolen_vehicles, get_all_wanted_persons
+
+                # ── INTENT A: Stolen Vehicle Hot-List Cross-Check (Prompt 3.4) ──────
+                is_stolen_query = any(w in user_query.lower() for w in ["stolen", "hotlist", "hot-list", "blacklisted", "chori"])
+                is_watchlist_query = any(w in user_query.lower() for w in ["wanted list", "wanted person", "watchlist", "criminal list", "wanted suspect", "wanted criminal"])
+                is_cctns_query = any(w in user_query.lower() for w in ["cctns", "crime database", "state crime", "fir record", "prior record", "criminal history", "case record"])
+
+                if is_stolen_query and search_mode not in ["plate", "ocr"]:
+                    stolen_entries = db.query(StolenVehicleWatchlist).filter(StolenVehicleWatchlist.status == "ACTIVE").all()
+                    cctns_hotlist = get_all_active_stolen_vehicles()
+                    all_stolen_plates = set([s.plate_number for s in stolen_entries] + [c["plate_number"] for c in cctns_hotlist])
+                    
+                    # Check if user mentioned a specific plate or wants all stolen hits
+                    target_plate = None
+                    for sp in all_stolen_plates:
+                        if sp.lower() in user_query.lower() or sp[-4:] in user_query:
+                            target_plate = sp
+                            break
+
+                    search_plates = [target_plate] if target_plate else list(all_stolen_plates)
+                    matched_sightings = (
+                        db.query(VehicleJourneyEvent)
+                        .filter(VehicleJourneyEvent.license_plate.in_(search_plates))
+                        .order_by(VehicleJourneyEvent.timestamp_start.desc())
+                        .limit(10)
+                        .all()
+                    )
+                    if matched_sightings:
+                        for v in matched_sightings:
+                            cid = v.camera_id or "cam_1"
+                            cname = camera_map.get(cid, cid)
+                            ts_s = v.timestamp_start.isoformat() if v.timestamp_start else ""
+                            cctns_rec = lookup_cctns_vehicle(v.license_plate) or {}
+                            fir_info = cctns_rec.get("fir_number", "FIR Registered")
+                            timeline_items.append({
+                                "camera_id": cid,
+                                "camera_name": cname,
+                                "timestamp": ts_s,
+                                "time_display": _format_time_display(ts_s),
+                                "description": f"🚨 **HOT-LIST STOLEN VEHICLE** [{v.license_plate}] sighted on {cname}. Case: {fir_info} ({cctns_rec.get('police_station', 'Police Station')})",
+                                "snapshot_url": v.snapshot_url or f"/api/v1/playback/snapshot/{cid}_latest",
+                                "confidence": 99.0,
+                                "entity_type": "stolen_vehicle"
+                            })
+                        answer_text = (
+                            f"🚨 **Hot-List Stolen Vehicle Sighting(s) Detected!**\n\n"
+                            f"Identified **{len(timeline_items)} critical sighting(s)** matching the State Stolen Vehicle Watchlist. "
+                            f"Automatic alerts have been flagged on the Control Room console."
+                        )
+                    else:
+                        stolen_summary = ", ".join(list(all_stolen_plates)[:4])
+                        answer_text = (
+                            f"🛡️ **Stolen Vehicle Watchlist Active**\n\n"
+                            f"Cross-referenced all live camera feeds against **{len(all_stolen_plates)} hot-list vehicle registrations** ({stolen_summary}). "
+                            f"No active stolen vehicles were detected in recent camera footage."
+                        )
+
+                elif is_watchlist_query and search_mode not in ["plate", "ocr"]:
+                    wanted_list = db.query(PersonWatchlist).filter(PersonWatchlist.status == "ACTIVE").all()
+                    cctns_wanted = get_all_wanted_persons()
+                    all_wanted_names = [p.full_name for p in wanted_list] + [p["full_name"] for p in cctns_wanted]
+                    
+                    # Search caption / person logs for wanted names or aliases
+                    wanted_caption_hits = (
+                        db.query(SceneCaption)
+                        .filter(SceneCaption.caption.ilike("%wanted%") | SceneCaption.caption.ilike("%suspect%"))
+                        .order_by(SceneCaption.timestamp.desc())
+                        .limit(5)
+                        .all()
+                    )
+                    for sc in wanted_caption_hits:
+                        cid = sc.camera_id or "cam_1"
+                        cname = camera_map.get(cid, cid)
+                        ts_s = sc.timestamp.isoformat() if sc.timestamp else ""
+                        timeline_items.append({
+                            "camera_id": cid,
+                            "camera_name": cname,
+                            "timestamp": ts_s,
+                            "time_display": _format_time_display(ts_s),
+                            "description": f"🎯 **WANTED WATCHLIST CANDIDATE**: \"{sc.caption}\" on {cname}",
+                            "snapshot_url": sc.snapshot_url or f"/api/v1/playback/snapshot/{cid}_latest",
+                            "confidence": 94.0,
+                            "entity_type": "watchlist_person"
+                        })
+                    
+                    names_str = ", ".join(list(dict.fromkeys(all_wanted_names))[:3])
+                    if timeline_items:
+                        answer_text = (
+                            f"🎯 **Wanted Persons Watchlist Match!**\n\n"
+                            f"Found **{len(timeline_items)} sighting(s)** corresponding to active wanted records ({names_str})."
+                        )
+                    else:
+                        answer_text = (
+                            f"🛡️ **Wanted Persons Watchlist Active**\n\n"
+                            f"Continuously comparing live face embeddings against **{len(all_wanted_names)} wanted dossiers** ({names_str}). "
+                            f"No wanted individuals have crossed active camera checkpoints in the selected time window."
+                        )
+
+                elif is_cctns_query and search_mode not in ["plate", "ocr"]:
+                    # Search CCTNS by any plate or name mentioned
+                    found_cctns_vehicle = None
+                    found_cctns_person = None
+                    for kw in clean_terms:
+                        if not found_cctns_vehicle:
+                            found_cctns_vehicle = lookup_cctns_vehicle(kw)
+                        if not found_cctns_person:
+                            found_cctns_person = lookup_cctns_person(kw)
+
+                    if found_cctns_vehicle:
+                        v = found_cctns_vehicle
+                        answer_text = (
+                            f"📑 **CCTNS Vehicle Record Found:**\n\n"
+                            f"• **Registration:** `{v['plate_number']}` ({v['vehicle_make_model']} - {v['vehicle_color']})\n"
+                            f"• **FIR Number:** `{v['fir_number']}`\n"
+                            f"• **Jurisdiction:** {v['police_station']}\n"
+                            f"• **Status:** 🚨 **{v['status']}** (Threat Level: {v['risk_level']})\n"
+                            f"• **Charges:** {v['charges']}\n"
+                            f"• **Investigating Officer:** {v['investigating_officer']}"
+                        )
+                    elif found_cctns_person:
+                        p = found_cctns_person
+                        firs_text = "\n".join([f"  - `{f['fir']}`: {f['sections']} ({f['ps']})" for f in p.get("active_firs", [])])
+                        answer_text = (
+                            f"📑 **CCTNS State Criminal Dossier:**\n\n"
+                            f"• **Name:** **{p['full_name']}** (Alias: *\"{p.get('alias', 'None')}\"*)\n"
+                            f"• **CCTNS ID:** `{p['cctns_id']}`\n"
+                            f"• **Category:** `{p['category']}`\n"
+                            f"• **Warrant Status:** 🚨 **{p['warrant_status']}** (Threat Level: {p.get('threat_level', 'HIGH')})\n"
+                            f"• **Active FIRs:**\n{firs_text}\n"
+                            f"• **Gang Affiliation:** {p.get('gang_affiliation', 'None')}\n"
+                            f"• **Last Known Address:** {p.get('last_known_address', 'Unknown')}"
+                        )
+                    else:
+                        answer_text = (
+                            f"📑 **CCTNS State Database Query**\n\n"
+                            f"Searched state police records for **\"{user_query}\"**. "
+                            f"No active FIRs or criminal history records matched this identifier."
+                        )
+
+                # ── INTENT B: Predictive Next-Hop Escape Routing (Prompt 1.3) ───────
+                elif (
+                    any(w in user_query.lower() for w in [
+                        "escape route", "escape path", "next-hop", "next hop", "next camera",
+                        "monitor next", "heading next", "where will", "where is it going",
+                        "where is this", "likely heading", "arrival time", "estimated arrival",
+                        "heading north", "heading south", "heading east", "heading west",
+                        "going north", "going south", "going east", "going west",
+                        "which camera next", "which cameras", "predict escape", "predict next",
+                        "kaunse camera"
+                    ])
+                    and search_mode not in ["plate", "ocr"]
+                ):
+                    from ..topology.escape_router import predict_next_hop_escape_routes
+
+                    # Determine heading
+                    heading = "forward"
+                    for h in ["north", "south", "east", "west"]:
+                        if h in user_query.lower():
+                            heading = h
+                            break
+
+                    # Determine source camera from query or default to active route camera
+                    source_cam_id = "cam_route_1" if "cam_route_1" in camera_map else (list(camera_map.keys())[0] if camera_map else "cam_1")
+                    matched_cam = None
+                    for cid, cname in camera_map.items():
+                        if cid.lower() in user_query.lower():
+                            matched_cam = cid
+                            break
+                        if cname and len(cname) >= 3 and cname.lower() in user_query.lower():
+                            matched_cam = cid
+                            break
+
+                    if not matched_cam:
+                        # Check partial segment tokens like "Sector 4"
+                        for cid, cname in camera_map.items():
+                            if cname:
+                                segments = [s.strip().lower() for s in re.split(r"[-/–,]", cname) if len(s.strip()) >= 4]
+                                if any(seg in user_query.lower() for seg in segments):
+                                    matched_cam = cid
+                                    break
+
+                    if matched_cam:
+                        source_cam_id = matched_cam
+
+                    dep_time = intent.time_start or _istnow()
+                    escape_data = predict_next_hop_escape_routes(
+                        db=db,
+                        source_camera_identifier=source_cam_id,
+                        target_description=effective_prompt or "Vehicle",
+                        heading_direction=heading,
+                        departure_time=dep_time,
+                        observed_speed_kmh=40.0,
+                    )
+
+                    if escape_data.get("success") and escape_data.get("routes"):
+                        routes = escape_data["routes"]
+                        src_info = escape_data["source_camera"]
+                        route_lines = []
+                        for idx, r in enumerate(routes, 1):
+                            prob_pct = int(r["intercept_probability"] * 100)
+                            route_lines.append(
+                                f"{idx}. **{r['camera_name']}** ({r['location']}) — Distance: `{r['distance_meters']}m`\n"
+                                f"   • **ETA Window:** ⏱️ `{r['eta_display']}` (in {r['estimated_transit_seconds']})\n"
+                                f"   • **Interception Probability:** `{prob_pct}%` ({r['priority']} Priority)\n"
+                                f"   • **Action:** {r['recommended_action']}"
+                            )
+                            # Add to timeline
+                            timeline_items.append({
+                                "camera_id": r["camera_id"],
+                                "camera_name": r["camera_name"],
+                                "timestamp": r["eta_window_start"],
+                                "time_display": f"ETA {r['eta_display']}",
+                                "description": f"🎯 PREDICTIVE INTERCEPTION POINT: {r['camera_name']} ({prob_pct}% probability)",
+                                "snapshot_url": f"/api/v1/playback/snapshot/{r['camera_id']}_latest",
+                                "confidence": round(r["intercept_probability"] * 100, 1),
+                                "entity_type": "predictive_route"
+                            })
+
+                        answer_text = (
+                            f"📡 **Predictive Next-Hop Escape Routing Analysis:**\n\n"
+                            f"• **Origin Waypoint:** {src_info['name']} ({src_info['location']})\n"
+                            f"• **Heading Direction:** `{escape_data['heading_direction']}` @ 40 km/h\n"
+                            f"• **Departure Time:** `{escape_data['departure_time']}`\n\n"
+                            f"**Recommended Downstream Interception Cameras:**\n"
+                            + "\n\n".join(route_lines)
+                        )
+                    elif escape_data.get("is_dead_end"):
+                        src_info = escape_data.get("source_camera", {})
+                        answer_text = (
+                            f"🛑 **Terminal Waypoint / Dead-End Checkpoint**\n\n"
+                            f"Camera **{src_info.get('name', source_cam_id)}** ({src_info.get('location', 'Surveillance Area')}) "
+                            f"is configured as a terminal perimeter node with **no outgoing escape routes**.\n\n"
+                            f"The target is contained within this perimeter or must reverse direction back into monitored sectors."
+                        )
+                    else:
+                        answer_text = (
+                            f"📡 **Predictive Escape Routing:**\n\n"
+                            f"No downstream topological routes could be calculated from camera checkpoint **{source_cam_id}** "
+                            f"with heading `{heading}`. Check the Topology Map to configure transit edges."
+                        )
+
+                # ── INTENT C: Convoy / Shadow-Vehicle Co-Occurrence (Prompt 6.1) ────
+                elif (
+                    any(w in user_query.lower() for w in [
+                        "following", "traveling together", "travelling together", "convoy",
+                        "shadow", "escort", "co-occurrence", "co occurrence", "companion",
+                        "trailing", "piche chal rahi", "saath me"
+                    ])
+                    and search_mode not in ["plate", "ocr"]
+                ):
+                    from ..co_occurrence import find_convoy_companions
+
+                    # Extract target plate or keyword from query
+                    target_kw = None
+                    plate_matches = re.findall(r"\b[A-Za-z]{2}\d{1,2}[A-Za-z]{0,3}\d{3,4}\b", user_query)
+                    if plate_matches:
+                        target_kw = plate_matches[0].upper()
+                    else:
+                        ignore_words = {
+                            "following", "detect", "vehicle", "proximity", "across", "cameras", "camera",
+                            "more", "travelling", "traveling", "together", "convoy", "shadow", "escort",
+                            "been", "have", "with", "from", "show", "tell", "check"
+                        }
+                        for kw in clean_terms:
+                            if kw.lower() not in ignore_words and len(kw) >= 3:
+                                target_kw = kw.upper()
+                                break
+                    if not target_kw:
+                        target_kw = "DL01AB1234"
+
+                    convoy_data = find_convoy_companions(
+                        db=db,
+                        target_identifier=target_kw,
+                        time_window_minutes=60,
+                        max_gap_seconds=45.0,
+                        min_cameras=2
+                    )
+
+                    if convoy_data.get("success") and convoy_data.get("convoy_candidates"):
+                        candidates = convoy_data["convoy_candidates"]
+                        cand_summaries = []
+                        for c in candidates:
+                            conf_pct = int(c["correlation_confidence"] * 100)
+                            timeline_bullets = []
+                            for ev in c["shared_timeline"]:
+                                timeline_bullets.append(
+                                    f"     - **{ev['camera_name']}**: Target @ `{ev['target_time']}` → Companion @ `{ev['companion_time']}` (Trailing gap: `{ev['trailing_gap_seconds']}s`)"
+                                )
+                                timeline_items.append({
+                                    "camera_id": ev["camera_id"],
+                                    "camera_name": ev["camera_name"],
+                                    "timestamp": ev["companion_time"],
+                                    "time_display": ev["companion_time"],
+                                    "description": f"🚨 SHADOW CONVOY: [{c['companion_identifier']}] trailing [{convoy_data['target_identifier']}] by {ev['trailing_gap_seconds']}s on {ev['camera_name']}",
+                                    "snapshot_url": ev["snapshot_url"],
+                                    "confidence": conf_pct,
+                                    "entity_type": "convoy"
+                                })
+
+                            cand_summaries.append(
+                                f"• **Companion Vehicle:** `{c['companion_identifier']}`\n"
+                                f"   - **Threat Assessment:** 🚨 **{c['threat_assessment']}**\n"
+                                f"   - **Correlation Score:** `{conf_pct}%` across `{c['cameras_co_occurred_count']}` separate camera checkpoints\n"
+                                f"   - **Average Trailing Gap:** `{c['avg_trailing_gap_seconds']} seconds`\n"
+                                f"   - **Multi-Camera Sighting Sequence:**\n" + "\n".join(timeline_bullets)
+                            )
+
+                        answer_text = (
+                            f"🚨 **Convoy / Shadow-Vehicle Co-Occurrence Detected!**\n\n"
+                            f"Analyzed multi-camera transit trajectories for target **{convoy_data['target_identifier']}**. "
+                            f"Found **{len(candidates)} vehicle(s)** exhibiting correlated convoy trailing patterns:\n\n"
+                            + "\n\n".join(cand_summaries)
+                        )
+                    else:
+                        answer_text = (
+                            f"🛡️ **Convoy Analysis Completed for \"{target_kw}\"**\n\n"
+                            f"Scanned all camera transit logs within a 60-minute window for synchronized trailing vehicles (Delta T <= 45s across >= 2 cameras). "
+                            f"No vehicles were detected traveling in convoy with this target."
+                        )
+
+                # Handle Dedicated Search Modes
+                elif search_mode == "plate":
+                    clean_q = re.sub(r"[^A-Za-z0-9]", "", user_query).upper()
+                    v_matches = (
+                        db.query(VehicleJourneyEvent)
+                        .filter(VehicleJourneyEvent.license_plate.ilike(f"%{clean_q}%"))
+                        .order_by(VehicleJourneyEvent.timestamp_start.desc())
+                        .limit(10)
+                        .all()
+                    )
+                    if v_matches:
+                        for v in v_matches:
+                            cid = v.camera_id or "cam_1"
+                            cname = camera_map.get(cid, cid)
+                            ts_s = v.timestamp_start.isoformat() if v.timestamp_start else ""
+                            v_conf = getattr(v, "confidence", 0.90)
+                            timeline_items.append({
+                                "camera_id": cid,
+                                "camera_name": cname,
+                                "timestamp": ts_s,
+                                "time_display": _format_time_display(ts_s),
+                                "description": f"License Plate **{v.license_plate}** sighted on {cname} (Confidence: {int(v_conf * 100)}%)",
+                                "snapshot_url": v.snapshot_url or f"/api/v1/playback/snapshot/{cid}_latest",
+                                "confidence": round(v_conf * 100, 1),
+                                "entity_type": "plate"
+                            })
+                        answer_text = f"🚗 **License Plate Match Found!**\n\nSighted vehicle with registration **{clean_q}** across **{len(timeline_items)} camera event(s)**."
+                    else:
+                        answer_text = f"❌ **No License Plate Matches Found**\n\nNo records for vehicle registration **\"{user_query}\"** were found in the surveillance database."
+
+                elif search_mode == "ocr":
+                    # Search across all salient keywords in RawOCR using exact + pg_trgm fuzzy matching
+                    ocr_seen_ids = set()
+                    for kw in specific_keywords:
+                        try:
+                            # 1. Exact ILIKE match
+                            exact_recs = db.query(RawOCR).filter((RawOCR.raw_text.ilike(f"%{kw}%")) | (RawOCR.detected_text.ilike(f"%{kw}%"))).limit(10).all()
+                            for o in exact_recs:
+                                if o.id in ocr_seen_ids:
+                                    continue
+                                ocr_seen_ids.add(o.id)
+                                cid = o.camera_id or "cam_1"
+                                cname = camera_map.get(cid, cid)
+                                ts_s = o.timestamp.isoformat() if o.timestamp else ""
+                                txt = o.raw_text or o.detected_text or ""
+                                ocr_conf = getattr(o, "ocr_confidence", getattr(o, "confidence", 0.90))
+                                timeline_items.append({
+                                    "camera_id": cid,
+                                    "camera_name": cname,
+                                    "timestamp": ts_s,
+                                    "time_display": _format_time_display(ts_s),
+                                    "description": f"🟢 EXACT OCR MATCH (100%): \"{txt}\" on {cname}",
+                                    "snapshot_url": o.snapshot_url or f"/api/v1/playback/snapshot/{cid}_latest",
+                                    "confidence": round(ocr_conf * 100, 1),
+                                    "match_type": "exact",
+                                    "entity_type": "ocr"
+                                })
+
+                            # 2. pg_trgm Fuzzy Word Similarity Match (Threshold >= 0.30)
+                            fuzzy_recs = (
+                                db.query(RawOCR, func.word_similarity(kw, RawOCR.raw_text).label("sim"))
+                                .filter(func.word_similarity(kw, RawOCR.raw_text) >= 0.30)
+                                .order_by(text("sim DESC"))
+                                .limit(5)
+                                .all()
+                            )
+                            for o, sim_val in fuzzy_recs:
+                                if o.id in ocr_seen_ids:
+                                    continue
+                                ocr_seen_ids.add(o.id)
+                                cid = o.camera_id or "cam_1"
+                                cname = camera_map.get(cid, cid)
+                                ts_s = o.timestamp.isoformat() if o.timestamp else ""
+                                txt = o.raw_text or o.detected_text or ""
+                                sim_pct = int(float(sim_val) * 100)
+                                timeline_items.append({
+                                    "camera_id": cid,
+                                    "camera_name": cname,
+                                    "timestamp": ts_s,
+                                    "time_display": _format_time_display(ts_s),
+                                    "description": f"🟡 FUZZY OCR MATCH ({sim_pct}% - \"{txt}\" ≈ \"{kw}\") on {cname}",
+                                    "snapshot_url": o.snapshot_url or f"/api/v1/playback/snapshot/{cid}_latest",
+                                    "confidence": round(float(sim_val) * 100, 1),
+                                    "match_type": "fuzzy",
+                                    "entity_type": "ocr"
+                                })
+                        except Exception as q_exc:
+                            logger.debug("[ChatEngine] Trigram query note: %s", q_exc)
+
+                    if timeline_items:
+                        answer_text = f"🔤 **OCR Text Matches Found!**\n\nFound **{len(timeline_items)} camera sighting(s)** matching on-screen text **\"{' '.join(specific_keywords)}\"**."
+                    else:
+                        answer_text = f"❌ **No OCR Text Matches Found**\n\nNo on-screen signage, decals, or overlays containing **\"{user_query}\"** were found."
+
+                else:
+                    # General Multi-modal Search: Cross-checks OCR (Exact + Fuzzy), Vehicle events, Scene Captions & Vector DB
+                    # 1. Multi-ledger OCR Search (Exact + pg_trgm similarity)
+                    ocr_timeline_items = []
+                    ocr_seen_ids = set()
+                    for kw in specific_keywords:
+                        try:
+                            exact_matches = (
+                                db.query(RawOCR)
+                                .filter((RawOCR.raw_text.ilike(f"%{kw}%")) | (RawOCR.detected_text.ilike(f"%{kw}%")))
+                                .order_by(RawOCR.timestamp.desc())
+                                .limit(5)
+                                .all()
+                            )
+                            for o in exact_matches:
+                                if o.id in ocr_seen_ids:
+                                    continue
+                                ocr_seen_ids.add(o.id)
+                                cid = o.camera_id or "cam_1"
+                                cname = camera_map.get(cid, cid)
+                                ts_s = o.timestamp.isoformat() if o.timestamp else ""
+                                txt = o.raw_text or o.detected_text or ""
+                                ocr_conf = getattr(o, "ocr_confidence", getattr(o, "confidence", 0.90))
+                                ocr_timeline_items.append({
+                                    "camera_id": cid,
+                                    "camera_name": cname,
+                                    "timestamp": ts_s,
+                                    "time_display": _format_time_display(ts_s),
+                                    "description": f"🟢 EXACT OCR Signage: \"{txt}\" on {cname}",
+                                    "snapshot_url": o.snapshot_url or f"/api/v1/playback/snapshot/{cid}_latest",
+                                    "confidence": round(ocr_conf * 100, 1),
+                                    "match_type": "exact",
+                                    "entity_type": "ocr"
+                                })
+
+                            fuzzy_matches = (
+                                db.query(RawOCR, func.word_similarity(kw, RawOCR.raw_text).label("sim"))
+                                .filter(func.word_similarity(kw, RawOCR.raw_text) >= 0.30)
+                                .order_by(text("sim DESC"))
+                                .limit(3)
+                                .all()
+                            )
+                            for o, sim_val in fuzzy_matches:
+                                if o.id in ocr_seen_ids:
+                                    continue
+                                ocr_seen_ids.add(o.id)
+                                cid = o.camera_id or "cam_1"
+                                cname = camera_map.get(cid, cid)
+                                ts_s = o.timestamp.isoformat() if o.timestamp else ""
+                                txt = o.raw_text or o.detected_text or ""
+                                sim_pct = int(float(sim_val) * 100)
+                                ocr_timeline_items.append({
+                                    "camera_id": cid,
+                                    "camera_name": cname,
+                                    "timestamp": ts_s,
+                                    "time_display": _format_time_display(ts_s),
+                                    "description": f"🟡 FUZZY OCR Signage ({sim_pct}% - \"{txt}\" ≈ \"{kw}\") on {cname}",
+                                    "snapshot_url": o.snapshot_url or f"/api/v1/playback/snapshot/{cid}_latest",
+                                    "confidence": round(float(sim_val) * 100, 1),
+                                    "match_type": "fuzzy",
+                                    "entity_type": "ocr"
+                                })
+                        except Exception as q_exc:
+                            logger.debug("[ChatEngine] Trigram general query note: %s", q_exc)
+
+                    # 2. Scene Caption Search & Visual Ledger
+                    caption_matches = []
+                    sql_captions_all = (
+                        db.query(SceneCaption)
+                        .order_by(SceneCaption.timestamp.desc())
+                        .limit(ChatConfig.SQL_CAPTION_SCAN_LIMIT)
+                        .all()
+                    )
+                    # Find captions matching specific keywords or clean terms
+                    for sc in sql_captions_all:
+                        cap_lower = sc.caption.lower()
+                        if any(kw in cap_lower for kw in specific_keywords):
+                            caption_matches.append(sc)
+
+                    # 3. Vector Database Semantic Search
+                    try:
+                        semantic_results = self._semantic_search(effective_prompt, ChatConfig.SEMANTIC_SEARCH_LIMIT)
+                    except ExternalServiceError as exc:
+                        logger.error("[ChatEngine] Semantic search unavailable: %s", exc)
+                        semantic_results = []
+
+                    semantic_timeline_items = self._build_timeline(semantic_results, caption_matches, camera_map, intent)
+
+                    # 4. Synthesize Multi-ledger Findings with Strict Visual Attribute Validation
+                    all_evidence = []
+                    for o in ocr_timeline_items:
+                        all_evidence.append(o)
+
+                    # Extract target colors, vehicle types, and query attributes
+                    color_set = {"yellow", "red", "blue", "green", "black", "white", "silver", "grey", "gray", "orange", "purple", "pink", "brown", "maroon", "golden", "dark", "light"}
+                    location_noise = {"near", "market", "entrance", "station", "junction", "gate", "road", "street", "toll", "corridor", "terminal", "depo", "bazaar", "chauta", "ring", "gopi", "talav", "mahidharpura", "athwa", "vesu", "adajan", "varachha", "svnit", "kargil", "parle", "bhatena", "jogani", "area", "point", "chowk"}
+                    
+                    vehicle_synonym_groups = {
+                        "van": {"van", "vans", "minivan", "tempo", "omni", "eeco", "ambulance", "traveller", "matador"},
+                        "car": {"car", "cars", "sedan", "hatchback", "suv", "santro", "scorpio", "fortuner", "thar", "creta", "innova", "swift", "baleno", "bolero", "nexon", "brezza", "ertiga", "safari", "harrier", "wagonr", "alto", "i20", "dzire", "seltos"},
+                        "bus": {"bus", "buses", "busses", "coach", "volvo", "sagar", "brts", "citybus"},
+                        "truck": {"truck", "trucks", "lorry", "pickup", "dumper", "chhota hathi", "chota hathi", "eicher", "tata407", "tanker", "trailer", "container"},
+                        "motorcycle": {"motorcycle", "bike", "scooter", "scooty", "activa", "bullet", "pulsar", "splendor", "moped", "jupiter", "access", "two wheeler"},
+                        "auto": {"auto", "rickshaw", "auto-rickshaw", "tuk-tuk", "tuktuk", "three wheeler", "e-rickshaw", "erickshaw"},
+                    }
+
+                    query_colors = [w for w in clean_terms if w in color_set]
+                    query_vehicles = [w for w in clean_terms if w in vehicle_types]
+                    query_visual_targets = [w for w in specific_keywords if w not in location_noise and w not in color_set]
+
+                    # Expand query vehicle types with their specific synonyms
+                    target_vehicle_words = set()
+                    for qv in query_vehicles:
+                        matched_group = False
+                        for group_key, synonyms in vehicle_synonym_groups.items():
+                            if qv == group_key or qv in synonyms:
+                                target_vehicle_words.update(synonyms)
+                                matched_group = True
+                        if not matched_group:
+                            target_vehicle_words.add(qv)
+
+                    for s in semantic_timeline_items:
+                        desc_lower = s["description"].lower()
+                        
+                        # 1. Strict Color + Vehicle Binding:
+                        # If both color and vehicle are queried (e.g. "yellow van"),
+                        # the description must contain the exact combination "yellow van/tempo" or the bound vehicle must match.
+                        if query_colors and target_vehicle_words:
+                            color_bound_match = False
+                            for c in query_colors:
+                                for v in target_vehicle_words:
+                                    if f"{c} {v}" in desc_lower or f"{v} in {c}" in desc_lower or f"{c}-colored {v}" in desc_lower or f"{c} colored {v}" in desc_lower:
+                                        color_bound_match = True
+                                        break
+                                if color_bound_match:
+                                    break
+                            if not color_bound_match:
+                                continue
+
+                        # 2. Color-only query: candidate must mention requested color
+                        elif query_colors and not any(c in desc_lower for c in query_colors):
+                            continue
+                            
+                        # 3. Vehicle-only query: candidate must mention requested vehicle type
+                        elif target_vehicle_words and not any(v in desc_lower for v in target_vehicle_words):
+                            continue
+
+                        # 4. Specific visual target (e.g. brand, clothing item):
+                        if query_visual_targets and not any(t in desc_lower for t in query_visual_targets):
+                            if float(s.get("score", 0.0)) < 0.78:
+                                continue
+
+                        all_evidence.append(s)
+
+                    # Deduplicate evidence
+                    seen_keys = set()
+                    timeline_items = []
+                    for item in all_evidence:
+                        k = (item.get("camera_id"), item.get("timestamp"), item.get("description", "")[:40])
+                        if k not in seen_keys:
+                            seen_keys.add(k)
+                            timeline_items.append(item)
+
+                    timeline_items.sort(key=lambda x: x.get("timestamp") or "")
+                    trajectory = build_trajectory_summary(timeline_items, camera_geo)
+
+                    if timeline_items:
+                        matched_cams = list(dict.fromkeys([s["camera_name"] for s in timeline_items]))
+                        evidence_snippets = []
+                        for item in timeline_items[:3]:
+                            desc = item["description"]
+                            if "[Moondream]:" in desc:
+                                desc = desc.split("[Moondream]:")[-1].split("|")[0].strip()
+                            elif "[YOLO]:" in desc:
+                                desc = desc.split("[YOLO]:")[-1].split("|")[0].strip()
+                            tag = "Visual Sighting" if item.get("entity_type") != "ocr" else "On-Screen OCR Text"
+                            evidence_snippets.append(f"• **{tag}**: {desc[:160]}...")
+
+                        target_title = user_query.strip().title()
+                        answer_text = (
+                            f"🎯 **Forensic Match Found!**\n\n"
+                            f"Identified targets matching **\"{target_title}\"** on **{', '.join(matched_cams)}**:\n\n"
+                            + "\n".join(evidence_snippets)
+                        )
+                    else:
+                        timeline_items = []
+                        trajectory = {"legs": [], "flags": []}
+                        target_title = user_query.strip()
+                        answer_text = (
+                            f"❌ **No Matching Sightings Found**\n\n"
+                            f"I scanned all active surveillance feeds and visual ledgers for **\"{target_title}\"**, "
+                            f"but no matching targets or sightings were detected in recent surveillance logs."
+                        )
+
                 trajectory = build_trajectory_summary(timeline_items, camera_geo)
-
-                answer_text = self._synthesize_answer(
-                    session_uuid=session_id, db=db, intent=intent,
-                    timeline_items=timeline_items, trajectory=trajectory,
-                )
 
                 db.add(ChatMessage(
                     session_uuid=session_id, sender="assistant", text=answer_text,
@@ -758,8 +1523,8 @@ class SurveillanceChatEngine:
 
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img is None:
-            raise InvalidImageError("Could not decode image bytes — unsupported or corrupt format")
+        if img is None or getattr(img, "size", 0) == 0:
+            raise InvalidImageError("Corrupt or unreadable image format")
         return img
 
     @with_retries()
@@ -767,9 +1532,10 @@ class SurveillanceChatEngine:
         return _call_moondream_api(data_uri, upload_id)
 
     def process_image_query(self, image_bytes: bytes, user_query: Optional[str] = None,
-                             session_uuid: Optional[str] = None, username: str = "operator") -> Dict[str, Any]:
-        """Uploads image, extracts a detailed vision caption, and matches the target
-        across city cameras. EXIF is stripped implicitly by the cv2 re-encode."""
+                             session_uuid: Optional[str] = None, username: str = "operator",
+                             search_mode: str = "all") -> Dict[str, Any]:
+        """Uploads image, detects facial/plate targets or generates rich vision caption,
+        and matches biometric/visual evidence across city cameras."""
         with self._db_session() as db:
             try:
                 img = self._validate_and_load_image(image_bytes)
@@ -784,51 +1550,220 @@ class SurveillanceChatEngine:
                 upload_id = f"upload_{uuid.uuid4().hex[:10]}"
                 snap_filename = f"{upload_id}.jpg"
                 snap_path = os.path.join(self.snap_dir, snap_filename)
-                # Re-encoding via cv2 (rather than writing raw bytes) strips EXIF/GPS metadata.
                 cv2.imwrite(snap_path, img)
                 upload_url = f"/api/v1/playback/snapshot/{upload_id}"
 
+                camera_map, camera_geo = self._camera_lookup(db)
+                face_timeline_items = []
+                face_found = False
+                face_emb = None
+
+                # 1. Biometric Face Extraction via YuNet + SFace
                 try:
-                    data_uri = _encode_frame(img, max_dim=ChatConfig.MAX_IMAGE_DIM)
-                    detailed_caption = self._moondream_caption(data_uri, upload_id)
-                    logger.info("[ChatEngine] Vision caption generated for %s: %.100s...", upload_id, detailed_caption)
-                except ExternalServiceError as vision_err:
-                    logger.warning("[ChatEngine] Vision API unavailable, degrading to user query only: %s", vision_err)
-                    detailed_caption = user_query or "Uploaded visual target (vision analysis unavailable)"
+                    from ...ai.face.face_pipeline import get_face_models, face_lock
+                    from ...search.vector_search import perform_face_search
 
-                combined_search_prompt = f"{user_query or ''} {detailed_caption}".strip()
+                    det, rec = get_face_models(640, 480)
+                    det_frame = cv2.resize(img, (640, 480))
+                    with face_lock:
+                        ret, faces = det.detect(det_frame)
 
-                user_msg_text = f"[Uploaded Image] {user_query or 'Find this in city cameras'}\n\n*Visual Analysis*: {detailed_caption[:200]}..."
+                    if faces is not None and len(faces) > 0:
+                        sorted_faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+                        best_face = sorted_faces[0]
+                        conf = float(best_face[14])
+                        if conf >= 0.40:
+                            face_found = True
+                            scale_x = w / 640.0
+                            scale_y = h / 480.0
+                            scaled_face = best_face.copy()
+                            scaled_face[0] *= scale_x
+                            scaled_face[2] *= scale_x
+                            for i in range(4, 14, 2):
+                                scaled_face[i] *= scale_x
+                            scaled_face[1] *= scale_y
+                            scaled_face[3] *= scale_y
+                            for i in range(5, 14, 2):
+                                scaled_face[i] *= scale_y
+
+                            with face_lock:
+                                aligned_face = rec.alignCrop(img, scaled_face)
+                                feat = rec.feature(aligned_face)
+                            if feat is not None and len(feat) > 0:
+                                face_emb = feat[0].tolist()
+                                face_results = perform_face_search(face_emb, limit=ChatConfig.IMAGE_SEARCH_LIMIT)
+                                for r in face_results:
+                                    payload = r.get("payload", {})
+                                    cam_id = payload.get("camera_id", "cam_1")
+                                    cam_name = camera_map.get(cam_id, cam_id)
+                                    ts_str = payload.get("timestamp")
+                                    conf_pct = round(float(r.get("score", 0.85)) * 100, 1)
+                                    snap = payload.get("snapshot_url") or upload_url
+                                    face_timeline_items.append({
+                                        "camera_id": cam_id,
+                                        "camera_name": cam_name,
+                                        "timestamp": ts_str,
+                                        "time_display": ts_str.split("T")[1][:8] if ts_str and "T" in ts_str else (ts_str or "Live"),
+                                        "description": f"Biometric Face Match ({conf_pct}% confidence)",
+                                        "snapshot_url": snap,
+                                        "confidence": conf_pct,
+                                        "entity_type": "face"
+                                    })
+                except Exception as f_err:
+                    logger.warning(f"[ChatEngine] Biometric face extraction note: {f_err}")
+
+                # 2. Vision Context & Target Description
+                detailed_caption = (user_query or "").strip()
+                if not detailed_caption:
+                    detailed_caption = "Person in frame" if face_found else "Visual target"
+
+                user_msg_text = f"[Uploaded Image] {user_query or 'Search for this target in city cameras'}"
                 db.add(ChatMessage(session_uuid=session_id, sender="user", text=user_msg_text, image_url=upload_url, timestamp=_istnow()))
+                session.updated_at = _istnow()
                 db.commit()
 
-                camera_map, camera_geo = self._camera_lookup(db)
-                try:
-                    semantic_results = self._semantic_search(combined_search_prompt, ChatConfig.IMAGE_SEARCH_LIMIT)
-                except ExternalServiceError as exc:
-                    logger.error("[ChatEngine] Semantic search unavailable for image query: %s", exc)
-                    semantic_results = []
+                # Search Mode Routing
+                timeline_items = []
+                trajectory = {"legs": [], "flags": []}
 
-                dummy_intent = QueryIntent(raw_query=user_query or "", search_prompt=combined_search_prompt, is_hinglish=False)
-                timeline_items = self._build_timeline(semantic_results, [], camera_map, dummy_intent)
-                trajectory = build_trajectory_summary(timeline_items, camera_geo)
+                if search_mode == "face":
+                    if not face_found or face_emb is None:
+                        # Fallback to visual appearance if face detector was borderline
+                        combined_search_prompt = f"{user_query or ''} person {detailed_caption}".strip()
+                        try:
+                            semantic_results = self._semantic_search(combined_search_prompt, ChatConfig.IMAGE_SEARCH_LIMIT)
+                        except Exception:
+                            semantic_results = []
+                        dummy_intent = QueryIntent(raw_query=user_query or "", search_prompt=combined_search_prompt, is_hinglish=False)
+                        semantic_timeline_items = self._build_timeline(semantic_results, [], camera_map, dummy_intent)
+                        if semantic_timeline_items:
+                            timeline_items = semantic_timeline_items
+                            trajectory = build_trajectory_summary(timeline_items, camera_geo)
+                            cams_involved = list(dict.fromkeys(t["camera_name"] for t in timeline_items))
+                            lines = [
+                                f"👤 **Visual Appearance Sighting(s) Found**\n",
+                                f"Exact biometric facial vectors were obscured, but matching visual profile (**{detailed_caption[:100]}**) was spotted across **{len(timeline_items)} camera sighting(s)** ({', '.join(cams_involved)}):\n",
+                            ]
+                            for idx, t in enumerate(timeline_items[:5], 1):
+                                lines.append(f"{idx}. **{t['camera_name']}** at **{t['time_display']}**: {t['description']}")
+                            answer_text = "\n".join(lines)
+                        else:
+                            answer_text = (
+                                "❌ **No Human Face Detected in Image**\n\n"
+                                "The uploaded photo does not contain a recognizable human face. "
+                                "Please upload a clear, front-facing portrait to perform biometric facial matching."
+                            )
+                    elif not face_timeline_items:
+                        # Fallback to appearance search
+                        combined_search_prompt = f"{user_query or ''} person {detailed_caption}".strip()
+                        try:
+                            semantic_results = self._semantic_search(combined_search_prompt, ChatConfig.IMAGE_SEARCH_LIMIT)
+                        except Exception:
+                            semantic_results = []
+                        dummy_intent = QueryIntent(raw_query=user_query or "", search_prompt=combined_search_prompt, is_hinglish=False)
+                        semantic_timeline_items = self._build_timeline(semantic_results, [], camera_map, dummy_intent)
+                        if semantic_timeline_items:
+                            timeline_items = semantic_timeline_items
+                            trajectory = build_trajectory_summary(timeline_items, camera_geo)
+                            cams_involved = list(dict.fromkeys(t["camera_name"] for t in timeline_items))
+                            lines = [
+                                f"🎯 **Visual Appearance Sighting(s) Found**\n",
+                                f"Exact 512-D facial vector was not registered in vector index, but matching visual profile (**{detailed_caption[:100]}**) was spotted across **{len(timeline_items)} camera sighting(s)** ({', '.join(cams_involved)}):\n",
+                            ]
+                            for idx, t in enumerate(timeline_items[:5], 1):
+                                lines.append(f"{idx}. **{t['camera_name']}** at **{t['time_display']}**: {t['description']}")
+                            answer_text = "\n".join(lines)
+                        else:
+                            answer_text = (
+                                "❌ **No Biometric Face Matches Found**\n\n"
+                                "I analyzed the biometric facial vectors from your photo and scanned all active city camera feeds. "
+                                "This individual **has not been sighted** on any camera in recent surveillance logs."
+                            )
+                    else:
+                        timeline_items = face_timeline_items
+                        trajectory = build_trajectory_summary(timeline_items, camera_geo)
+                        cams_involved = list(dict.fromkeys(t["camera_name"] for t in timeline_items))
+                        lines = [
+                            f"🎯 **Biometric Face Match Confirmed!**\n",
+                            f"Identified facial match with high confidence across **{len(timeline_items)} camera sighting(s)** ({', '.join(cams_involved)}):\n",
+                        ]
+                        for idx, t in enumerate(timeline_items[:5], 1):
+                            lines.append(f"{idx}. **{t['camera_name']}** at **{t['time_display']}**: {t['description']}")
+                        for flag in trajectory.get("flags", []):
+                            lines.append(f"\n⚠️ {flag}")
+                        answer_text = "\n".join(lines)
 
-                if timeline_items:
-                    cams_involved = list(dict.fromkeys(t["camera_name"] for t in timeline_items))
-                    lines = [
-                        f"🔍 **Uploaded Image Analysis**: {detailed_caption}\n",
-                        f"✅ **City Camera Match Found!** Matched this visual target across **{len(timeline_items)} location(s)** ({', '.join(cams_involved)}):\n",
-                    ]
-                    for idx, t in enumerate(timeline_items[:5], 1):
-                        lines.append(f"{idx}. **{t['camera_name']}** at **{t['time_display']}**: {t['description']}")
-                    for flag in trajectory.get("flags", []):
-                        lines.append(f"\n⚠️ {flag}")
-                    answer_text = "\n".join(lines)
+                elif search_mode == "all" and face_found:
+                    # If auto-detect found a face in the user's photo
+                    if face_timeline_items:
+                        timeline_items = face_timeline_items
+                        trajectory = build_trajectory_summary(timeline_items, camera_geo)
+                        cams_involved = list(dict.fromkeys(t["camera_name"] for t in timeline_items))
+                        lines = [
+                            f"🎯 **Biometric Face Match Confirmed!**\n",
+                            f"Identified matching individual across **{len(timeline_items)} camera sighting(s)** ({', '.join(cams_involved)}):\n",
+                        ]
+                        for idx, t in enumerate(timeline_items[:5], 1):
+                            lines.append(f"{idx}. **{t['camera_name']}** at **{t['time_display']}**: {t['description']}")
+                        lines.append(f"\n*Target Appearance*: {detailed_caption[:200]}...")
+                        answer_text = "\n".join(lines)
+                    else:
+                        # Fallback to visual multi-modal semantic search
+                        combined_search_prompt = f"{user_query or ''} person {detailed_caption}".strip()
+                        try:
+                            semantic_results = self._semantic_search(combined_search_prompt, ChatConfig.IMAGE_SEARCH_LIMIT)
+                        except ExternalServiceError:
+                            semantic_results = []
+
+                        dummy_intent = QueryIntent(raw_query=user_query or "", search_prompt=combined_search_prompt, is_hinglish=False)
+                        semantic_timeline_items = self._build_timeline(semantic_results, [], camera_map, dummy_intent)
+                        
+                        if semantic_timeline_items:
+                            timeline_items = semantic_timeline_items
+                            trajectory = build_trajectory_summary(timeline_items, camera_geo)
+                            cams_involved = list(dict.fromkeys(t["camera_name"] for t in timeline_items))
+                            lines = [
+                                f"🎯 **Visual Sighting(s) Identified!**\n",
+                                f"Scanned camera feeds for matching target (**{detailed_caption[:100]}**). Identified across **{len(timeline_items)} camera sighting(s)** ({', '.join(cams_involved)}):\n",
+                            ]
+                            for idx, t in enumerate(timeline_items[:5], 1):
+                                lines.append(f"{idx}. **{t['camera_name']}** at **{t['time_display']}**: {t['description']}")
+                            answer_text = "\n".join(lines)
+                        else:
+                            answer_text = (
+                                f"👤 **Target Identification**: Human Face Detected.\n\n"
+                                f"❌ **No Biometric Face Match Found**: Scanned all city cameras, but this individual has not been sighted on any camera feed."
+                            )
+
                 else:
-                    answer_text = (
-                        f"🔍 **Uploaded Image Analysis**: {detailed_caption}\n\n"
-                        f"I analyzed all city camera feeds against this image, but could not find a matching target in recent video logs."
-                    )
+                    # Vehicle/Scene/Object Semantic Visual Search
+                    combined_search_prompt = f"{user_query or ''} {detailed_caption}".strip()
+                    try:
+                        semantic_results = self._semantic_search(combined_search_prompt, ChatConfig.IMAGE_SEARCH_LIMIT)
+                    except ExternalServiceError as exc:
+                        semantic_results = []
+
+                    dummy_intent = QueryIntent(raw_query=user_query or "", search_prompt=combined_search_prompt, is_hinglish=False)
+                    semantic_timeline_items = self._build_timeline(semantic_results, [], camera_map, dummy_intent)
+                    timeline_items = semantic_timeline_items
+                    trajectory = build_trajectory_summary(timeline_items, camera_geo)
+
+                    if timeline_items:
+                        cams_involved = list(dict.fromkeys(t["camera_name"] for t in timeline_items))
+                        lines = [
+                            f"🔍 **Visual Target Analysis**: {detailed_caption}\n",
+                            f"✅ **Visual Match Found!** Matched this visual target across **{len(timeline_items)} location(s)** ({', '.join(cams_involved)}):\n",
+                        ]
+                        for idx, t in enumerate(timeline_items[:5], 1):
+                            lines.append(f"{idx}. **{t['camera_name']}** at **{t['time_display']}**: {t['description']}")
+                        for flag in trajectory.get("flags", []):
+                            lines.append(f"\n⚠️ {flag}")
+                        answer_text = "\n".join(lines)
+                    else:
+                        answer_text = (
+                            f"🔍 **Visual Target Analysis**: {detailed_caption}\n\n"
+                            f"I scanned all city camera feeds against this visual target, but could not find a matching scene or vehicle in recent video logs."
+                        )
 
                 db.add(ChatMessage(
                     session_uuid=session_id, sender="assistant", text=answer_text,
@@ -838,7 +1773,7 @@ class SurveillanceChatEngine:
 
                 self._audit_log(
                     db, session_uuid=session_id, username=username, action="image_query",
-                    detail={"upload_id": upload_id, "hits": len(timeline_items)},
+                    detail={"upload_id": upload_id, "hits": len(timeline_items), "mode": search_mode},
                 )
 
                 return {

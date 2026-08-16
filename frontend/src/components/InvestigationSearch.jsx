@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
-  Box, Typography, Paper, TextField, Button, Select, MenuItem, InputLabel, FormControl, Card, CardMedia, CardContent, CardActions, Chip, Alert, Slider, IconButton, Tooltip
+  Box, Typography, Paper, TextField, Button, Select, MenuItem, InputLabel, FormControl, Card, CardMedia, CardContent, CardActions, Chip, Alert, Slider, IconButton, Tooltip, Dialog, DialogTitle, DialogContent, DialogActions
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import SyncIcon from '@mui/icons-material/Sync';
@@ -9,6 +9,9 @@ import ImageSearchIcon from '@mui/icons-material/ImageSearch';
 import CloseIcon from '@mui/icons-material/Close';
 import ClearIcon from '@mui/icons-material/Clear';
 import CancelIcon from '@mui/icons-material/Cancel';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import ZoomInIcon from '@mui/icons-material/ZoomIn';
+import CropFreeIcon from '@mui/icons-material/CropFree';
 
 const computeBboxStyle = (bbox) => {
   if (!bbox || !Array.isArray(bbox) || bbox.length < 4) return null;
@@ -47,6 +50,9 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
   const [selectedFaceFile, setSelectedFaceFile] = useState(null);
   const [selectedVisionFile, setSelectedVisionFile] = useState(null);
   const [extractedAiPrompt, setExtractedAiPrompt] = useState('');
+  const [previewVideoUrl, setPreviewVideoUrl] = useState(null);
+  const [previewVideoTitle, setPreviewVideoTitle] = useState('');
+  const [cropViewMap, setCropViewMap] = useState({});
 
   const handleVisionImageSearchUpload = (file) => {
     if (!file || !token) return;
@@ -75,15 +81,20 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
         const transformed = list.map((item, idx) => {
           const p = item.payload || {};
           const score = item.score || 0;
+          let title = p.type === 'scene' ? 'Scene Match' : (p.vehicle_type ? `Vehicle: ${p.vehicle_type}` : (p.type === 'person_crop' ? 'Person Match' : 'Forensic Match'));
+          let summary = p.caption || p.rich_document || `Cosine similarity match score of ${Math.round(score * 100)}%`;
+          const fullSnap = p.full_snapshot_url || (p.snapshot_url && p.snapshot_url.includes('/playback/snapshot/') && !p.snapshot_url.includes('full_') ? p.snapshot_url.replace('/playback/snapshot/', '/playback/snapshot/full_') : null);
           return {
             id: `vlm-${idx}-${p.timestamp}`,
             kind: p.type || 'scene',
-            title: p.type === 'scene' ? 'Scene Match' : (p.vehicle_type ? `Vehicle: ${p.vehicle_type}` : 'Forensic Match'),
-            summary: p.caption || `Cosine similarity match score of ${Math.round(score * 100)}%`,
+            title: title,
+            summary: summary,
             camera_name: p.camera_id || 'Unknown',
             timestamp: p.timestamp ? p.timestamp.substring(0, 19).replace('T', ' ') : 'N/A',
             confidence: Math.round(score * 100),
-            snapshot_path: resolveSnapshotUrl(p.snapshot_url),
+            snapshot_path: resolveSnapshotUrl(fullSnap || p.full_snapshot_url || p.snapshot_url),
+            crop_snapshot_path: resolveSnapshotUrl(p.snapshot_url),
+            full_snapshot_path: resolveSnapshotUrl(fullSnap || p.full_snapshot_url),
             target_label: prompt.length > 20 ? prompt.substring(0, 20) + '...' : prompt,
             bbox_style: computeBboxStyle(p.bbox)
           };
@@ -179,14 +190,18 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
     }
   };
 
-  // Helper to ensure snapshot URLs match the Vite proxy mapping cleanly
+  // Helper to ensure snapshot URLs match the Vite proxy mapping cleanly and contain auth token
   const resolveSnapshotUrl = (url) => {
     if (!url) return null;
+    let finalUrl = url;
     // Replace "/api/v1/" prefix with "/api/" so Vite does not double-prefix it to "/api/v1/v1/"
     if (url.startsWith('/api/v1/')) {
-      return url.replace('/api/v1/', '/api/');
+      finalUrl = url.replace('/api/v1/', '/api/');
     }
-    return url;
+    if (token && !finalUrl.includes('token=')) {
+      finalUrl = finalUrl.includes('?') ? `${finalUrl}&token=${encodeURIComponent(token)}` : `${finalUrl}?token=${encodeURIComponent(token)}`;
+    }
+    return finalUrl;
   };
 
   const runSearch = (e) => {
@@ -415,17 +430,26 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
           const score = item.score || 0;
 
           let title = 'Scene Tracking';
-          let summary = '';
-          if (p.type === 'scene') {
-            title = 'Scene Event';
-            summary = p.caption || 'No caption';
+          let summary = p.caption || p.rich_document || p.description || '';
+
+          if (p.type === 'person_crop' || p.type === 'person') {
+            const clothing = [p.upper_color ? `${p.upper_color} top` : '', p.lower_color ? `${p.lower_color} bottom` : ''].filter(Boolean).join(', ');
+            title = clothing ? `Person: ${clothing}` : 'Person Sighting';
+            if (!summary) {
+              summary = `Detected person${clothing ? ' wearing ' + clothing : ''} in camera field of view.`;
+            }
+          } else if (p.type === 'scene') {
+            title = 'Surveillance Scene';
+            if (!summary) summary = 'General CCTV scene capture.';
           } else if (p.type === 'vehicle') {
-            title = `Vehicle: ${p.vehicle_type || 'Unknown'}`;
-            summary = `License Plate: ${p.license_plate || 'N/A'}`;
+            title = `Vehicle: ${p.vehicle_color ? p.vehicle_color + ' ' : ''}${p.vehicle_type || 'Vehicle'}`;
+            if (!summary) summary = p.license_plate ? `License Plate: ${p.license_plate}` : 'Detected vehicle sighting.';
           } else if (p.type === 'face') {
-            title = `Face Recognition: ${p.label || 'Unknown Target'}`;
-            summary = `Matched registered target profile in database.`;
+            title = `Face Recognition: ${p.label || 'Identified Person'}`;
+            if (!summary) summary = `Biometric match for profile ${p.label || p.identity_uuid || 'target'}.`;
           }
+
+          const fullSnap = p.full_snapshot_url || (p.snapshot_url && p.snapshot_url.includes('/playback/snapshot/') && !p.snapshot_url.includes('full_') ? p.snapshot_url.replace('/playback/snapshot/', '/playback/snapshot/full_') : null);
 
           return {
             id: `semantic-${idx}-${p.timestamp}`,
@@ -436,10 +460,13 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
             timestamp: p.timestamp ? p.timestamp.substring(0, 19).replace('T', ' ') : 'N/A',
             confidence: Math.round(score * 100),
             snapshot_path: resolveSnapshotUrl(
-              p.snapshot_url ||
+              fullSnap ||
               p.full_snapshot_url ||
+              p.snapshot_url ||
               p.full_scene_url
             ),
+            crop_snapshot_path: resolveSnapshotUrl(p.snapshot_url),
+            full_snapshot_path: resolveSnapshotUrl(fullSnap || p.full_snapshot_url),
             target_label: query.trim() || p.vehicle_type || p.label || 'Target',
             bbox_style: computeBboxStyle(p.bbox)
           };
@@ -899,15 +926,43 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
                       }}
                     >
                       {item.snapshot_path && (
-                        <Box sx={{ position: 'relative', width: { xs: '100%', sm: 220 }, height: 145, flexShrink: 0, backgroundColor: '#000', overflow: 'hidden' }}>
+                        <Box sx={{ position: 'relative', width: { xs: '100%', sm: 240 }, height: 155, flexShrink: 0, backgroundColor: '#000', overflow: 'hidden' }}>
                           <CardMedia
                             component="img"
-                            sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                            image={item.snapshot_path}
+                            sx={{ width: '100%', height: '100%', objectFit: cropViewMap[index] === 'crop' ? 'contain' : 'cover' }}
+                            image={cropViewMap[index] === 'crop' ? (item.crop_snapshot_path || item.snapshot_path) : item.snapshot_path}
                             alt="Forensic Frame Capture"
                             onError={(e) => { e.target.style.display = 'none'; }}
                           />
-                          {item.confidence > 0 && item.bbox_style ? (
+                          {item.crop_snapshot_path && item.full_snapshot_path && item.crop_snapshot_path !== item.full_snapshot_path && (
+                            <Box sx={{ position: 'absolute', bottom: 6, right: 6, zIndex: 3, display: 'flex', gap: 0.5 }}>
+                              <Tooltip title={cropViewMap[index] === 'crop' ? "Switch to Full CCTV Frame" : "Switch to 2x Target Crop"}>
+                                <Chip
+                                  icon={cropViewMap[index] === 'crop' ? <CropFreeIcon sx={{ fontSize: '0.9rem !important' }} /> : <ZoomInIcon sx={{ fontSize: '0.9rem !important' }} />}
+                                  label={cropViewMap[index] === 'crop' ? "Crop" : "Full"}
+                                  size="small"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setCropViewMap(prev => ({
+                                      ...prev,
+                                      [index]: prev[index] === 'crop' ? 'full' : 'crop'
+                                    }));
+                                  }}
+                                  sx={{
+                                    bgcolor: 'rgba(0,0,0,0.75)',
+                                    color: '#fff',
+                                    fontWeight: 'bold',
+                                    fontSize: '0.65rem',
+                                    height: 22,
+                                    cursor: 'pointer',
+                                    border: '1px solid rgba(255,255,255,0.3)',
+                                    '&:hover': { bgcolor: 'primary.main' }
+                                  }}
+                                />
+                              </Tooltip>
+                            </Box>
+                          )}
+                          {cropViewMap[index] !== 'crop' && item.confidence > 0 && item.bbox_style ? (
                             <Box
                               sx={{
                                 position: 'absolute',
@@ -979,14 +1034,65 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
                         <CardContent sx={{ flexGrow: 1, pb: 1 }}>
                           <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1, flexWrap: 'wrap', gap: 1 }}>
                             <Box>
-                              <Typography variant="subtitle2" fontWeight="bold" sx={{ textTransform: 'uppercase' }}>{item.title}</Typography>
+                              <Typography variant="subtitle2" fontWeight="bold" sx={{ textTransform: 'uppercase', color: 'primary.main' }}>{item.title}</Typography>
                               <Typography variant="caption" color="text.secondary">{item.camera_name.toUpperCase()} // {item.timestamp}</Typography>
                             </Box>
                             <Chip label={item.kind} size="small" variant="outlined" sx={{ textTransform: 'uppercase', borderRadius: 1 }} />
                           </Box>
-                          <Typography variant="body2" color="text.secondary">
-                            {item.summary}
-                          </Typography>
+                          
+                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mt: 0.5 }}>
+                            {(() => {
+                              const raw = item.summary || '';
+                              const hasYolo = raw.includes('[YOLO]:');
+                              const hasAi = raw.includes('[Moondream]:') || raw.includes('[Florence]:');
+                              
+                              if (hasYolo || hasAi) {
+                                let yoloPart = '';
+                                let aiPart = '';
+                                
+                                if (hasYolo) {
+                                  const afterYolo = raw.split('[YOLO]:')[1] || '';
+                                  yoloPart = afterYolo.split('|')[0].trim();
+                                }
+                                if (hasAi) {
+                                  const tag = raw.includes('[Moondream]:') ? '[Moondream]:' : '[Florence]:';
+                                  const afterAi = raw.split(tag)[1] || '';
+                                  aiPart = afterAi.split('|')[0].trim();
+                                }
+
+                                return (
+                                  <>
+                                    {aiPart && (
+                                      <Box sx={{ p: 1.2, bgcolor: 'rgba(255,255,255,0.03)', borderRadius: 1, border: '1px solid rgba(255,255,255,0.08)' }}>
+                                        <Typography variant="caption" sx={{ color: 'info.light', fontWeight: 'bold', display: 'block', mb: 0.3 }}>
+                                          🤖 AI SCENE UNDERSTANDING:
+                                        </Typography>
+                                        <Typography variant="body2" sx={{ color: 'text.primary', fontSize: '0.85rem', lineHeight: 1.45 }}>
+                                          {aiPart}
+                                        </Typography>
+                                      </Box>
+                                    )}
+                                    {yoloPart && (
+                                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, flexWrap: 'wrap', px: 0.5 }}>
+                                        <Typography variant="caption" sx={{ color: 'success.light', fontWeight: 'bold' }}>
+                                          🎯 DETECTED OBJECTS:
+                                        </Typography>
+                                        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.82rem' }}>
+                                          {yoloPart}
+                                        </Typography>
+                                      </Box>
+                                    )}
+                                  </>
+                                );
+                              }
+
+                              return (
+                                <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.85rem', lineHeight: 1.45 }}>
+                                  {raw || 'No description available for this sighting.'}
+                                </Typography>
+                              );
+                            })()}
+                          </Box>
                         </CardContent>
                         <CardActions sx={{ display: 'flex', justifyContent: 'space-between', px: 2, pb: 2, flexWrap: 'wrap', gap: 1 }}>
                           <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap' }}>
@@ -995,8 +1101,17 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
                           </Box>
                           <Box sx={{ display: 'flex', gap: 1 }}>
                             {item.mp4_download_url && (
-                              <Button component="a" href={item.mp4_download_url} download size="small" variant="outlined" startIcon={<DownloadIcon />}>
-                                MP4 Clip
+                              <Button
+                                size="small"
+                                variant="contained"
+                                color="primary"
+                                startIcon={<PlayArrowIcon />}
+                                onClick={() => {
+                                  setPreviewVideoUrl(item.mp4_download_url);
+                                  setPreviewVideoTitle(`${item.title} — ${item.camera_name.toUpperCase()}`);
+                                }}
+                              >
+                                Play Clip
                               </Button>
                             )}
                             {item.sidecar_download_url && (
@@ -1006,7 +1121,7 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
                             )}
                             {item.snapshot_path && (
                               <Button component="a" href={item.snapshot_path} target="_blank" rel="noreferrer" size="small" variant="outlined" startIcon={<ImageSearchIcon />}>
-                                View Original
+                                Full Scene Frame
                               </Button>
                             )}
                           </Box>
@@ -1020,6 +1135,49 @@ export default function InvestigationSearch({ role, token, searchEvents = [], in
           </Paper>
         </Box>
       </Box>
+
+      {/* Interactive Video Playback Preview Modal */}
+      <Dialog
+        open={Boolean(previewVideoUrl)}
+        onClose={() => setPreviewVideoUrl(null)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', pb: 1 }}>
+          <Typography variant="subtitle1" fontWeight="bold">
+            🎬 Forensic Clip Preview: {previewVideoTitle}
+          </Typography>
+          <IconButton size="small" onClick={() => setPreviewVideoUrl(null)}>
+            <CloseIcon fontSize="small" />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ p: 2, display: 'flex', justifyContent: 'center', bgcolor: '#000' }}>
+          {previewVideoUrl && (
+            <video
+              controls
+              autoPlay
+              style={{ width: '100%', maxHeight: '70vh', borderRadius: 4 }}
+              src={previewVideoUrl}
+            >
+              Your browser does not support video playback.
+            </video>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ p: 2, display: 'flex', justifyContent: 'space-between' }}>
+          <Button
+            component="a"
+            href={previewVideoUrl}
+            download
+            variant="outlined"
+            startIcon={<DownloadIcon />}
+          >
+            Download Raw MP4
+          </Button>
+          <Button variant="contained" onClick={() => setPreviewVideoUrl(null)}>
+            Close Player
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

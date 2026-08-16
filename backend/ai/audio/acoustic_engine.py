@@ -25,13 +25,19 @@ class AudioFeatureExtractor:
         if len(samples) == 0:
             return {"rms_db": 0.0, "spectral_centroid": 0.0, "zero_crossing_rate": 0.0, "peak_freq": 0.0}
 
-        # RMS & Decibels
-        rms = np.sqrt(np.mean(np.square(samples))) + 1e-6
-        rms_db = float(20 * np.log10(rms))
+        # Normalize 16-bit PCM to [-1.0, 1.0] float range
+        if np.max(np.abs(samples)) > 1.5:
+            samples_norm = samples / 32768.0
+        else:
+            samples_norm = samples
+
+        # Digital RMS Energy (dB relative to full scale reference, calibrated for 16-bit PCM)
+        rms = np.sqrt(np.mean(np.square(samples_norm))) + 1e-9
+        rms_db = float(np.clip(120.0 + 20 * np.log10(rms), 0.0, 130.0))
 
         # FFT Spectrum
-        fft_vals = np.abs(np.fft.rfft(samples))
-        freqs = np.fft.rfftfreq(len(samples), 1.0 / sample_rate)
+        fft_vals = np.abs(np.fft.rfft(samples_norm))
+        freqs = np.fft.rfftfreq(len(samples_norm), 1.0 / sample_rate)
 
         peak_freq = float(freqs[np.argmax(fft_vals)]) if len(fft_vals) > 0 else 0.0
 
@@ -40,8 +46,8 @@ class AudioFeatureExtractor:
         spectral_centroid = float(np.sum(freqs * fft_vals) / sum_fft)
 
         # Zero Crossing Rate
-        zero_crossings = np.nonzero(np.diff(samples > 0))[0]
-        zcr = float(len(zero_crossings) / float(len(samples)))
+        zero_crossings = np.nonzero(np.diff(samples_norm > 0))[0]
+        zcr = float(len(zero_crossings) / float(len(samples_norm)))
 
         return {
             "rms_db": round(rms_db, 2),
@@ -52,7 +58,11 @@ class AudioFeatureExtractor:
 
 
 class AudioClassifierModel:
-    """Wrapper for ONNX/PyTorch audio classification model (YAMNet compatible interface)."""
+    """
+    Rule-Based DSP Acoustic Anomaly Classifier (Heuristic Baseline).
+    Evaluates spectral features (digital RMS energy, dominant frequency peak, zero-crossing rate)
+    to classify acoustic events. Yields rule-assigned heuristic confidence scores.
+    """
 
     CLASSES = [
         "loud_noise", "glass_break", "scream", "alarm",
@@ -237,9 +247,24 @@ class ProductionAudioEngine:
             )
             db.add(canon_ev)
             db.commit()
-        except Exception as err:
-            logger.warning(f"[AudioEngine] DB save note: {err}")
-            db.rollback()
+
+            # Publish alert to Kafka and WebSocket EventBus via shared event_client
+            try:
+                from ...messaging.kafka_client import event_client
+                alert_payload = {
+                    "type": "audio_alert",
+                    "event_uuid": payload["event_uuid"],
+                    "camera_id": payload["camera_id"],
+                    "event_type": payload["event_type"],
+                    "severity": "critical" if payload["decibels"] > 90.0 or payload["event_type"] in ["gunshot", "explosion", "scream"] else "high",
+                    "message": payload["message"],
+                    "decibels": payload["decibels"],
+                    "confidence": payload["confidence"],
+                    "timestamp": now_dt.isoformat()
+                }
+                event_client.publish_event("alerts", alert_payload)
+            except Exception as pe:
+                logger.debug(f"[AudioEngine] Event publish note: {pe}")
         finally:
             db.close()
 

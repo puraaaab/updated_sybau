@@ -1,15 +1,15 @@
 import os
+import time
 import urllib.request
 import cv2
 import uuid
 import numpy as np
+import threading
 from ...config.service import get_models
 
 MODELS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "models"))
 YUNET_PATH = os.path.join(MODELS_DIR, "face_detection_yunet_2023mar.onnx")
 SFACE_PATH = os.path.join(MODELS_DIR, "face_recognition_sface_2021dec.onnx")
-
-import threading
 
 _detectors = {}  # (width, height) -> FaceDetectorYN
 _recognizer = None
@@ -72,9 +72,13 @@ def get_face_models(width=640, height=480):
             _recognizer = rec
         return detector, _recognizer
 
+_track_face_cache: dict = {}
+_face_cache_lock = threading.Lock()
+FACE_CACHE_TTL_SECONDS = 5.0
+
 def process_faces(frame: np.ndarray, detections: list):
     """
-    Detects faces for each tracked person in the frame.
+    Detects faces for each tracked person in the frame with track-level caching.
     Uses YuNet for face detection and SFace for 128-dim face embeddings.
     """
     cfg = get_models()
@@ -82,14 +86,33 @@ def process_faces(frame: np.ndarray, detections: list):
     
     faces_detected = []
     people = [d for d in detections if d.get("class_name") == "person"]
+    if not people:
+        return faces_detected
     
+    now_sec = time.time()
+
+    # Check track-level face cache first (Option 1)
+    uncached_people = []
+    with _face_cache_lock:
+        for p in people:
+            t_uuid = p.get("track_uuid") or f"TRK_{p.get('camera_id', 'cam1')}_{p.get('track_id')}"
+            cached = _track_face_cache.get(t_uuid)
+            if cached and (now_sec - cached["cached_at"]) < FACE_CACHE_TTL_SECONDS:
+                faces_detected.append(cached["data"])
+            else:
+                uncached_people.append(p)
+
+    if not uncached_people:
+        return faces_detected
+
     if demo_mode:
-        for idx, person in enumerate(people):
+        for idx, person in enumerate(uncached_people):
             if (person["track_id"] + idx) % 3 == 0:
                 face_id = str(uuid.uuid4())
                 mock_embedding = np.random.normal(0, 1, 128).tolist()
-                faces_detected.append({
-                    "track_uuid": person.get("track_uuid") or f"TRK_{person.get('camera_id', 'cam1')}_{person['track_id']}",
+                t_uuid = person.get("track_uuid") or f"TRK_{person.get('camera_id', 'cam1')}_{person['track_id']}"
+                f_data = {
+                    "track_uuid": t_uuid,
                     "face_bbox": [
                         person["bbox"][0] + 20, 
                         person["bbox"][1] + 10, 
@@ -100,7 +123,10 @@ def process_faces(frame: np.ndarray, detections: list):
                     "embedding": mock_embedding,
                     "embedding_id": face_id,
                     "label": "Person POI_09" if person["track_id"] % 2 == 0 else "Unknown"
-                })
+                }
+                faces_detected.append(f_data)
+                with _face_cache_lock:
+                    _track_face_cache[t_uuid] = {"data": f_data, "cached_at": now_sec}
         return faces_detected
 
     # Real Inference Mode using OpenCV FaceDetectorYN + FaceRecognizerSF
@@ -158,7 +184,7 @@ def process_faces(frame: np.ndarray, detections: list):
                             
                 if best_track_uuid:
                     face_id = str(uuid.uuid4())
-                    faces_detected.append({
+                    f_data = {
                         "track_uuid": best_track_uuid,
                         "face_bbox": [xmin, ymin, xmin + width, ymin + height],
                         "confidence": confidence,
@@ -166,7 +192,12 @@ def process_faces(frame: np.ndarray, detections: list):
                         "embedding_id": face_id,
                         "label": "Unknown",
                         "face_crop": aligned_face
-                    })
+                    }
+                    faces_detected.append(f_data)
+                    with _face_cache_lock:
+                        if len(_track_face_cache) > 500:
+                            _track_face_cache.clear()
+                        _track_face_cache[best_track_uuid] = {"data": f_data, "cached_at": now_sec}
     except Exception as e:
         print(f"[FacePipeline] Error executing real face recognition: {e}")
         

@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ ./backend
 COPY configs/ ./configs
-COPY storage/ ./storage
+RUN mkdir -p storage/clips storage/recordings storage/snapshots storage/exports
 COPY alembic.ini .
 COPY alembic/ ./alembic
 

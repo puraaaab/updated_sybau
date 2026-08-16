@@ -37,9 +37,9 @@ from .routers.rules import router as rules_router
 from .routers.proxy import router as proxy_router
 from .routers.settings import router as settings_router
 
-logging.getLogger("backend.ai.captioning.captioner").setLevel(logging.DEBUG)
-logging.getLogger("backend.ai.model_manager").setLevel(logging.DEBUG)
-logging.getLogger("backend.ai.pipeline.orchestrator").setLevel(logging.DEBUG)
+logging.getLogger("backend.ai.captioning.captioner").setLevel(logging.WARNING)
+logging.getLogger("backend.ai.model_manager").setLevel(logging.WARNING)
+logging.getLogger("backend.ai.pipeline.orchestrator").setLevel(logging.WARNING)
 
 active_websockets = []
 main_loop = None
@@ -69,14 +69,10 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
 
     try:
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS snapshot_url VARCHAR;"))
-            conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS bbox TEXT;"))
-            conn.execute(text("ALTER TABLE global_identities ADD COLUMN IF NOT EXISTS snapshot_path TEXT;"))
-            conn.commit()
+        from .database.migrations.runner import run_migrations
+        run_migrations(bind_engine=engine)
     except Exception as migration_e:
-        print(f"Schema migration check note: {migration_e}")
+        print(f"Database migration note: {migration_e}")
 
     db = SessionLocal()
     try:
@@ -132,20 +128,30 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"Note on Qdrant pre-init: {e}")
 
-            # Auto-create Kafka topics so a fresh Docker restart doesn't leave them missing.
-            try:
-                from kafka.admin import KafkaAdminClient, NewTopic
-                _admin = KafkaAdminClient(bootstrap_servers="localhost:9092", request_timeout_ms=4000)
-                _existing = set(_admin.list_topics())
-                _needed = ["alerts", "captions", "tracks", "vehicles"]
-                _to_create = [NewTopic(name=t, num_partitions=1, replication_factor=1)
-                              for t in _needed if t not in _existing]
-                if _to_create:
-                    _admin.create_topics(_to_create, validate_only=False)
-                    print(f"[Kafka] Auto-created topics: {[t.name for t in _to_create]}")
-                _admin.close()
-            except Exception as _ke:
-                print(f"[Kafka] Topic auto-create note: {_ke}")
+            # Auto-create Kafka topics if Kafka is enabled and reachable
+            if os.getenv("USE_MEMORY_BUS_ONLY", "false").lower() != "true":
+                try:
+                    import socket
+                    from kafka.admin import KafkaAdminClient, NewTopic
+                    _raw_kafka = os.getenv("KAFKA_BOOTSTRAP_SERVERS", os.getenv("KAFKA_HOST", "127.0.0.1:9092"))
+                    _kafka_servers = [s.strip() for s in _raw_kafka.split(",") if s.strip()] if "," in _raw_kafka else _raw_kafka
+                    
+                    _test_server = _kafka_servers[0] if isinstance(_kafka_servers, list) else _kafka_servers
+                    _host, _port = (_test_server.split(":") if ":" in _test_server else (_test_server, "9092"))
+                    _s = socket.create_connection((_host, int(_port)), timeout=0.8)
+                    _s.close()
+
+                    _admin = KafkaAdminClient(bootstrap_servers=_kafka_servers, request_timeout_ms=2000)
+                    _existing = set(_admin.list_topics())
+                    _needed = ["alerts", "captions", "tracks", "vehicles"]
+                    _to_create = [NewTopic(name=t, num_partitions=1, replication_factor=1)
+                                  for t in _needed if t not in _existing]
+                    if _to_create:
+                        _admin.create_topics(_to_create, validate_only=False)
+                        print(f"[Kafka] Auto-created topics: {[t.name for t in _to_create]}")
+                    _admin.close()
+                except Exception as _ke:
+                    print(f"[Kafka] Topic auto-create note: {_ke}")
 
             print("Starting background Stream Recorders and AI Workers...")
             recorder.start_all_recorders()
@@ -225,6 +231,7 @@ app.include_router(co_occurrence_router, prefix="/api/v1")
 app.include_router(fir_report_router, prefix="/api/v1")
 app.include_router(challan_router, prefix="/api/v1")
 app.include_router(cameras_router, prefix="/api/v1")
+app.include_router(cameras_router, prefix="/api")  # Backward-compatible alias
 app.include_router(playback_router, prefix="/api/v1")
 app.include_router(search_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
@@ -237,6 +244,12 @@ from .routers.copilot import router as copilot_router
 app.include_router(copilot_router, prefix="/api/v1")
 from .routers.chat import router as chat_router
 app.include_router(chat_router, prefix="/api/v1")
+from .routers.skills_rules import router as skills_rules_router
+app.include_router(skills_rules_router, prefix="/api/v1")
+from .routers.elevation import router as elevation_router
+app.include_router(elevation_router, prefix="/api/v1")
+from .routers.topology import router as topology_router
+app.include_router(topology_router, prefix="/api/v1")
 
 
 from fastapi.responses import PlainTextResponse
@@ -263,6 +276,8 @@ def prometheus_metrics_endpoint():
     """Scraping endpoint for Prometheus monitoring systems."""
     return PlainTextResponse(generate_prometheus_metrics(), media_type="text/plain")
 
+from .auth.helpers import verify_operator
+
 @app.post("/api/v1/bwc/live/register", tags=["BodyWornCameras"])
 def register_bwc_live_stream(
     officer_id: str,
@@ -270,6 +285,7 @@ def register_bwc_live_stream(
     device_serial: str,
     lat: float = None,
     lng: float = None,
+    user=Depends(verify_operator),
     db: Session = Depends(get_db)
 ):
     """Registers an active cellular live Body-Worn Camera stream."""
@@ -285,18 +301,31 @@ def register_bwc_live_stream(
 
 @app.websocket("/api/v1/ws/alerts")
 async def websocket_alerts_endpoint(websocket: WebSocket):
-    # BUG-16 FIX: Validate JWT before accepting the WebSocket connection.
+    # Validate JWT before accepting the WebSocket connection.
     # Clients must pass ?token=<jwt> in the connection URL.
     from .auth.helpers import SECRET_KEY, ALGORITHM
+    from .database.models import User
     import jwt as _jwt
     token = websocket.query_params.get("token")
     if not token:
         await websocket.close(code=1008, reason="Missing authentication token")
         return
     try:
-        _jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = _jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            await websocket.close(code=1008, reason="Invalid token claims: sub missing")
+            return
+        with SessionLocal() as db:
+            user = db.query(User).filter(User.username == username).first()
+            if not user or getattr(user, "status", "active") != "active" or getattr(user, "deleted_at", None) is not None:
+                await websocket.close(code=1008, reason="User account is disabled or suspended")
+                return
+    except _jwt.ExpiredSignatureError:
+        await websocket.close(code=1008, reason="Authentication token has expired")
+        return
     except Exception:
-        await websocket.close(code=1008, reason="Invalid or expired authentication token")
+        await websocket.close(code=1008, reason="Invalid or malformed authentication token")
         return
 
     await websocket.accept()

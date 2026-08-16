@@ -28,10 +28,12 @@ class CopilotToolRouter:
 
     ALLOWED_TOOLS = [
         "search_cameras", "search_events", "search_people", "search_vehicles",
-        "search_faces", "search_license_plates", "search_audio_events", "search_semantic_video",
-        "search_recordings", "get_timeline", "get_camera_health", "get_event_details",
-        "get_video_segment", "get_evidence", "compare_events", "find_person_journey",
-        "find_vehicle_journey", "generate_evidence_report"
+        "search_faces", "search_license_plates", "search_raw_ocr", "search_audio_events",
+        "search_semantic_video", "search_recordings", "get_timeline", "get_camera_health",
+        "get_event_details", "get_video_segment", "get_evidence", "compare_events",
+        "find_person_journey", "find_vehicle_journey", "generate_evidence_report",
+        "add_camera", "delete_camera", "create_alert_rule", "list_alert_rules",
+        "delete_alert_rule", "get_system_status"
     ]
 
     @staticmethod
@@ -40,13 +42,35 @@ class CopilotToolRouter:
             return {"error": f"Unauthorized tool '{tool_name}'"}
 
         from . import copilot_agent
+        from ...database.models import RawOCR, CustomAlertRule
         db = SessionLocal()
         try:
-
             # Dispatch to python service wrappers
             if tool_name == "search_cameras":
                 cams = db.query(Camera).all()
-                return {"cameras": [{"id": c.id, "name": c.name, "location": c.location, "status": c.status} for c in cams]}
+                return {"cameras": [{"id": c.id, "name": c.name, "location": c.location, "status": c.status, "stream_url": c.stream_url} for c in cams]}
+
+            elif tool_name == "add_camera":
+                cam_id = params.get("camera_id") or f"cam_{uuid.uuid4().hex[:4]}"
+                cam = Camera(
+                    id=cam_id,
+                    name=params.get("name", f"Camera {cam_id}"),
+                    location=params.get("location", "Surveillance Point"),
+                    stream_url=params.get("stream_url", ""),
+                    status="online"
+                )
+                db.add(cam)
+                db.commit()
+                return {"success": True, "message": f"Camera {cam_id} added successfully", "camera_id": cam_id}
+
+            elif tool_name == "delete_camera":
+                cam_id = params.get("camera_id")
+                cam = db.query(Camera).filter(Camera.id == cam_id).first()
+                if cam:
+                    db.delete(cam)
+                    db.commit()
+                    return {"success": True, "message": f"Camera {cam_id} deleted successfully"}
+                return {"error": f"Camera '{cam_id}' not found"}
 
             elif tool_name == "search_events":
                 cam_id = params.get("camera_id")
@@ -77,13 +101,56 @@ class CopilotToolRouter:
                 } for v in v_events]}
 
             elif tool_name == "search_faces":
-                faces = db.query(Face).order_by(Face.timestamp.desc()).limit(10).all()
-                return {"faces": [{"id": f.id, "label": f.label, "confidence": f.confidence} for f in faces]}
+                faces = db.query(Face).order_by(Face.timestamp.desc()).limit(15).all()
+                return {"faces": [{"id": f.id, "label": f.label, "confidence": f.confidence, "camera_id": f.camera_id, "timestamp": f.timestamp.isoformat() if f.timestamp else None} for f in faces]}
 
             elif tool_name == "search_license_plates":
                 plate_query = f"%{params.get('plate', '').strip().upper()}%"
-                vehs = db.query(Vehicle).filter(Vehicle.license_plate.like(plate_query)).limit(10).all()
-                return {"vehicles": [{"camera_id": v.camera_id, "license_plate": v.license_plate, "ocr_confidence": v.ocr_confidence} for v in vehs]}
+                vehs = db.query(Vehicle).filter(Vehicle.license_plate.like(plate_query)).limit(15).all()
+                return {"vehicles": [{"camera_id": v.camera_id, "license_plate": v.license_plate, "ocr_confidence": v.ocr_confidence, "vehicle_color": v.vehicle_color, "timestamp": v.timestamp.isoformat() if v.timestamp else None} for v in vehs]}
+
+            elif tool_name == "search_raw_ocr":
+                text_query = f"%{params.get('query', '').strip().upper()}%"
+                ocrs = db.query(RawOCR).filter(RawOCR.detected_text.like(text_query)).limit(15).all()
+                return {"raw_ocr": [{"camera_id": o.camera_id, "detected_text": o.detected_text, "source_type": o.source_type, "ocr_confidence": o.ocr_confidence, "timestamp": o.timestamp.isoformat() if o.timestamp else None} for o in ocrs]}
+
+            elif tool_name == "create_alert_rule":
+                rule = CustomAlertRule(
+                    name=params.get("name", "Custom AI Rule"),
+                    prompt=params.get("prompt", ""),
+                    camera_id=params.get("camera_id"),
+                    severity=params.get("severity", "high"),
+                    confidence_threshold=params.get("confidence_threshold", 0.70),
+                    is_active=True
+                )
+                db.add(rule)
+                db.commit()
+                return {"success": True, "message": f"Alert rule '{rule.name}' created successfully", "rule_id": rule.id}
+
+            elif tool_name == "list_alert_rules":
+                rules = db.query(CustomAlertRule).all()
+                return {"alert_rules": [{"id": r.id, "name": r.name, "prompt": r.prompt, "severity": r.severity, "camera_id": r.camera_id, "is_active": r.is_active} for r in rules]}
+
+            elif tool_name == "delete_alert_rule":
+                rule_id = params.get("rule_id")
+                rule = db.query(CustomAlertRule).filter(CustomAlertRule.id == rule_id).first()
+                if rule:
+                    db.delete(rule)
+                    db.commit()
+                    return {"success": True, "message": f"Alert rule #{rule_id} deleted"}
+                return {"error": f"Alert rule #{rule_id} not found"}
+
+            elif tool_name == "get_system_status":
+                from ...config.service import get_models
+                cfg = get_models()
+                cams_cnt = db.query(Camera).count()
+                return {
+                    "cameras_configured": cams_cnt,
+                    "yolo_model": cfg.get("yolo", {}).get("model_path"),
+                    "moondream_enabled": cfg.get("moondream", {}).get("enabled", True),
+                    "ocr_engine": cfg.get("vehicle", {}).get("ocr_engine"),
+                    "status": "OPERATIONAL"
+                }
 
             elif tool_name == "search_audio_events":
                 auds = db.query(AudioEvent).order_by(AudioEvent.timestamp.desc()).limit(10).all()

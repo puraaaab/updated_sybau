@@ -135,6 +135,43 @@ def get_current_user(
                        "POST to /api/v1/auth/change-password with your current and new password.",
             )
 
+    user._base_role = user.role
+    user._effective_role = user.role
+    user._elevation_active = False
+
+    # FEAT-02: Privilege Elevation Dynamic TTL Enforcement Point
+    try:
+        from ..database.models import PrivilegeElevationRequest, _istnow
+        elevation = (
+            db.query(PrivilegeElevationRequest)
+            .filter(
+                PrivilegeElevationRequest.username == user.username,
+                PrivilegeElevationRequest.status == "APPROVED"
+            )
+            .order_by(PrivilegeElevationRequest.id.desc())
+            .first()
+        )
+        if elevation:
+            now = _istnow()
+            exp = elevation.expires_at
+            if exp:
+                if exp.tzinfo is None:
+                    from ..database.models import _IST
+                    exp = exp.replace(tzinfo=_IST)
+                if exp > now:
+                    # Active elevation within TTL window: promote user's effective role without mutating column
+                    user._effective_role = elevation.requested_role
+                    user._elevation_active = True
+                    user._elevation_expires_at = exp
+                else:
+                    # TTL has expired: mark request EXPIRED and retain base role
+                    elevation.status = "EXPIRED"
+                    db.commit()
+                    user._elevation_active = False
+                    user._effective_role = user.role
+    except Exception as elev_e:
+        logger.warning(f"[Auth] Elevation check note: {elev_e}")
+
     user._client_ip = _extract_client_ip(request)
     return user
 
@@ -148,13 +185,14 @@ class RoleChecker:
         self.allowed_roles = allowed_roles
 
     def __call__(self, current_user: User = Depends(get_current_user)) -> User:
-        if current_user.role not in self.allowed_roles:
+        effective_role = getattr(current_user, "_effective_role", current_user.role)
+        if effective_role not in self.allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     f"Operation not permitted. "
                     f"Required roles: {self.allowed_roles}. "
-                    f"Current role: {current_user.role}"
+                    f"Current role: {effective_role}"
                 )
             )
         return current_user
@@ -169,22 +207,45 @@ def verify_media_access(
     request: Request,
     token_header: Optional[str] = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
-) -> Optional[User]:
+) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required for media access",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     token = token_header or request.query_params.get("token")
     if not token:
-        return None
+        raise credentials_exception
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
-        if username:
-            user = db.query(User).filter(User.username == username).first()
-            if user:
-                return user
-    except Exception:
-        pass
+        if not username:
+            raise credentials_exception
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Media access token has expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.PyJWTError:
+        raise credentials_exception
 
-    return None
+    user = db.query(User).filter(User.username == username).first()
+    if user is None:
+        raise credentials_exception
+    if getattr(user, "status", "active") != "active" or getattr(user, "deleted_at", None) is not None:
+        raise credentials_exception
+
+    # Enforce role hierarchy: viewer, operator, admin
+    if user.role not in ("admin", "operator", "viewer"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Media access not permitted for role: {user.role}"
+        )
+
+    user._client_ip = _extract_client_ip(request)
+    return user
 
 
 def verify_camera_access(camera_id: str, user: User) -> bool:

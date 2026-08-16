@@ -3,9 +3,9 @@
   "yolo": {
     "model_path": "yolo26l.pt",
     "device": "cuda",
-    "imgsz": 960,
+    "imgsz": 640,
     "confidence": 0.20,
-    "sampling_rate_fps": 10
+    "sampling_rate_fps": 3
   },
   "face": {
     "enabled": true,
@@ -16,7 +16,7 @@
   "vehicle": {
     "enabled": true,
     "reid_model": "market1501",
-    "ocr_engine": "rapidocr",
+    "ocr_engine": "paddleocr",
     "device": "cuda"
   },
   "person": {
@@ -33,7 +33,7 @@
   },
   "moondream": {
     "enabled": true,
-    "invoke_every_n_frames": 4,
+    "invoke_every_n_frames": 15,
     "comment": "Set enabled=true to use Moondream 3 cloud API instead of Florence-2. Requires MOONDREAM_API_KEY in .env"
   },
   "embeddings": {

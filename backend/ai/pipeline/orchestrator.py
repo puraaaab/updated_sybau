@@ -9,10 +9,41 @@ from ..vehicle.vehicle_reid import process_vehicles, detect_vehicle_color as det
 from ..behavior.behavior_engine import behavior_engine
 from ..captioning.captioner import generate_scene_caption, submit_async_scene_caption
 from ..captioning.moondream_captioner import submit_moondream_caption
+import concurrent.futures
 from ..embeddings.embedder import get_text_embedding
 from ...config.service import get_models
 
 logger = logging.getLogger(__name__)
+
+# Non-blocking ThreadPool for asynchronous custom alert rule evaluation (never blocks video thread)
+_rule_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="custom_rules_worker")
+
+
+def _async_evaluate_custom_rules(caption: str, tracks: list, vehicles: list, custom_rules: list, camera_id: str):
+    """Executes text embedding and natural language rule matching in background thread."""
+    try:
+        from ..embeddings.embedder import get_text_embedding
+        embedding = get_text_embedding(caption)
+        from ..behavior.custom_rules import custom_rule_evaluator
+        custom_alerts = custom_rule_evaluator.evaluate_custom_rules(
+            {
+                "caption": caption,
+                "embedding": embedding,
+                "tracks": tracks,
+                "vehicles": vehicles
+            },
+            custom_rules,
+            camera_id
+        )
+        if custom_alerts:
+            from backend.messaging.kafka_client import event_client
+            for alert in custom_alerts:
+                try:
+                    event_client.publish_alert(alert)
+                except Exception as pub_e:
+                    logger.debug(f"[{camera_id}] Rule alert publish note: {pub_e}")
+    except Exception as exc:
+        logger.warning(f"[{camera_id}] Async custom rules evaluation note: {exc}")
 
 # IST timezone constant (Indian Standard Time +05:30) used to stamp every frame at capture time
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -183,14 +214,13 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
     # Record YOLO summary bound to this frame's correlation ID for parallel Florence
     record_yolo_frame_summary(corr_id, yolo_summary)
 
-    # Dispatch Moondream captioner if enabled (interleaved on offset frames when both are active)
+    # Dispatch Moondream captioner if enabled
     moondream_cfg     = cfg.get("moondream", {})
     moondream_enabled = moondream_cfg.get("enabled", True)
     if moondream_enabled:
-        md_n_frames      = moondream_cfg.get("invoke_every_n_frames", 4)
-        # Interleave Moondream on frame offset (e.g. frame_idx % 4 == 2) when Florence is also active
-        offset           = (md_n_frames // 2) if florence_enabled and md_n_frames > 1 else 0
-        should_invoke_md = md_n_frames <= 1 or (frame_idx % md_n_frames == offset)
+        default_interval = 1 if not florence_enabled else 2
+        md_n_frames      = moondream_cfg.get("invoke_every_n_frames", default_interval)
+        should_invoke_md = md_n_frames <= 1 or (frame_idx % md_n_frames == 0)
         if should_invoke_md:
             md_corr_id = uuid.uuid4().hex[:8]
             try:
@@ -201,30 +231,20 @@ def process_frame(frame: np.ndarray, camera_id: str, zones: list, alerts_cfg: di
                 logger.warning(f"[Moondream] Dispatch error on {camera_id}: {e}")
 
 
-    # Instant text embedding for YOLO summary
-    try:
-        embedding = get_text_embedding(caption)
-    except Exception as e:
-        logger.warning(f"[{camera_id}] Text embedding failed: {e}")
-
-    # Evaluate dynamic custom alert rules (license plates, natural language visual prompts, threats)
+    # Async Non-blocking Evaluation: Custom natural-language alert rules dispatched to ThreadPool
     custom_rules = alerts_cfg.get("custom_rules", []) if isinstance(alerts_cfg, dict) else []
     if custom_rules:
         try:
-            from ..behavior.custom_rules import custom_rule_evaluator
-            custom_alerts = custom_rule_evaluator.evaluate_custom_rules(
-                {
-                    "caption": caption,
-                    "embedding": embedding,
-                    "tracks": tracks,
-                    "vehicles": vehicles
-                },
+            _rule_executor.submit(
+                _async_evaluate_custom_rules,
+                caption,
+                tracks,
+                vehicles,
                 custom_rules,
                 camera_id
             )
-            alerts.extend(custom_alerts)
         except Exception as e:
-            logger.warning(f"[{camera_id}] Custom rules evaluation note: {e}")
+            logger.warning(f"[{camera_id}] Custom rules dispatch note: {e}")
             
     return {
         "tracks": tracks,

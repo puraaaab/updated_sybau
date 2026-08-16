@@ -69,7 +69,7 @@ def _parse_result_boxes(result) -> List[Dict[str, Any]]:
         if class_name is None:
             continue
         detections.append({
-            "track_id": int(round(track_id)),
+            "track_id": round(track_id),
             "class_name": class_name,
             "confidence": float(conf_list[i]),
             "bbox": [float(val) for val in xyxy_list[i]],
@@ -85,10 +85,9 @@ def _yolo_imgsz() -> int:
 
 
 def detect_and_track(frame: np.ndarray):
-    """Executes YOLO detection on one camera frame. FP16 on CUDA for speed."""
+    """Executes YOLO detection on one camera frame."""
     yolo_model = None
     device_target = "cuda" if torch.cuda.is_available() else "cpu"
-    use_half = device_target == "cuda"
     try:
         yolo_model = model_manager.get_yolo()
         with model_manager.gpu_lock:
@@ -99,9 +98,8 @@ def detect_and_track(frame: np.ndarray):
                 device=device_target,
                 verbose=False,
             )
-            if use_half:
-                predict_kwargs["half"] = True  # FP16 on GPU
-            results = yolo_model.predict(frame, **predict_kwargs)
+            raw_results = yolo_model.predict(frame, **predict_kwargs)
+            results = list(raw_results) if raw_results is not None else []
         if results:
             return _parse_result_boxes(results[0])
     except Exception as e:
@@ -115,9 +113,9 @@ def detect_and_track_batch(
     frame_counters: List[int],
     skip_interval: int = 1,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Executes batched YOLO detection across multiple camera streams with full FP32 precision."""
+    """Executes batched YOLO detection across multiple camera streams."""
     batch_detections = {stream_id: [] for stream_id in stream_ids}
-    safe_skip_interval = max(1, int(skip_interval or 1))
+    safe_skip_interval = max(1, skip_interval or 1)
     frames_to_process = []
     active_stream_indices = []
 
@@ -132,7 +130,6 @@ def detect_and_track_batch(
     try:
         yolo_model = model_manager.get_yolo()
         device_target = "cuda" if torch.cuda.is_available() else "cpu"
-        use_half = device_target == "cuda"
         with model_manager.gpu_lock:
             predict_kwargs = dict(
                 imgsz=_yolo_imgsz(),
@@ -141,9 +138,8 @@ def detect_and_track_batch(
                 device=device_target,
                 verbose=False,
             )
-            if use_half:
-                predict_kwargs["half"] = True  # FP16 on GPU
-            results = yolo_model.predict(frames_to_process, **predict_kwargs)
+            raw_results = yolo_model.predict(frames_to_process, **predict_kwargs)
+            results = list(raw_results) if raw_results is not None else []
         for batch_idx, result in enumerate(results or []):
             if batch_idx >= len(active_stream_indices):
                 break

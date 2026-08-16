@@ -59,6 +59,87 @@ def _parse_bbox_norm(bbox_val):
     return None
 
 
+def _resolve_dyn_bbox(snap_url: str, target_label: str = "", camera_id: str = ""):
+    """
+    Dynamically resolves normalized bounding box [left, top, width, height]
+    by locating the local snapshot file and running local detector if bbox was not stored.
+    """
+    if not snap_url:
+        return None
+    try:
+        import cv2
+
+        # Extract snapshot ID or filename from URL
+        snap_id = snap_url.split("/")[-1].split("?")[0]
+        if not snap_id:
+            return None
+
+        storage_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
+        candidates = [
+            os.path.join(storage_dir, f"{snap_id}.jpg"),
+            os.path.join(storage_dir, f"{snap_id}.png"),
+            os.path.join(storage_dir, snap_id),
+            os.path.join(storage_dir, f"poi_{snap_id}.jpg")
+        ]
+
+        img_path = None
+        for p in candidates:
+            if os.path.exists(p):
+                img_path = p
+                break
+
+        if not img_path:
+            return None
+
+        img = cv2.imread(img_path)
+        if img is None:
+            return None
+
+        h, w = img.shape[:2]
+        if h <= 0 or w <= 0:
+            return None
+
+        # 1. Check face detection if target is person or face
+        target_low = (target_label or "").lower()
+        if "person" in target_low or "face" in target_low or "poi" in target_low:
+            try:
+                from ..ai.face import face_pipeline
+                detector, _ = face_pipeline.get_face_models(w, h)
+                detector.setInputSize((w, h))
+                _, faces = detector.detect(img)
+                if faces is not None and len(faces) > 0:
+                    fx, fy, fw, fh = [float(c) for c in faces[0][:4]]
+                    left = round(max(0.0, min(1.0, fx / float(w))), 4)
+                    top = round(max(0.0, min(1.0, fy / float(h))), 4)
+                    width = round(max(0.01, min(1.0, fw / float(w))), 4)
+                    height = round(max(0.01, min(1.0, fh / float(h))), 4)
+                    return [left, top, width, height]
+            except Exception:
+                pass
+
+        # 2. For vehicle or general detections, check YOLO
+        try:
+            from ..ai.detection import yolo
+            detections = yolo.detect_and_track(img)
+            if detections:
+                matching = [d for d in detections if not target_low or target_low in str(d.get("class_name", "")).lower()]
+                best = matching[0] if matching else detections[0]
+                box = best.get("box")
+                if box and len(box) >= 4:
+                    x1, y1, x2, y2 = [float(c) for c in box[:4]]
+                    left = round(max(0.0, min(1.0, x1 / float(w))), 4)
+                    top = round(max(0.0, min(1.0, y1 / float(h))), 4)
+                    width = round(max(0.01, min(1.0, (x2 - x1) / float(w))), 4)
+                    height = round(max(0.01, min(1.0, (y2 - y1) / float(h))), 4)
+                    return [left, top, width, height]
+        except Exception:
+            pass
+
+    except Exception:
+        pass
+    return None
+
+
 @router.get("/trajectory/{target_id}")
 def get_target_trajectory(target_id: str, user=Depends(verify_viewer), db: Session = Depends(get_db)):
     """
@@ -142,6 +223,7 @@ def get_target_trajectory(target_id: str, user=Depends(verify_viewer), db: Sessi
         cam = cams_dict.get(tr.camera_id)
         lat, lng, loc_name = _get_cam_gps(tr.camera_id, cam, idx)
         snap_url = f"/api/v1/playback/snapshot/{tr.track_uuid}" if tr.track_uuid else f"/api/v1/cameras/{tr.camera_id}/snapshot"
+        dyn_bbox = _parse_bbox_norm(getattr(tr, "bbox", None)) or _resolve_dyn_bbox(snap_url, tr.label, tr.camera_id)
         nodes.append({
             "sequence_index": idx + 1,
             "camera_id": tr.camera_id,
@@ -152,8 +234,10 @@ def get_target_trajectory(target_id: str, user=Depends(verify_viewer), db: Sessi
             "timestamp": format_ist_str(tr.first_seen),
             "speed_kmh": round((tr.speed / 25.0) * 3.6, 1) if tr.speed else 0.0,
             "snapshot_url": snap_url,
+            "full_snapshot_url": snap_url,
             "snapshot_id": f"snap_{tr.track_uuid}",
-            "track_uuid": tr.track_uuid
+            "track_uuid": tr.track_uuid,
+            "bbox_norm": dyn_bbox
         })
 
     return {

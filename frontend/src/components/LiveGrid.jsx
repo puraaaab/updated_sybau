@@ -42,18 +42,34 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
     return null;
   };
 
+  const [currentStreamUrl, setCurrentStreamUrl] = useState(url);
+  const [snapshotNonce, setSnapshotNonce] = useState(Date.now());
+  const effectiveToken = token || (typeof window !== 'undefined' ? (localStorage.getItem('token') || localStorage.getItem('vms_auth_token') || '') : '');
+
+  useEffect(() => {
+    if (!isBuffering || isOffline) return;
+    const interval = setInterval(() => {
+      setSnapshotNonce(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isBuffering, isOffline]);
+
+  useEffect(() => {
+    setCurrentStreamUrl(url);
+  }, [url]);
+
   // 1. Determine Playback Mode
   useEffect(() => {
     setIsBuffering(true);
-    if (!url) return;
+    if (!currentStreamUrl) return;
     
-    const ytId = getYouTubeId(originalUrl || url);
+    const ytId = getYouTubeId(originalUrl || currentStreamUrl);
     if (ytId) {
       setPlayMode('youtube');
       return;
     }
 
-    const lowerUrl = url.toLowerCase();
+    const lowerUrl = currentStreamUrl.toLowerCase();
     const isMjpeg = lowerUrl.includes('.mjpg') || lowerUrl.includes('.mjpeg') || lowerUrl.includes('video.cgi') || lowerUrl.includes('/mjpeg');
     const isDirect = lowerUrl.includes('.mp4') || lowerUrl.includes('.webm') || lowerUrl.includes('.ogg');
     const isM3u8 = lowerUrl.includes('.m3u8');
@@ -70,11 +86,11 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
     } else {
       setPlayMode('webrtc');
     }
-  }, [url, originalUrl, isHls]);
+  }, [currentStreamUrl, originalUrl, isHls]);
 
   // 2. WebRTC Effect
   useEffect(() => {
-    if (isOffline || !url || playMode !== 'webrtc') return;
+    if (isOffline || !currentStreamUrl || playMode !== 'webrtc') return;
 
     const video = videoRef.current;
     if (!video) return;
@@ -82,6 +98,8 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
     const PeerConnectionClass = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
     if (!PeerConnectionClass) {
       console.warn("[WHEP Player] WebRTC is not supported in this browser environment. Falling back to HLS...");
+      const hlsFallback = currentStreamUrl.replace('/webrtc/', '/hls/').replace('/whep', '/index.m3u8');
+      setCurrentStreamUrl(hlsFallback);
       setPlayMode('hls');
       return;
     }
@@ -91,6 +109,8 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
       pc = new PeerConnectionClass({ iceServers: [] });
     } catch (err) {
       console.warn("[WHEP Player] Failed to instantiate RTCPeerConnection. Falling back to HLS...", err);
+      const hlsFallback = currentStreamUrl.replace('/webrtc/', '/hls/').replace('/whep', '/index.m3u8');
+      setCurrentStreamUrl(hlsFallback);
       setPlayMode('hls');
       return;
     }
@@ -117,7 +137,7 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
       })
       .then(offer => {
         if (!offer || isCancelled) return;
-        return fetch(url, {
+        return fetch(currentStreamUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/sdp' },
           body: offer.sdp
@@ -134,7 +154,9 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
       })
       .catch(err => {
         if (isCancelled) return;
-        console.warn(`[WHEP Player] Failed WebRTC handshake for ${url}:`, err);
+        console.warn(`[WHEP Player] WebRTC handshake skipped for ${currentStreamUrl}. Switching to HLS live stream...`);
+        const hlsFallback = currentStreamUrl.replace('/webrtc/', '/hls/').replace('/whep', '/index.m3u8');
+        setCurrentStreamUrl(hlsFallback);
         setPlayMode('hls');
       });
 
@@ -146,7 +168,7 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
       }
       if (video) video.srcObject = null;
     };
-  }, [url, isOffline, playMode]);
+  }, [currentStreamUrl, isOffline, playMode]);
 
   // Jump player directly to live edge when returning to tab or window focus
   const jumpToLiveEdge = useCallback(() => {
@@ -383,26 +405,44 @@ const LivePlayer = React.memo(function LivePlayer({ url, originalUrl, isOffline,
           }}
         />
       ) : (
-        <video
-          id={`video-${cameraId}`}
-          ref={videoRef}
-          autoPlay
-          muted
-          playsInline
-          onLoadedMetadata={handleLoadedMetadata}
-          onWaiting={handleWaiting}
-          onPlaying={handlePlaying}
-          onTimeUpdate={handleTimeUpdate}
-          style={{
-            position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
-            objectFit: objectFitStyle
-          }}
-        />
+        <>
+          {/* Live Snapshot Auto-Refresh Layer — guarantees immediate display even while WebRTC/HLS handshakes */}
+          <img
+            src={`/api/v1/playback/snapshot/full_cam_${cameraId}.jpg?t=${snapshotNonce}${effectiveToken ? `&token=${encodeURIComponent(effectiveToken)}` : ''}`}
+            alt="Live Camera Feed"
+            onError={(e) => { e.target.style.opacity = '0'; }}
+            onLoad={(e) => { e.target.style.opacity = '1'; }}
+            style={{
+              position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
+              objectFit: objectFitStyle,
+              zIndex: 1,
+              transition: 'opacity 0.2s ease-in-out'
+            }}
+          />
+          <video
+            id={`video-${cameraId}`}
+            ref={videoRef}
+            autoPlay
+            muted
+            playsInline
+            onLoadedMetadata={handleLoadedMetadata}
+            onWaiting={handleWaiting}
+            onPlaying={handlePlaying}
+            onTimeUpdate={handleTimeUpdate}
+            style={{
+              position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
+              objectFit: objectFitStyle,
+              zIndex: 2,
+              opacity: isBuffering ? 0 : 1,
+              transition: 'opacity 0.25s ease-in-out'
+            }}
+          />
+        </>
       )}
 
       {isBuffering && !isOffline && playMode !== 'youtube' && (
         <Box sx={{
-          position: 'absolute', top: 8, right: 8,
+          position: 'absolute', top: 8, right: 8, zIndex: 3,
           backgroundColor: 'rgba(0,0,0,0.65)', px: 1, py: 0.25, borderRadius: 1,
           backdropFilter: 'blur(4px)'
         }}>
@@ -474,9 +514,19 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
   // Florence Telemetry Counter State
   const [florenceStats, setFlorenceStats] = useState({ captioning: 0, queue: 0, captioned: 0, camera_stats: {} });
 
+  const authUrl = (u) => {
+    if (!u) return u;
+    if (token && !u.includes('token=')) {
+      return u.includes('?') ? `${u}&token=${encodeURIComponent(token)}` : `${u}?token=${encodeURIComponent(token)}`;
+    }
+    return u;
+  };
+
   useEffect(() => {
     const fetchFlorenceStats = () => {
-      fetch('/api/v1/florence/stats')
+      fetch('/api/v1/florence/stats', {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      })
         .then(res => res.ok ? res.json() : { captioning: 0, queue: 0, captioned: 0, camera_stats: {} })
         .then(data => setFlorenceStats(data))
         .catch(() => {});
@@ -484,7 +534,7 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
     fetchFlorenceStats();
     const interval = setInterval(fetchFlorenceStats, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [token]);
 
   // ── Caption timestamp helpers ────────────────────────────────────────────
   // Parse the `ts=YYYY-MM-DDTHH:MM:SS+05:30` field embedded in stored captions.
@@ -597,7 +647,7 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
 
     const camId = 'cam_' + newCamName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
 
-    fetch('/api/cameras', {
+    fetch('/api/v1/cameras', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -632,14 +682,25 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
 
   const handleDeleteCamera = (camId, e) => {
     if (e) e.stopPropagation();
-    if (!window.confirm(`Are you sure you want to remove camera stream "${camId}" from live surveillance?`)) return;
+    const targetCam = (Array.isArray(cameras) ? cameras : []).find(c => c.id === camId);
+    const targetName = targetCam ? targetCam.name : camId;
+    if (!window.confirm(`Are you sure you want to remove "${targetName}" (ID: ${camId}) from surveillance?`)) return;
 
-    fetch(`/api/cameras/${camId}`, {
+    fetch(`/api/v1/cameras/${encodeURIComponent(camId)}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${token}` }
     })
-      .then(res => res.json())
-      .then(() => fetchCameras())
+      .then(async res => {
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || 'Failed to delete camera');
+        }
+        return res.json();
+      })
+      .then(() => {
+        setCameras(prev => (Array.isArray(prev) ? prev.filter(c => c.id !== camId) : []));
+        fetchCameras();
+      })
       .catch(err => alert(err.message));
   };
 
@@ -658,7 +719,7 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
   };
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0, minHeight: 0, overflow: 'hidden', gap: 1.5 }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', width: '100%', minWidth: 0, gap: 2 }}>
       
       {/* ── Top Bar: Title & Controls ──────────────────────────────────────── */}
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 2, flexShrink: 0 }}>
@@ -666,10 +727,10 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
           <Typography variant="h6" fontWeight="bold">Live Surveillance Grid</Typography>
           <Chip
             icon={<AutoAwesomeIcon sx={{ fontSize: '1rem !important' }} />}
-            label={`captioning:- ${florenceStats.captioning} imegs queue: ${florenceStats.queue} imgs captioned: ${florenceStats.captioned || 0} imgs`}
+            label={`${florenceStats.moondream_active ? '✨ Moondream 3.1' : '🔍 Florence-2'}: ${florenceStats.captioning} active • ${florenceStats.queue} in queue • ${florenceStats.captioned || 0} captioned`}
             color="secondary"
+            variant="outlined"
             size="small"
-            variant="filled"
             sx={{ fontWeight: 'bold', fontFamily: 'monospace', borderRadius: 2 }}
           />
           <Button
@@ -714,7 +775,7 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
       </Box>
 
       {/* ── Scrollable Grid Region ────────────────────────────────────────── */}
-      <Box sx={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden', pr: 0.5 }}>
+      <Box sx={{ width: '100%', overflowY: 'visible', overflowX: 'hidden', pb: 4 }}>
         {loading ? (
           <Box sx={gridTemplateSx}>
             {[1, 2, 3].map(n => (
@@ -738,10 +799,12 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
                   borderStyle: 'solid'
                 }}>
                   {/* Header info */}
-                  <Box sx={{ p: 0.75, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: 'background.paper', gap: 1 }}>
+                    <Box sx={{ p: 0.75, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: 'background.paper', gap: 1 }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
                       <RadioButtonCheckedIcon color="success" fontSize="small" />
-                      <Typography variant="caption" fontWeight="bold" noWrap>CAM_{String(cam.id).toUpperCase()}</Typography>
+                      <Typography variant="caption" fontWeight="bold" noWrap>
+                        {cam.name || (cam.id.toUpperCase().startsWith('CAM_') ? cam.id.toUpperCase() : `CAM_${cam.id.toUpperCase()}`)}
+                      </Typography>
                     </Box>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                       <IconButton size="small" onClick={(e) => handleDeleteCamera(cam.id, e)} color="error">
@@ -777,19 +840,28 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
                           {cam.location || cam.name}
                         </Typography>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
-                          {ageLabel && (
-                            <Tooltip title={`Florence-2 scene caption was captured ${ageLabel}. YOLO detection is always live.`}>
+                          {lastCaption && (
+                            <Tooltip title={
+                              <Box sx={{ p: 0.5, maxWidth: 360 }}>
+                                <Typography variant="caption" sx={{ fontWeight: 'bold', color: '#06b6d4', display: 'block', mb: 0.5 }}>
+                                  {florenceStats?.moondream_active ? '✨ Moondream 3.1 VLM Caption' : '🔍 Florence-2 Vision Caption'}:
+                                </Typography>
+                                <Typography variant="caption" sx={{ color: '#f1f5f9', whiteSpace: 'pre-line' }}>
+                                  {lastCaption}
+                                </Typography>
+                              </Box>
+                            } arrow>
                               <Chip
-                                label={`📷 ${ageLabel}`}
+                                label={ageLabel ? `✨ ${ageLabel}` : `✨ AI CAPTION`}
                                 size="small"
                                 sx={{
                                   height: 16,
                                   fontSize: '0.58rem',
                                   fontFamily: 'monospace',
-                                  backgroundColor: 'rgba(245,158,11,0.15)',
-                                  color: '#f59e0b',
-                                  border: '1px solid rgba(245,158,11,0.4)',
-                                  cursor: 'default',
+                                  backgroundColor: 'rgba(6, 182, 212, 0.18)',
+                                  color: '#22d3ee',
+                                  border: '1px solid rgba(6, 182, 212, 0.45)',
+                                  cursor: 'pointer',
                                 }}
                               />
                             </Tooltip>
@@ -887,7 +959,7 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
                   <Grid size={{ xs: 6, sm: 4, md: 2 }} key={idx}>
                     <Paper variant="outlined" sx={{ p: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, textAlign: 'center' }}>
                       <Avatar
-                        src={face.snapshot_url}
+                        src={authUrl(face.snapshot_url)}
                         variant="square"
                         sx={{ width: 80, height: 80, borderRadius: 1 }}
                       />
@@ -922,7 +994,7 @@ export default function LiveGrid({ token, role, alerts, searchQuery, settings = 
         <DialogContent dividers sx={{ backgroundColor: '#000', display: 'flex', justifyContent: 'center', p: 1 }}>
           {selectedAlert && (
             <img
-              src={selectedAlert.snapshot_url || selectedAlert.snapshot_path}
+              src={authUrl(selectedAlert.snapshot_url || selectedAlert.snapshot_path)}
               alt="Evidence Snapshot"
               style={{ maxWidth: '100%', maxHeight: '70vh', objectFit: 'contain' }}
             />

@@ -1,10 +1,12 @@
 import os
 import pytest
 import tempfile
-from backend.database.connection import SessionLocal
+from backend.database.connection import SessionLocal, engine, Base
+from backend.database.models import Camera
 from backend.services.bwc_ingest import BWCFileIngestService
 
 def test_bwc_upload_ingest():
+    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         # Create dummy temp file representing bodycam recording

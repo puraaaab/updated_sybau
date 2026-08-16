@@ -17,8 +17,8 @@ def calculate_speed_kmh(p1: Tuple[float, float], p2: Tuple[float, float], time_d
     dy = p2[1] - p1[1]
     dist_px = math.sqrt(dx * dx + dy * dy)
     dist_m = dist_px / px_per_meter
-    speed_mps = dist_m / time_delta_sec
-    speed_kmh = speed_mps * 3.6
+    speed_mps = dist_m / max(time_delta_sec, 0.05)
+    speed_kmh = min(speed_mps * 3.6, 140.0)
     return round(speed_kmh, 1)
 
 

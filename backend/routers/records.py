@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from ..database.connection import get_db
-from ..database.models import Face, Vehicle, SceneCaption, GlobalIdentity, RawOCR
+from ..database.models import Face, Vehicle, SceneCaption, GlobalIdentity, RawOCR, Camera
 from ..auth.helpers import verify_viewer
 from ..ai.captioning.captioner import get_florence_queue_stats
 from ..utils.timezone import format_ist_str
@@ -50,84 +50,47 @@ def _resolve_vehicle_snapshot(v) -> str | None:
 def get_records_faces(
     limit: int = Query(default=50, le=50000),
     offset: int = Query(default=0),
+    camera_id: str = Query(default=None),
     search: str = Query(default=None),
     sort: str = Query(default="desc"),
     user=Depends(verify_viewer),
     db: Session = Depends(get_db)
 ):
-    try:
-        db.query(Face).filter(Face.label.startswith("VEHICLE_")).delete(synchronize_session=False)
-        db.commit()
-    except Exception:
-        db.rollback()
+    limit_val = limit if isinstance(limit, int) else 50
+    offset_val = offset if isinstance(offset, int) else 0
+    camera_id_val = camera_id if isinstance(camera_id, str) else None
+    search_val = search if isinstance(search, str) else None
+    sort_val = sort if isinstance(sort, str) else "desc"
 
-    from sqlalchemy import func
-    from ..database.models import Track
-
-    # Group by face label to collapse duplicate sightings of the same POI subject
-    subq = (
-        db.query(
-            Face.label.label("poi_label"),
-            func.max(Face.id).label("max_id"),
-            func.count(Face.id).label("sightings")
+    q = db.query(Face)
+    if camera_id_val:
+        q = q.filter(Face.camera_id == camera_id_val)
+    if search_val:
+        q = q.filter(
+            (Face.label.ilike(f"%{search_val}%")) |
+            (Face.track_uuid.ilike(f"%{search_val}%"))
         )
-        .filter(~Face.label.startswith("VEHICLE_"))
-        .group_by(Face.label)
-    )
-
-    if search:
-        subq = subq.filter(Face.label.ilike(f"%{search}%") | Face.track_uuid.ilike(f"%{search}%"))
-
-    subq_aliased = subq.subquery()
-    total = db.query(func.count(subq_aliased.c.poi_label)).scalar() or 0
-
-    order_clause = subq_aliased.c.max_id.desc() if sort.lower() == "desc" else subq_aliased.c.max_id.asc()
-    query = (
-        db.query(Face, subq_aliased.c.sightings)
-        .join(subq_aliased, Face.id == subq_aliased.c.max_id)
-        .order_by(order_clause)
-    )
-
-    if limit > 0:
-        query = query.offset(offset).limit(limit)
+    total = q.count()
+    order_clause = Face.id.desc() if sort_val.lower() == "desc" else Face.id.asc()
+    if limit_val > 0:
+        items = q.order_by(order_clause).offset(offset_val).limit(limit_val).all()
     else:
-        query = query.offset(offset)
+        items = q.order_by(order_clause).offset(offset_val).all()
 
-    items = query.all()
-
-    # BUG-08 FIX: fetch all camera_ids for every visible face label in ONE query
-    # instead of firing a db.query(Track) per face row (N+1 pattern).
-    from ..database.models import Track
-    from sqlalchemy import distinct
-    face_labels = [f.label for f, _ in items if f.label]
-    if face_labels:
-        cam_rows = (
-            db.query(Face.label, Track.camera_id)
-            .join(Track, Track.track_uuid == Face.track_uuid)
-            .filter(Face.label.in_(face_labels))
-            .distinct()
-            .all()
-        )
-        label_to_cams: dict = {}
-        for lbl, cam in cam_rows:
-            label_to_cams.setdefault(lbl, set()).add(cam)
-    else:
-        label_to_cams = {}
-
+    camera_map = {cam.id: cam.name for cam in db.query(Camera).all()}
     results = []
-    for f, sightings_count in items:
-        cams = sorted(label_to_cams.get(f.label, set()) - {None})
-        cam_summary = ", ".join(cams) if cams else "Live Grid"
-
+    for f in items:
+        snap_id = f.embedding_id or f.track_uuid
         results.append({
             "id": f.id,
             "track_uuid": f.track_uuid,
+            "camera_id": f.camera_id,
+            "cameras": camera_map.get(f.camera_id, f.camera_id or "Live Grid"),
             "label": f.label or "Unidentified Subject",
-            "confidence": round(f.confidence, 2) if f.confidence else 0.85,
-            "sightings": sightings_count,
-            "cameras": cam_summary,
+            "confidence": round(f.confidence, 2) if getattr(f, "confidence", None) else 0.85,
+            "sightings": 1,
             "timestamp": format_ist_str(f.timestamp),
-            "snapshot_url": f"/api/v1/playback/snapshot/{f.embedding_id}" if f.embedding_id else None
+            "snapshot_url": f"/api/v1/playback/snapshot/{snap_id}" if snap_id else None
         })
     return {"total": total, "items": results}
 
@@ -143,22 +106,28 @@ def get_records_vehicles(
     user=Depends(verify_viewer),
     db: Session = Depends(get_db)
 ):
+    limit_val = limit if isinstance(limit, int) else 50
+    offset_val = offset if isinstance(offset, int) else 0
+    camera_id_val = camera_id if isinstance(camera_id, str) else None
+    search_val = search if isinstance(search, str) else None
+    sort_val = sort if isinstance(sort, str) else "desc"
+
     q = db.query(Vehicle)
-    if camera_id:
-        q = q.filter(Vehicle.camera_id == camera_id)
-    if search:
+    if camera_id_val:
+        q = q.filter(Vehicle.camera_id == camera_id_val)
+    if search_val:
         q = q.filter(
-            (Vehicle.vehicle_type.ilike(f"%{search}%")) |
-            (Vehicle.vehicle_color.ilike(f"%{search}%")) |
-            (Vehicle.license_plate.ilike(f"%{search}%")) |
-            (Vehicle.track_uuid.ilike(f"%{search}%"))
+            (Vehicle.vehicle_type.ilike(f"%{search_val}%")) |
+            (Vehicle.vehicle_color.ilike(f"%{search_val}%")) |
+            (Vehicle.license_plate.ilike(f"%{search_val}%")) |
+            (Vehicle.track_uuid.ilike(f"%{search_val}%"))
         )
     total = q.count()
-    order_clause = Vehicle.id.desc() if sort.lower() == "desc" else Vehicle.id.asc()
-    if limit > 0:
-        items = q.order_by(order_clause).offset(offset).limit(limit).all()
+    order_clause = Vehicle.id.desc() if sort_val.lower() == "desc" else Vehicle.id.asc()
+    if limit_val > 0:
+        items = q.order_by(order_clause).offset(offset_val).limit(limit_val).all()
     else:
-        items = q.order_by(order_clause).offset(offset).all()
+        items = q.order_by(order_clause).offset(offset_val).all()
     results = []
     for v in items:
         results.append({
@@ -184,19 +153,24 @@ def get_records_plates(
     user=Depends(verify_viewer),
     db: Session = Depends(get_db)
 ):
+    limit_val = limit if isinstance(limit, int) else 50
+    offset_val = offset if isinstance(offset, int) else 0
+    search_val = search if isinstance(search, str) else None
+    sort_val = sort if isinstance(sort, str) else "desc"
+
     q = db.query(Vehicle).filter(
         Vehicle.license_plate.isnot(None),
         ~Vehicle.license_plate.startswith("VEHICLE_"),
         ~Vehicle.license_plate.startswith("POI_")
     )
-    if search:
-        q = q.filter(Vehicle.license_plate.ilike(f"%{search}%"))
+    if search_val:
+        q = q.filter(Vehicle.license_plate.ilike(f"%{search_val}%"))
     total = q.count()
-    order_clause = Vehicle.id.desc() if sort.lower() == "desc" else Vehicle.id.asc()
-    if limit > 0:
-        items = q.order_by(order_clause).offset(offset).limit(limit).all()
+    order_clause = Vehicle.id.desc() if sort_val.lower() == "desc" else Vehicle.id.asc()
+    if limit_val > 0:
+        items = q.order_by(order_clause).offset(offset_val).limit(limit_val).all()
     else:
-        items = q.order_by(order_clause).offset(offset).all()
+        items = q.order_by(order_clause).offset(offset_val).all()
     results = []
     for v in items:
         results.append({
@@ -222,17 +196,23 @@ def get_records_captions(
     user=Depends(verify_viewer),
     db: Session = Depends(get_db)
 ):
+    limit_val = limit if isinstance(limit, int) else 50
+    offset_val = offset if isinstance(offset, int) else 0
+    camera_id_val = camera_id if isinstance(camera_id, str) else None
+    search_val = search if isinstance(search, str) else None
+    sort_val = sort if isinstance(sort, str) else "desc"
+
     q = db.query(SceneCaption)
-    if camera_id:
-        q = q.filter(SceneCaption.camera_id == camera_id)
-    if search:
-        q = q.filter(SceneCaption.caption.ilike(f"%{search}%"))
+    if camera_id_val:
+        q = q.filter(SceneCaption.camera_id == camera_id_val)
+    if search_val:
+        q = q.filter(SceneCaption.caption.ilike(f"%{search_val}%"))
     total = q.count()
-    order_clause = SceneCaption.id.desc() if sort.lower() == "desc" else SceneCaption.id.asc()
-    if limit > 0:
-        items = q.order_by(order_clause).offset(offset).limit(limit).all()
+    order_clause = SceneCaption.id.desc() if sort_val.lower() == "desc" else SceneCaption.id.asc()
+    if limit_val > 0:
+        items = q.order_by(order_clause).offset(offset_val).limit(limit_val).all()
     else:
-        items = q.order_by(order_clause).offset(offset).all()
+        items = q.order_by(order_clause).offset(offset_val).all()
     results = []
     for c in items:
         results.append({
@@ -255,40 +235,70 @@ def get_records_ocr(
     user=Depends(verify_viewer),
     db: Session = Depends(get_db)
 ):
+    limit_val = limit if isinstance(limit, int) else 50
+    offset_val = offset if isinstance(offset, int) else 0
+    camera_id_val = camera_id if isinstance(camera_id, str) else None
+    search_val = search if isinstance(search, str) else None
+    sort_val = sort if isinstance(sort, str) else "desc"
+
     q = db.query(RawOCR)
-    if camera_id:
-        q = q.filter(RawOCR.camera_id == camera_id)
-    if search:
+    if camera_id_val:
+        q = q.filter(RawOCR.camera_id == camera_id_val)
+    if search_val:
         q = q.filter(
-            (RawOCR.detected_text.ilike(f"%{search}%")) |
-            (RawOCR.raw_text.ilike(f"%{search}%")) |
-            (RawOCR.track_uuid.ilike(f"%{search}%"))
+            (RawOCR.detected_text.ilike(f"%{search_val}%")) |
+            (RawOCR.raw_text.ilike(f"%{search_val}%")) |
+            (RawOCR.track_uuid.ilike(f"%{search_val}%"))
         )
     total = q.count()
-    order_clause = RawOCR.id.desc() if sort.lower() == "desc" else RawOCR.id.asc()
-    if limit > 0:
-        items = q.order_by(order_clause).offset(offset).limit(limit).all()
+    order_clause = RawOCR.id.desc() if sort_val.lower() == "desc" else RawOCR.id.asc()
+    if limit_val > 0:
+        items = q.order_by(order_clause).offset(offset_val).limit(limit_val).all()
     else:
-        items = q.order_by(order_clause).offset(offset).all()
+        items = q.order_by(order_clause).offset(offset_val).all()
     results = []
-    for r in items:
+    for o in items:
         results.append({
-            "id": r.id,
-            "camera_id": r.camera_id,
-            "track_uuid": r.track_uuid,
-            "detected_text": r.detected_text,
-            "raw_text": r.raw_text or r.detected_text,
-            "ocr_confidence": round(r.ocr_confidence, 2) if r.ocr_confidence else 0.0,
-            "source_type": r.source_type or "license_plate",
-            "snapshot_url": r.snapshot_url,
-            "timestamp": format_ist_str(r.timestamp)
+            "id": o.id,
+            "camera_id": o.camera_id,
+            "track_uuid": o.track_uuid,
+            "detected_text": o.detected_text,
+            "raw_text": o.raw_text,
+            "ocr_confidence": round(o.ocr_confidence, 2) if o.ocr_confidence else 0.85,
+            "source_type": o.source_type,
+            "snapshot_url": o.snapshot_url,
+            "timestamp": format_ist_str(o.timestamp)
         })
     return {"total": total, "items": results}
 
 
 @router.get("/florence/stats")
-def get_florence_stats():
+def get_florence_stats(user=Depends(verify_viewer)):
     try:
-        return get_florence_queue_stats()
+        from ..ai.captioning.captioner import get_florence_queue_stats
+        from ..ai.captioning.moondream_captioner import get_moondream_stats
+        from ..config.service import get_models
+
+        f_stats = get_florence_queue_stats()
+        md_stats = get_moondream_stats()
+
+        merged_cam_stats = dict(f_stats.get("camera_stats", {}))
+        for cid, md_cam in md_stats.get("camera_stats", {}).items():
+            if cid not in merged_cam_stats or md_cam.get("last_caption"):
+                merged_cam_stats[cid] = md_cam
+
+        moondream_enabled = get_models().get("moondream", {}).get("enabled", True)
+        active_model = md_stats.get("model", "moondream3.1-9B-A2B") if moondream_enabled else "microsoft/Florence-2-base"
+
+        return {
+            "captioning": f_stats.get("captioning", 0) + md_stats.get("in_flight", 0),
+            "queue": f_stats.get("queue", 0) + md_stats.get("queue", 0),
+            "captioned": f_stats.get("captioned", 0) + md_stats.get("captioned", 0),
+            "active_cameras": f_stats.get("active_cameras", list(merged_cam_stats.keys())),
+            "camera_stats": merged_cam_stats,
+            "rotation_cursor": f_stats.get("rotation_cursor", 0),
+            "moondream_active": moondream_enabled,
+            "model": active_model
+        }
     except Exception:
-        return {"captioning": 0, "queue": 0}
+        return {"captioning": 0, "queue": 0, "captioned": 0, "camera_stats": {}}

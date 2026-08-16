@@ -37,8 +37,69 @@ class CameraRecorder:
             self.thread.join(timeout=5)
         stream_manager.release_stream(self.camera_id)
             
+    def _raise_recording_error(self, error_detail: str):
+        """Logs error, updates CameraHealthLog, creates CanonicalEvent, and publishes alert (REL-01)."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"[CameraRecorder:{self.camera_id}] CAMERA_RECORDING_ERROR: {error_detail}")
+        
+        db = SessionLocal()
+        try:
+            from ..database.models import CameraHealthLog, CanonicalEvent, _istnow
+            now_dt = _istnow()
+            # 1. Update/Add CameraHealthLog
+            health_log = CameraHealthLog(
+                camera_id=self.camera_id,
+                timestamp=now_dt,
+                status="CAMERA_RECORDING_ERROR",
+                fps=0.0
+            )
+            db.add(health_log)
+            
+            # 2. Raise CanonicalEvent alert
+            dedup_key = f"{self.camera_id}_CAMERA_RECORDING_ERROR_{int(now_dt.timestamp() // 30)}"
+            evt = CanonicalEvent(
+                event_uuid=f"ERR_REC_{self.camera_id}_{int(now_dt.timestamp())}",
+                deduplication_key=dedup_key,
+                camera_id=self.camera_id,
+                event_type="CAMERA_RECORDING_ERROR",
+                source_type="health",
+                source_component="recorder",
+                status="DETECTED",
+                severity="critical",
+                confidence=1.0,
+                message=f"Recording/disk failure on Camera {self.camera_id}: {error_detail}",
+                timestamp_start=now_dt,
+                timestamp_end=now_dt
+            )
+            db.add(evt)
+            db.commit()
+            
+            # 3. Publish to Kafka/EventBus
+            try:
+                from ..messaging.kafka_client import event_client
+                from ..utils.timezone import format_ist_str
+                event_client.publish_event("alerts", {
+                    "camera_id": self.camera_id,
+                    "type": "CAMERA_RECORDING_ERROR",
+                    "severity": "critical",
+                    "message": f"Recording/disk failure: {error_detail}",
+                    "timestamp": format_ist_str(now_dt),
+                })
+            except Exception as pe:
+                logger.debug(f"[CameraRecorder] Event publish note: {pe}")
+        except Exception as e:
+            logger.error(f"[CameraRecorder:{self.camera_id}] Error logging health failure: {e}")
+            db.rollback()
+        finally:
+            db.close()
+
     def _recording_loop(self):
-        os.makedirs(os.path.join(STORAGE_DIR, self.camera_id), exist_ok=True)
+        try:
+            os.makedirs(os.path.join(STORAGE_DIR, self.camera_id), exist_ok=True)
+        except Exception as e:
+            self._raise_recording_error(f"Failed to create storage directory: {e}")
+
         stream = stream_manager.get_stream(self.camera_id, self.stream_url)
 
         try:
@@ -57,31 +118,45 @@ class CameraRecorder:
                 filename = f"{timestamp_str}.mp4"
                 filepath = os.path.join(STORAGE_DIR, self.camera_id, filename)
 
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(filepath, fourcc, record_fps, (width, height))
-
                 try:
-                    segment_start = time.time()
-                    frames_written = 0
-                    last_frame_ts = 0.0
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    out = cv2.VideoWriter(filepath, fourcc, record_fps, (width, height))
+                    if not out.isOpened():
+                        self._raise_recording_error(f"cv2.VideoWriter failed to open {filepath}")
+                except Exception as e:
+                    self._raise_recording_error(f"VideoWriter initialization failed: {e}")
+                    out = None
 
-                    while self.running and (time.time() - segment_start) < self.segment_duration:
-                        success, frame, ts = stream.get_frame(last_frame_ts)
-                        if not success or frame is None:
+                frames_written = 0
+                if out and out.isOpened():
+                    try:
+                        segment_start = time.time()
+                        last_frame_ts = 0.0
+
+                        while self.running and (time.time() - segment_start) < self.segment_duration:
+                            success, frame, ts = stream.get_frame(last_frame_ts)
+                            if not success or frame is None:
+                                time.sleep(1.0 / record_fps)
+                                continue
+
+                            last_frame_ts = ts
+                            try:
+                                out.write(frame)
+                                frames_written += 1
+                            except Exception as write_err:
+                                self._raise_recording_error(f"Failed writing frame to disk: {write_err}")
+                                break
                             time.sleep(1.0 / record_fps)
-                            continue
-
-                        last_frame_ts = ts
-                        out.write(frame)
-                        frames_written += 1
-                        time.sleep(1.0 / record_fps)
-                finally:
-                    out.release()
+                    except Exception as loop_err:
+                        self._raise_recording_error(f"Recording loop error: {loop_err}")
+                    finally:
+                        out.release()
 
                 # Delete empty segment files or launch background web-H264 conversion
                 if frames_written == 0:
                     try:
-                        os.remove(filepath)
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
                     except OSError:
                         pass
                 else:
@@ -91,13 +166,15 @@ class CameraRecorder:
                             c_dir = os.path.abspath(os.path.join(STORAGE_DIR, "..", "h264_cache", cam_id))
                             os.makedirs(c_dir, exist_ok=True)
                             out_h264 = os.path.join(c_dir, f"h264_{f_name}")
-                            subprocess.run([
+                            res = subprocess.run([
                                 "ffmpeg", "-y", "-i", src_path,
                                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                                 "-movflags", "+faststart", out_h264
-                            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        except Exception:
-                            pass
+                            ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                            if res.returncode != 0:
+                                self._raise_recording_error(f"FFmpeg conversion failed: {res.stderr[:200] if res.stderr else 'code ' + str(res.returncode)}")
+                        except Exception as conv_err:
+                            self._raise_recording_error(f"FFmpeg invocation error: {conv_err}")
                     threading.Thread(target=_convert_to_h264, args=(filepath, self.camera_id, filename), daemon=True).start()
         finally:
             stream_manager.release_stream(self.camera_id)

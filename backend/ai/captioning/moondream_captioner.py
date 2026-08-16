@@ -28,7 +28,7 @@ import threading
 import uuid
 import queue
 from collections import deque
-from typing import Optional
+from typing import Optional, List
 
 import cv2
 import httpx
@@ -81,19 +81,144 @@ def _get_model_name() -> str:
     return os.getenv("MOONDREAM_MODEL", "moondream3.1-9B-A2B")
 
 MOONDREAM_PROMPT = (
-    "You are analyzing a surveillance frame. Generate a single detailed paragraph describing the current scene. "
-    "Count every visible object accurately and describe only what is directly observable.\n\n"
-    "Include:\n"
-    "• Total vehicle and person counts.\n"
-    "• For every vehicle: type, color, location (left/center/right, foreground/background), motion or parked status.\n"
-    "• Number of motorcycles/scooters and whether they have riders.\n"
-    "• Number of pedestrians, their actions, and clothing colors.\n"
-    "• Environment details: building entrances, doors, sidewalks, crosswalks, fences, trees, utility poles, advertisements.\n"
-    "• Exact transcription of any clearly readable license plates, shop names, signs, or banners.\n\n"
-    "Return a single coherent paragraph containing only positive factual observations from the frame. "
-    "Do not state negative claims such as 'No license plates are legible' or 'No shop names are readable'. "
-    "Do not speculate about identities, intentions, or events."
+    "You are a forensic security vision intelligence AI analyzing live CCTV footage. "
+    "Provide an exhaustive, highly detailed multi-sentence surveillance paragraph describing every authentic visual detail in this frame.\n\n"
+    "Instructions:\n"
+    "1. SCENE CONTEXT & ENVIRONMENT: Describe the complete spatial layout, road surface texture, lane dividers, curbs, sidewalks, buildings, trees/shrubs, streetlights, fences, weather conditions, shadows, and natural or artificial lighting.\n"
+    "2. VEHICLES (only if actually present): Identify every distinct vehicle in the frame. Detail its vehicle type (car, SUV, sedan, auto-rickshaw, motorcycle, scooter, delivery truck, bus), precise paint color, exact position (left/center/right, foreground/background), orientation, and state (moving, stationary, parked).\n"
+    "3. PEDESTRIANS & ATTIRE (only if actually present): State the exact count of people visible. For each person, describe their precise location, direction of movement, actions, upper garment style and color, lower garment style and color, and any accessories (backpack, handbag, helmet, umbrella).\n"
+    "4. TEXT, PLATES & OVERLAYS: Transcribe any visible camera text, timestamps, watermarks, license plates, road signs, or shop boards verbatim.\n"
+    "5. STRICT GROUNDING: Report ONLY what is physically visible. If the road or area is completely empty of vehicles and pedestrians, explicitly state that the roadway is clear and detail the quiet environment and pavement.\n\n"
+    "Output a comprehensive, natural narrative paragraph packed with precise descriptive visual detail."
 )
+
+
+def _format_caption_as_paragraph(text: str) -> str:
+    """Ensures caption is returned as a clean, fluent natural language paragraph rather than JSON."""
+    if not text:
+        return ""
+    text = text.strip()
+
+    # If text is JSON formatted, convert it into fluent paragraph prose
+    if text.startswith("{") or text.startswith("["):
+        try:
+            import json
+            obj = json.loads(text)
+            sentences = []
+            if isinstance(obj, dict):
+                # Vehicles
+                vehs = obj.get("VEHICLES")
+                if vehs:
+                    if isinstance(vehs, list):
+                        for v in vehs:
+                            if isinstance(v, dict):
+                                col = str(v.get("color", "")).replace("unidentified", "").strip()
+                                vtype = str(v.get("type", "vehicle")).replace("unidentified", "").strip()
+                                make = str(v.get("make") or v.get("model") or "").replace("unidentified", "").strip()
+                                pos = str(v.get("position", "")).replace("unidentified", "").strip()
+                                stat = str(v.get("status", "")).replace("unidentified", "").strip()
+                                label = f"{col} {make} {vtype}".strip() or "vehicle"
+                                sentences.append(f"A {label} is {stat} on the {pos}." if pos or stat else f"A {label} is present.")
+                    elif isinstance(vehs, dict):
+                        col = str(vehs.get("color", "")).replace("unidentified", "").strip()
+                        vtype = str(vehs.get("type", "vehicle")).replace("unidentified", "").strip()
+                        make = str(vehs.get("make") or vehs.get("model") or "").replace("unidentified", "").strip()
+                        pos = str(vehs.get("position", "")).replace("unidentified", "").strip()
+                        stat = str(vehs.get("status", "")).replace("unidentified", "").strip()
+                        label = f"{col} {make} {vtype}".strip() or "vehicle"
+                        sentences.append(f"A {label} is {stat} on the {pos}." if pos or stat else f"A {label} is present.")
+
+                # Two wheelers
+                tw = obj.get("TWO_WHEELERS")
+                if tw:
+                    if isinstance(tw, list):
+                        for t in tw:
+                            if isinstance(t, dict):
+                                col = str(t.get("color", "")).replace("unidentified", "").strip()
+                                make = str(t.get("make") or t.get("model") or "two-wheeler").replace("unidentified", "").strip()
+                                rc = t.get("rider_count")
+                                riders = f" with {rc} riders" if rc else ""
+                                sentences.append(f"A {col} {make}{riders} is visible.")
+                    elif isinstance(tw, dict):
+                        col = str(tw.get("color", "")).replace("unidentified", "").strip()
+                        make = str(tw.get("make") or tw.get("model") or "two-wheeler").replace("unidentified", "").strip()
+                        rc = tw.get("rider_count")
+                        riders = f" with {rc} riders" if rc else ""
+                        sentences.append(f"A {col} {make}{riders} is visible.")
+
+                # Pedestrians
+                peds = obj.get("PEDESTRIANS")
+                if peds:
+                    if isinstance(peds, dict):
+                        cnt = peds.get("count") or (len(peds.get("positions", [])) if isinstance(peds.get("positions"), list) else None) or "Several"
+                        cols = ", ".join(peds.get("clothing_colors", [])) if isinstance(peds.get("clothing_colors"), list) else ""
+                        col_str = f" wearing {cols}" if cols else ""
+                        sentences.append(f"{cnt} pedestrians{col_str} are active in the area.")
+                    elif isinstance(peds, list):
+                        sentences.append(f"{len(peds)} pedestrians are observed.")
+
+                # Text / Plates
+                txt = obj.get("TEXT")
+                if txt:
+                    if isinstance(txt, dict):
+                        lp = str(txt.get("license_plate") or txt.get("plate") or "").replace("unidentified", "").strip()
+                        loc = str(txt.get("location", "")).replace("unidentified", "").strip()
+                        if lp:
+                            sentences.append(f"License plate {lp} is visible {loc}." if loc else f"License plate {lp} is readable.")
+                    elif isinstance(txt, str) and txt != "unidentified":
+                        sentences.append(f"Visible text notes: {txt}.")
+
+                # Environment
+                env = obj.get("ENVIRONMENT")
+                if isinstance(env, dict):
+                    elems = [k for k, v in env.items() if v in (True, "yes", "visible", "present")]
+                    if elems:
+                        sentences.append(f"Surrounding environment features: {', '.join(elems)}.")
+
+            if sentences:
+                return " ".join(sentences).replace("  ", " ").strip()
+        except Exception:
+            pass
+
+    # Clean whitespace and newlines
+    cleaned = text.replace('\n\n', ' ').replace('\n', ' ').strip()
+
+    # Multi-Delimiter Clause Splitting & Sub-Phrase Repetition Pruning
+    import re
+    raw_clauses = [c.strip() for c in re.split(r'[.!?;]\s*|\s*,\s*(?=[A-Z0-9]|one\b|two\b|a\b)', cleaned) if c.strip()]
+    unique_clauses = []
+    seen_normalized = set()
+    phrase_counts = {}
+
+    for clause in raw_clauses:
+        norm = re.sub(r'[^a-z0-9]', '', clause.lower())
+        if not norm or len(norm) < 3:
+            continue
+        if norm in seen_normalized:
+            continue
+        words = re.findall(r'\b[a-z]{2,}\b', clause.lower())
+        is_repetitive = False
+        if len(words) >= 3:
+            for k in range(len(words) - 2):
+                tri = f"{words[k]}_{words[k+1]}_{words[k+2]}"
+                cnt = phrase_counts.get(tri, 0) + 1
+                phrase_counts[tri] = cnt
+                if cnt > 2:
+                    is_repetitive = True
+                    break
+        if is_repetitive:
+            continue
+        seen_normalized.add(norm)
+        formatted_clause = clause[0].upper() + clause[1:] if len(clause) > 1 else clause.upper()
+        unique_clauses.append(formatted_clause)
+
+    if unique_clauses:
+        joined = ". ".join(unique_clauses).strip()
+        if not joined.endswith("."):
+            joined += "."
+        cleaned = re.sub(r'\.+', '.', joined).replace(" .", ".")
+
+    return cleaned
 
 
 # ── Single-image API call (Round-Robin Multi-Key Rotation) ───────────────────
@@ -132,6 +257,9 @@ def _call_moondream_api(image_data_uri: str, corr_id: str) -> str:
     if not caption:
         raise RuntimeError(f"Empty response from API (Key #{key_idx}/{total_keys}): {data}")
 
+    # Format to guaranteed single natural language paragraph
+    caption = _format_caption_as_paragraph(caption)
+
     logger.info(f"[Moondream] corr={corr_id} Key #{key_idx}/{total_keys} API took {elapsed:.2f}s → {len(caption)} chars")
     return caption
 
@@ -153,7 +281,7 @@ _slots:    dict[str, _MoondreamCameraSlot] = {}
 _slots_lock = threading.Lock()
 
 # Async work queue: each item is (camera_id, frame_bytes_jpeg, yolo_summary, corr_id)
-_work_queue: queue.Queue = queue.Queue(maxsize=64)
+_work_queue: queue.Queue = queue.Queue(maxsize=256)
 
 _stats = {
     "captioned":  0,
@@ -317,7 +445,7 @@ def _persist_caption(camera_id: str, full_caption: str, frame: np.ndarray, corr_
         # Save exact frame snapshot asynchronously bound to vid
         try:
             from backend.workers.ai_worker import save_snapshot_async
-            save_snapshot_async(snap_path, frame)
+            save_snapshot_async(snap_path, frame, is_critical=True)
         except Exception as snap_err:
             logger.warning(f"[Moondream] Snapshot write error cam={camera_id}: {snap_err}")
 
@@ -328,16 +456,22 @@ def _persist_caption(camera_id: str, full_caption: str, frame: np.ndarray, corr_
         except Exception as e:
             logger.warning(f"[Moondream] Embedding error cam={camera_id}: {e}")
 
-        # Write to Postgres
-        with SessionLocal() as db:
-            db_caption = SceneCaption(
-                camera_id    = camera_id,
-                caption      = full_caption,
-                snapshot_url = snap_url,
-                timestamp    = now,
-            )
-            db.add(db_caption)
-            db.commit()
+        # Write to Database with retry
+        for db_attempt in range(2):
+            try:
+                with SessionLocal() as db:
+                    db_caption = SceneCaption(
+                        camera_id    = camera_id,
+                        caption      = full_caption,
+                        snapshot_url = snap_url,
+                        timestamp    = now,
+                    )
+                    db.add(db_caption)
+                    db.commit()
+                break
+            except Exception as db_err:
+                if db_attempt == 1:
+                    logger.warning(f"[Moondream] DB persist note cam={camera_id}: {db_err}")
 
         # Index in Qdrant
         if embedding:
@@ -429,18 +563,22 @@ def _persist_caption(camera_id: str, full_caption: str, frame: np.ndarray, corr_
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-_worker_thread_handle: Optional[threading.Thread] = None
+_worker_threads: List[threading.Thread] = []
 
-def start_moondream_worker():
-    """Call once at startup to launch the background worker thread."""
-    global _worker_thread_handle
-    if _worker_thread_handle and _worker_thread_handle.is_alive():
+def start_moondream_worker(num_workers: int = 4):
+    """Launch concurrent background worker threads draining the Moondream queue across API keys."""
+    global _worker_threads
+    if _worker_threads and any(t.is_alive() for t in _worker_threads):
         return
-    _worker_thread_handle = threading.Thread(
-        target=_worker_thread, daemon=True, name="MoondreamWorker"
-    )
-    _worker_thread_handle.start()
-    logger.info("[Moondream] Worker started")
+
+    _worker_threads = []
+    for i in range(num_workers):
+        t = threading.Thread(
+            target=_worker_thread, daemon=True, name=f"MoondreamWorker-{i+1}"
+        )
+        t.start()
+        _worker_threads.append(t)
+    logger.info(f"[Moondream] {len(_worker_threads)} concurrent workers started")
 
 
 def register_moondream_camera(camera_id: str):
@@ -462,7 +600,7 @@ def submit_moondream_caption(
 ) -> bool:
     """
     Submit a frame for Moondream captioning. Non-blocking.
-    Returns True if enqueued, False if camera already pending or queue full.
+    Guarantees that the exact frame is bound to image_id and pre-saved immediately.
     """
     from backend.ai.captioning.caption_integrity import caption_integrity_validator
     image_id, envelope = caption_integrity_validator.create_envelope(
@@ -481,6 +619,18 @@ def submit_moondream_caption(
         from ...utils.timezone import get_ist_now
         slot.pending       = True
         slot.pending_since = get_ist_now()
+
+    # Save exact frame snapshot immediately on dispatch so snapshot always matches caption
+    try:
+        snap_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage", "snapshots")
+        )
+        os.makedirs(snap_dir, exist_ok=True)
+        snap_path = os.path.join(snap_dir, f"{image_id}.jpg")
+        from backend.workers.ai_worker import save_snapshot_async
+        save_snapshot_async(snap_path, frame)
+    except Exception as e:
+        logger.warning(f"[Moondream] Snapshot pre-save note cam={camera_id}: {e}")
 
     try:
         _work_queue.put_nowait((camera_id, frame.copy(), yolo_summary, image_id))

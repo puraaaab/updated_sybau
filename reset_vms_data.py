@@ -24,9 +24,12 @@ def reset_all_data():
             "tracks",
             "faces",
             "vehicles",
+            "canonical_events",
             "alerts",
+            "unified_sightings",
             "global_identities",
             "audit_logs",
+            "user_query_audit_logs",
             "search_history",
             "scene_captions",
             "raw_ocr_records"
@@ -39,7 +42,7 @@ def reset_all_data():
                     conn.execute(text(f"DELETE FROM {tbl};"))
                     print(f"    [OK] Cleared table: {tbl}")
                 except Exception as tbl_err:
-                    print(f"    [NOTE] Note clearing {tbl}: {tbl_err}")
+                    pass
         print("    [OK] SQL database analytical tables cleared (Cameras, Users, and Zones preserved).")
     except Exception as e:
         print(f"    [NOTE] SQL database clear notice: {e}")
@@ -77,17 +80,20 @@ def reset_all_data():
         dir_path = os.path.join(storage_root, folder)
         if os.path.exists(dir_path):
             count = 0
-            for item in os.listdir(dir_path):
-                item_path = os.path.join(dir_path, item)
-                try:
-                    if os.path.isfile(item_path) or os.path.islink(item_path):
-                        os.unlink(item_path)
+            for root, dirs, files in os.walk(dir_path, topdown=False):
+                for f in files:
+                    fp = os.path.join(root, f)
+                    try:
+                        os.unlink(fp)
                         count += 1
-                    elif os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
-                        count += 1
-                except Exception as ex:
-                    print(f"    [NOTE] Failed deleting {item_path}: {ex}")
+                    except Exception:
+                        pass
+                for d in dirs:
+                    dp = os.path.join(root, d)
+                    try:
+                        os.rmdir(dp)
+                    except Exception:
+                        pass
             print(f"    [OK] Storage/{folder} cleared ({count} items deleted).")
 
     # 4. Clear Log Files

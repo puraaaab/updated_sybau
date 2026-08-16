@@ -7,7 +7,7 @@ from .wrong_direction import WrongDirectionDetector
 from .abandoned_object import AbandonedObjectDetector
 
 class BehaviorEngine:
-    def __init__(self, default_cooldown_seconds: float = 30.0):
+    def __init__(self, default_cooldown_seconds: float = 5.0):
         self.restricted_detector = RestrictedAreaDetector()
         self.loitering_detector = LoiteringDetector()
         self.running_detector = RunningDetector()
@@ -73,7 +73,7 @@ class BehaviorEngine:
         wdir_enabled       = wdir_cfg.get("enabled", False)
         abandoned_enabled  = abandoned_cfg.get("enabled", False)
 
-        loitering_sec  = loitering_cfg.get("time_threshold_seconds", 10.0)
+        loitering_sec  = loitering_cfg.get("time_threshold_seconds", 5.0)
         running_speed  = running_cfg.get("speed_threshold_pixels_per_second", 150.0)
         crowd_limit    = crowd_cfg.get("density_threshold", 5)
 

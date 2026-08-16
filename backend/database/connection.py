@@ -1,9 +1,12 @@
 import os
 import time
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# Fallback path for SQLite inside the project directory
+# Load .env configuration
+load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")))
+
 # Fallback path for SQLite inside the project directory
 LOCAL_DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "vms.db"))
 raw_db_url = os.getenv("DATABASE_URL", "")
@@ -17,9 +20,6 @@ if is_production and (not raw_db_url or "vms_password" in raw_db_url):
     )
 
 DATABASE_URL = raw_db_url or "postgresql://vms_user:vms_password@127.0.0.1:5432/vms_db"
-
-engine = None
-SessionLocal = None
 
 
 def _redacted_url(url: str) -> str:
@@ -36,31 +36,50 @@ def _redacted_url(url: str) -> str:
 
 
 try:
-    # Attempt to connect to PostgreSQL with retries (fast fail-out if offline to switch to SQLite)
+    # Attempt to connect to PostgreSQL with fast fail-out if offline to switch to SQLite
+    max_attempts = 15 if is_production else 1
+    timeout_secs = 10 if is_production else 1
+
+    # In local/dev mode, pre-probe socket to avoid hanging on unreachable PostgreSQL
+    if not is_production:
+        try:
+            from urllib.parse import urlparse
+            import socket
+            parsed_db = urlparse(DATABASE_URL)
+            db_host = parsed_db.hostname or "127.0.0.1"
+            db_port = parsed_db.port or 5432
+            probe_sock = socket.create_connection((db_host, db_port), timeout=0.8)
+            probe_sock.close()
+        except Exception as probe_err:
+            raise RuntimeError(f"PostgreSQL port unreachable ({probe_err})")
+
     engine = create_engine(
         DATABASE_URL,
         connect_args={"connect_timeout": 10},
-        pool_size=20,
-        max_overflow=20,
+        pool_size=50,
+        max_overflow=50,
+        pool_timeout=30,
         pool_pre_ping=True,
         pool_recycle=1800
     )
     connected = False
 
-    for attempt in range(15):
+    for attempt in range(max_attempts):
         try:
             with engine.connect() as conn:
                 print(f"Connected to PostgreSQL successfully ({_redacted_url(DATABASE_URL)}).")
                 connected = True
                 break
         except Exception as e:
-            if is_production and attempt == 14:
+            if is_production and attempt == max_attempts - 1:
                 raise
-            print(f"PostgreSQL not ready yet (attempt {attempt + 1}/15). Waiting 1s...")
+            if not is_production and attempt == max_attempts - 1:
+                raise RuntimeError(f"PostgreSQL unreachable: {e}")
+            print(f"PostgreSQL not ready yet (attempt {attempt + 1}/{max_attempts}). Waiting 1s...")
             time.sleep(1)
 
     if not connected:
-        raise RuntimeError("Failed to connect to PostgreSQL after 5 retries.")
+        raise RuntimeError("Failed to connect to PostgreSQL.")
 
 except Exception as e:
     if is_production:
@@ -75,6 +94,13 @@ except Exception as e:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA synchronous=NORMAL;")
+        try:
+            cursor.execute("PRAGMA table_info(cameras);")
+            cols = [row[1] for row in cursor.fetchall()]
+            if cols and "proximity_scale" not in cols:
+                cursor.execute("ALTER TABLE cameras ADD COLUMN proximity_scale FLOAT DEFAULT 1.25;")
+        except Exception:
+            pass
         cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

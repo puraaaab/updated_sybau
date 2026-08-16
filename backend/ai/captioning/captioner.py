@@ -46,7 +46,7 @@ MOCK_DESCRIPTIONS = [
     "An operator walking past the camera range."
 ]
 
-CAPTION_PROMPT = "<DETAILED_CAPTION>"
+CAPTION_PROMPT = "<MORE_DETAILED_CAPTION>"
 
 
 def _florence_dispatch_interval_seconds() -> float:
@@ -490,9 +490,7 @@ def generate_scene_caption(frame: np.ndarray, corr_id: str | None = None) -> str
 
 
 def get_florence_queue_stats() -> dict:
-    stats = _round_robin_scheduler.get_stats()
-    logger.debug(f"[FLORENCE-TRACE] stats poll: {stats}")
-    return stats
+    return _round_robin_scheduler.get_stats()
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +624,7 @@ def _async_caption_persister(florence_cap: str, metadata: dict):
             snap_path = os.path.join(snap_dir, f"{vid}.jpg")
             try:
                 from ...workers.ai_worker import save_snapshot_async
-                save_snapshot_async(snap_path, frame)
+                save_snapshot_async(snap_path, frame, is_critical=True)
             except Exception:
                 pass
 

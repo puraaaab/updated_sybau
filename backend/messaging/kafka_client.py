@@ -3,8 +3,11 @@ import os
 import uuid
 import datetime
 import logging
+import socket
 
 logger = logging.getLogger(__name__)
+# Suppress noisy internal kafka disconnect/reconnect tracebacks
+logging.getLogger("kafka").setLevel(logging.WARNING)
 
 class MemoryEventBus:
     """In-memory fallback queue for websocket-based alert delivery when Kafka is offline."""
@@ -26,7 +29,8 @@ memory_bus = MemoryEventBus()
 class KafkaEventClient:
     def __init__(self):
         self.producer = None
-        self.bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+        raw_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", os.getenv("KAFKA_HOST", "127.0.0.1:9092"))
+        self.bootstrap_servers = [s.strip() for s in raw_servers.split(",") if s.strip()] if "," in raw_servers else raw_servers
         self.use_memory_bus_only = os.getenv("USE_MEMORY_BUS_ONLY", "false").lower() == "true"
         self.connected = False
 
@@ -35,11 +39,17 @@ class KafkaEventClient:
             return
 
         try:
+            # Fast socket probe before attempting KafkaProducer initialization
+            _test_server = self.bootstrap_servers[0] if isinstance(self.bootstrap_servers, list) else self.bootstrap_servers
+            _host, _port = (_test_server.split(":") if ":" in _test_server else (_test_server, "9092"))
+            _s = socket.create_connection((_host, int(_port)), timeout=0.8)
+            _s.close()
+
             from kafka import KafkaProducer
             print(f"Connecting to Kafka broker at {self.bootstrap_servers}...")
             self.producer = KafkaProducer(
                 bootstrap_servers=self.bootstrap_servers,
-                key_serializer=lambda k: k.encode('utf-8') if isinstance(k, str) else k,
+                key_serializer=lambda k: str(k).encode('utf-8') if k is not None else b"",
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),
                 request_timeout_ms=2000,
                 max_block_ms=2000
@@ -51,7 +61,7 @@ class KafkaEventClient:
                 raise RuntimeError(f"FATAL: Kafka connection failed in production: {e}") from e
             logger.info(f"Kafka unavailable ({e}). Falling back to internal MemoryEventBus.")
 
-    def publish_event(self, topic: str, data: dict, partition_key: str = None):
+    def publish_event(self, topic: str, data: dict, partition_key: str | None = None):
         from ..utils.timezone import get_ist_now_iso
         schema_data = {
             "schema_version": "1.0.0",

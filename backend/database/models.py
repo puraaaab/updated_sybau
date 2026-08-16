@@ -47,6 +47,7 @@ class Camera(Base):
     height = Column(Integer, default=1080)
     latitude = Column(Float, default=21.1702)
     longitude = Column(Float, default=72.8311)
+    proximity_scale = Column(Float, default=1.25)
     organization_id = Column(String, default="org_default", index=True, nullable=False)
     site_id = Column(String, default="site_main", index=True, nullable=False)
 
@@ -57,6 +58,10 @@ class CanonicalEvent(Base):
     Serves as primary unified event ledger across Video, Audio, Spatial, and Fusion events.
     """
     __tablename__ = "events"
+    __table_args__ = (
+        Index("ix_events_camera_timestamp_start", "camera_id", "timestamp_start"),
+        Index("ix_events_camera_event_type", "camera_id", "event_type"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     event_uuid = Column(String, unique=True, index=True, nullable=False)
@@ -100,17 +105,39 @@ class CanonicalEvent(Base):
             ts = kwargs.pop("timestamp")
             kwargs["timestamp_start"] = ts
             kwargs["timestamp_end"] = ts
-        if "message" in kwargs and "metadata_json" not in kwargs:
-            kwargs["metadata_json"] = json.dumps({"message": kwargs.pop("message")})
-        elif "message" in kwargs:
-            kwargs.pop("message")
+
+        # Parse and populate metadata_json with extra parameters like message, latency_ms
+        meta = {}
+        if "metadata_json" in kwargs:
+            try:
+                meta = json.loads(kwargs["metadata_json"]) if isinstance(kwargs["metadata_json"], str) else dict(kwargs["metadata_json"])
+            except Exception:
+                meta = {}
+        if "message" in kwargs:
+            meta["message"] = kwargs.pop("message")
+        if "latency_ms" in kwargs:
+            meta["latency_ms"] = kwargs.pop("latency_ms")
+
+        kwargs["metadata_json"] = json.dumps(meta)
+
         if "event_uuid" not in kwargs:
             kwargs["event_uuid"] = f"EVT_{uuid.uuid4().hex[:8]}"
         if "deduplication_key" not in kwargs:
             cam = kwargs.get("camera_id", "cam")
             ev_type = kwargs.get("event_type", "alert")
             kwargs["deduplication_key"] = f"{cam}_{ev_type}_{int(time.time())}"
-        super().__init__(**kwargs)
+
+        # Only pass valid model column names to SQLAlchemy's declarative constructor
+        valid_cols = {c.name for c in self.__table__.columns}
+        filtered_kwargs = {}
+        for k, v in kwargs.items():
+            if k in valid_cols:
+                filtered_kwargs[k] = v
+            else:
+                meta[k] = v
+        filtered_kwargs["metadata_json"] = json.dumps(meta)
+
+        super().__init__(**filtered_kwargs)
 
     @hybrid_property
     def timestamp(self):
@@ -145,9 +172,9 @@ class Track(Base):
     id = Column(Integer, primary_key=True, index=True)
     track_uuid = Column(String, index=True, nullable=False)
     camera_id = Column(String, index=True, nullable=False)
-    label = Column(String, nullable=False)  # person, car, etc.
-    first_seen = Column(DateTime(timezone=True), default=_istnow)
-    last_seen = Column(DateTime(timezone=True), default=_istnow)
+    label = Column(String, index=True, nullable=False)  # person, car, etc.
+    first_seen = Column(DateTime(timezone=True), default=_istnow, index=True)
+    last_seen = Column(DateTime(timezone=True), default=_istnow, index=True)
     speed = Column(Float, default=0.0)      # px/s
     path_history = Column(Text, default="[]")  # JSON string of [[x,y], ...]
     last_bbox_x = Column(Float, default=0.5, nullable=False)
@@ -158,19 +185,27 @@ class Track(Base):
 
 class Face(Base):
     __tablename__ = "faces"
+    __table_args__ = (
+        Index("ix_faces_camera_timestamp", "camera_id", "timestamp"),
+        Index("ix_faces_label_timestamp", "label", "timestamp"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     track_uuid = Column(String, index=True, nullable=True)
+    camera_id = Column(String, index=True, nullable=True)
     embedding_id = Column(String, index=True, nullable=True)  # Qdrant UUID
-    label = Column(String, default="Unknown")
+    label = Column(String, default="Unknown", index=True)
     confidence = Column(Float, default=0.0, index=True)
-    timestamp = Column(DateTime(timezone=True), default=_istnow)
+    timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)
     organization_id = Column(String, default="org_default", index=True, nullable=False)
     site_id = Column(String, default="site_main", index=True, nullable=False)
 
 
 class Vehicle(Base):
     __tablename__ = "vehicles"
+    __table_args__ = (
+        Index("ix_vehicles_camera_timestamp", "camera_id", "timestamp"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     track_uuid = Column(String, index=True, nullable=True)
@@ -181,13 +216,16 @@ class Vehicle(Base):
     vehicle_color = Column(String, default="unknown", index=True)
     snapshot_url = Column(String, nullable=True)
     bbox = Column(Text, nullable=True)
-    timestamp = Column(DateTime(timezone=True), default=_istnow)
+    timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)
     organization_id = Column(String, default="org_default", index=True, nullable=False)
     site_id = Column(String, default="site_main", index=True, nullable=False)
 
 
 class RawOCR(Base):
     __tablename__ = "raw_ocr_records"
+    __table_args__ = (
+        Index("ix_raw_ocr_camera_timestamp", "camera_id", "timestamp"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     camera_id = Column(String, index=True, nullable=False)
@@ -481,6 +519,9 @@ class SearchHistory(Base):
 
 class SceneCaption(Base):
     __tablename__ = "scene_captions"
+    __table_args__ = (
+        Index("ix_scene_captions_camera_timestamp", "camera_id", "timestamp"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     camera_id = Column(String, index=True, nullable=False)
@@ -514,3 +555,193 @@ class ChatMessage(Base):
     citations_json = Column(Text, default="[]", nullable=False)
     timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)
 
+
+class PrivilegeElevationRequest(Base):
+    """Temporary Role Privilege Elevation Request with Time-to-Live (TTL) expiration (FEAT-02)."""
+    __tablename__ = "privilege_elevation_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_uuid = Column(String, unique=True, index=True, nullable=False)
+    username = Column(String, index=True, nullable=False)
+    requested_role = Column(String, default="admin", nullable=False)
+    base_role = Column(String, default="operator", nullable=False)
+    reason = Column(Text, nullable=False)
+    status = Column(String, default="PENDING", index=True, nullable=False)  # PENDING, APPROVED, REJECTED, EXPIRED, REVOKED
+    ttl_minutes = Column(Integer, default=60, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_istnow, index=True, nullable=False)
+    reviewed_by = Column(String, nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), index=True, nullable=True)
+    organization_id = Column(String, default="org_default", index=True, nullable=False)
+    site_id = Column(String, default="site_main", index=True, nullable=False)
+
+
+class UnifiedSighting(Base):
+    """
+    Unified Multi-Modal Sighting Entity.
+    Links YOLO tracks, Raw OCR readings, Scene Captions, Vehicle Journey events, and Biometric Faces.
+    """
+    __tablename__ = "unified_sightings"
+    __table_args__ = (
+        Index("ix_unified_cam_time", "camera_id", "timestamp"),
+        Index("ix_unified_track", "track_uuid"),
+        Index("ix_unified_plate", "license_plate"),
+        Index("ix_unified_class", "primary_class"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    sighting_uuid = Column(String, unique=True, index=True, nullable=False)
+    camera_id = Column(String, ForeignKey("cameras.id", ondelete="CASCADE"), index=True, nullable=False)
+    track_uuid = Column(String, index=True, nullable=True)
+    timestamp = Column(DateTime(timezone=True), default=_istnow, index=True, nullable=False)
+
+    # Object Attributes
+    primary_class = Column(String, nullable=False)  # "bus", "car", "person", "motorcycle", etc.
+    confidence = Column(Float, default=0.0)  # Multi-modal fused confidence
+    bbox_json = Column(Text, default="[0, 0, 0, 0]", nullable=False)  # JSON array [x1, y1, x2, y2]
+    speed_kmh = Column(Float, default=0.0)
+
+    # Foreign Relational Links (Nullable without breaking existing writes)
+    raw_ocr_id = Column(Integer, ForeignKey("raw_ocr_records.id", ondelete="SET NULL"), nullable=True)
+    scene_caption_id = Column(Integer, ForeignKey("scene_captions.id", ondelete="SET NULL"), nullable=True)
+    vehicle_event_id = Column(Integer, ForeignKey("vehicle_journey_events.id", ondelete="SET NULL"), nullable=True)
+    face_id = Column(Integer, ForeignKey("faces.id", ondelete="SET NULL"), nullable=True)
+
+    # Extracted Attributes & Signage
+    extracted_text = Column(String, nullable=True)
+    license_plate = Column(String, nullable=True)
+    visual_description = Column(Text, nullable=True)
+    attributes_json = Column(Text, default="{}", nullable=False)
+    snapshot_url = Column(String, nullable=True)
+
+    # Spatial Proximity & Depth Proxy Association
+    nearby_pedestrian_uuids = Column(Text, default="[]", nullable=False)  # JSON list of associated track UUIDs
+    proximity_flag = Column(String, default="ESTIMATED_DEPTH_PROXY")
+
+    organization_id = Column(String, default="org_default", index=True, nullable=False)
+    site_id = Column(String, default="site_main", index=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_istnow)
+
+
+class QueryAuditLog(Base):
+    """
+    Forensic Query Audit Ledger.
+    Records operator search queries, modes, matching records, and execution metadata.
+    """
+    __tablename__ = "query_audit_logs"
+    __table_args__ = (
+        Index("ix_query_audit_user_time", "username", "timestamp"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_uuid = Column(String, index=True, nullable=True)
+    username = Column(String, default="operator", index=True, nullable=False)
+    query_text = Column(Text, nullable=False)
+    search_mode = Column(String, default="all", nullable=False)  # 'all', 'face', 'plate', 'ocr'
+    matched_records_count = Column(Integer, default=0)
+    matched_sighting_ids = Column(Text, default="[]", nullable=False)  # JSON array
+    ip_address = Column(String, nullable=True)
+    execution_time_ms = Column(Float, default=0.0)
+    timestamp = Column(DateTime(timezone=True), default=_istnow, index=True)
+
+
+class CameraNode(Base):
+    """
+    Camera Topological Node with user-editable layout coordinates and spatial metadata.
+    """
+    __tablename__ = "camera_nodes"
+
+    camera_id = Column(String, ForeignKey("cameras.id", ondelete="CASCADE"), primary_key=True, index=True)
+    label = Column(String, nullable=False)
+    geo_lat = Column(Float, nullable=True)
+    geo_lng = Column(Float, nullable=True)
+    map_x = Column(Float, default=150.0, nullable=False)
+    map_y = Column(Float, default=150.0, nullable=False)
+    zone_group = Column(String, default="Main City", nullable=False)
+    is_active = Column(Boolean, default=True)
+    updated_at = Column(DateTime(timezone=True), default=_istnow)
+
+
+class CameraEdge(Base):
+    """
+    Directed Transit Edge between camera pairs with calibrated travel time boundaries.
+    """
+    __tablename__ = "camera_edges"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_camera_id = Column(String, ForeignKey("cameras.id", ondelete="CASCADE"), index=True, nullable=False)
+    target_camera_id = Column(String, ForeignKey("cameras.id", ondelete="CASCADE"), index=True, nullable=False)
+    distance_meters = Column(Float, default=500.0)
+    expected_transit_sec_min = Column(Integer, default=60, nullable=False)
+    expected_transit_sec_max = Column(Integer, default=300, nullable=False)
+    allowed_directions = Column(Text, default="[\"forward\"]", nullable=False)
+    is_active = Column(Boolean, default=True)
+
+
+class CoOccurrenceCluster(Base):
+    """
+    Spatio-Temporal Co-Occurrence / Convoy / Accomplice Candidate Group.
+    Requires explicit human investigator review (FLAGGED_PENDING_REVIEW -> CONFIRMED_CONVOY / DISMISSED_FALSE_POSITIVE).
+    """
+    __tablename__ = "co_occurrence_clusters"
+
+    id = Column(Integer, primary_key=True, index=True)
+    cluster_uuid = Column(String, unique=True, index=True, nullable=False)
+    primary_target_id = Column(String, index=True, nullable=False)
+    companion_target_id = Column(String, index=True, nullable=False)
+    primary_type = Column(String, default="vehicle", nullable=False)
+    companion_type = Column(String, default="vehicle", nullable=False)
+    sightings_count = Column(Integer, default=1, nullable=False)
+    cameras_count = Column(Integer, default=1, nullable=False)
+    cameras_involved_json = Column(Text, default="[]", nullable=False)
+    avg_time_delta_sec = Column(Float, default=0.0, nullable=False)
+    confidence_score = Column(Float, default=0.0, nullable=False)
+    status = Column(String, default="FLAGGED_PENDING_REVIEW", index=True, nullable=False)
+    reviewed_by = Column(String, nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    review_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_istnow)
+
+
+class StolenVehicleWatchlist(Base):
+    """
+    Stolen & Blacklisted Vehicle Watchlist (CCTNS / e-Challan Hot-List).
+    Auto-matched against OCR-extracted license plate detections.
+    """
+    __tablename__ = "stolen_vehicles_watchlist"
+
+    id = Column(Integer, primary_key=True, index=True)
+    plate_number = Column(String, unique=True, index=True, nullable=False)
+    vehicle_make_model = Column(String, default="Unknown", nullable=False)
+    vehicle_color = Column(String, default="Unknown", nullable=False)
+    vehicle_type = Column(String, default="car", nullable=False)  # car, suv, truck, motorcycle, bus
+    owner_name = Column(String, default="Unknown", nullable=False)
+    fir_number = Column(String, index=True, nullable=False)
+    police_station = Column(String, default="Central Police Station", nullable=False)
+    theft_date = Column(DateTime(timezone=True), default=_istnow)
+    status = Column(String, default="ACTIVE", index=True, nullable=False)  # ACTIVE, RECOVERED, IMPOUNDED
+    priority = Column(String, default="CRITICAL", nullable=False)  # CRITICAL, HIGH, MEDIUM
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_istnow)
+
+
+class PersonWatchlist(Base):
+    """
+    Wanted Criminals & Missing Persons Biometric Watchlist.
+    Auto-matched against 512-D ArcFace face embeddings.
+    """
+    __tablename__ = "person_watchlist"
+
+    id = Column(Integer, primary_key=True, index=True)
+    person_uuid = Column(String, unique=True, index=True, nullable=False)
+    full_name = Column(String, index=True, nullable=False)
+    alias = Column(String, nullable=True)
+    category = Column(String, default="WANTED_CRIMINAL", index=True, nullable=False)  # WANTED_CRIMINAL, MISSING_PERSON, HIGH_RISK_SUSPECT
+    case_reference = Column(String, index=True, nullable=False)  # e.g., FIR-884/2026/SEC-392
+    photo_url = Column(String, nullable=True)
+    face_embedding_json = Column(Text, default="[]", nullable=False)  # 512-D ArcFace vector
+    status = Column(String, default="ACTIVE", index=True, nullable=False)  # ACTIVE, APPREHENDED, TRACED
+    priority = Column(String, default="HIGH", nullable=False)  # CRITICAL, HIGH, MEDIUM
+    last_known_location = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_istnow)

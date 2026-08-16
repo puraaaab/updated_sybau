@@ -54,25 +54,107 @@ def normalize_text(text: str) -> str:
     return text
 
 
+_COLORS = {
+    "black", "white", "red", "blue", "green", "yellow", "silver", "gray", "grey",
+    "dark", "cyan", "orange", "brown", "purple", "pink", "maroon", "gold", "light"
+}
+
+_VEHICLE_SYNONYMS = {
+    "car": ["car", "sedan", "suv", "automobile", "hatchback", "coupe", "jeep", "creta", "swift", "baleno", "innova", "scorpio", "bolero", "ertiga", "fortuner", "nexon", "brezza", "venue", "wagonr", "altroz", "harrier", "safari", "thar"],
+    "motorcycle": ["motorcycle", "bike", "motorbike", "scooter", "scooty", "moped", "activa", "splendor", "pulsar", "bullet", "royalenfield", "apache", "shine", "platina", "jupiter"],
+    "bus": ["bus", "minibus", "volvo", "traveler"],
+    "truck": ["truck", "lorry", "tempo", "dumper", "eicher"],
+    "rickshaw": ["rickshaw", "auto", "tuk-tuk", "tuktuk", "auto-rickshaw"],
+    "van": ["van", "omni", "eeco", "ambulance"],
+    "bicycle": ["bicycle", "cycle"]
+}
+
+_PERSON_SYNONYMS = ["person", "man", "woman", "guy", "lady", "boy", "girl", "pedestrian", "individual", "suspect"]
+
+
 def _keyword_boost(query_text: str, candidate_text: str) -> float:
-    """Word-overlap + phrase-match boost used to nudge raw vector scores."""
-    q_text_norm = normalize_text(query_text)
-    q_words = {w for w in q_text_norm.split() if w not in STOPWORDS}
-    if not q_words:
+    """
+    Intelligent attribute-aware semantic boost & penalty calculation.
+    Enforces true compound matching and penalizes contradiction or missing target objects.
+    """
+    q_norm = normalize_text(query_text)
+    c_norm = normalize_text(candidate_text)
+    q_tokens = [w for w in q_norm.split() if w not in STOPWORDS]
+    if not q_tokens:
         return 0.0
 
-    text_comp_norm = normalize_text(candidate_text)
-    c_words = {w for w in text_comp_norm.split() if w not in STOPWORDS}
+    # 1. Check exact query substring in candidate text
+    if q_norm in c_norm:
+        return 0.40
 
-    boost = 0.0
-    intersect = q_words.intersection(c_words)
-    if intersect:
-        boost += float(len(intersect) / len(q_words)) * 0.4
+    # 2. Extract query colors and vehicle/person classes
+    q_colors = [w for w in q_tokens if w in _COLORS]
+    
+    q_vclass = None
+    for vcat, vlist in _VEHICLE_SYNONYMS.items():
+        if any(v in q_tokens for v in vlist):
+            q_vclass = vcat
+            break
 
-    if q_text_norm and q_text_norm in text_comp_norm:
-        boost += 0.5
+    q_is_person = any(p in q_tokens for p in _PERSON_SYNONYMS)
 
-    return boost
+    # 3. Vehicle-specific attribute verification
+    if q_vclass:
+        synonyms = _VEHICLE_SYNONYMS[q_vclass]
+        has_vclass = any(syn in c_norm for syn in synonyms)
+        
+        if not has_vclass:
+            # Candidate scene has NO instances of the requested vehicle category
+            return -0.45
+
+        if q_colors:
+            has_compound = False
+            for col in q_colors:
+                col_variants = [col, "dark"] if col == "black" else [col]
+                for cv in col_variants:
+                    for syn in synonyms:
+                        if f"{cv} {syn}" in c_norm:
+                            has_compound = True
+                            break
+                    if has_compound:
+                        break
+
+            if has_compound:
+                return 0.45
+            else:
+                # Target vehicle category is present, but NO instance matches requested color
+                return -0.35
+
+        return 0.25
+
+    # 4. Person-specific attribute verification
+    if q_is_person:
+        has_person = any(syn in c_norm for syn in _PERSON_SYNONYMS)
+        if not has_person:
+            return -0.45
+
+        if q_colors:
+            has_clothing_match = False
+            for col in q_colors:
+                for piece in ["top", "shirt", "upper", "bottom", "pants", "dress", "jacket", "tshirt", "backpack", "bag", "hoodie"]:
+                    if f"{col} {piece}" in c_norm:
+                        has_clothing_match = True
+                        break
+            if has_clothing_match:
+                return 0.40
+            else:
+                return -0.20
+        return 0.20
+
+    # 5. General token overlap calculation
+    c_tokens = set(c_norm.split())
+    matched = [w for w in q_tokens if w in c_tokens]
+    if len(matched) == len(q_tokens):
+        return 0.35
+    elif matched:
+        return float(len(matched) / len(q_tokens)) * 0.15
+
+    return 0.0
 
 
 def _seed_demo_vector_db():
@@ -177,7 +259,8 @@ def _sql_text_matches(query_text: str, limit: int = 10, start_time: str = None, 
     """
     try:
         from ..database.connection import SessionLocal
-        from ..database.models import SceneCaption, Vehicle, Face
+        from ..database.models import SceneCaption, Vehicle, Face, RawOCR
+        from sqlalchemy import or_
         q_norm = normalize_text(query_text)
         q_words = [w for w in q_norm.split() if w not in STOPWORDS and len(w) > 1]
         if not q_words:
@@ -187,10 +270,11 @@ def _sql_text_matches(query_text: str, limit: int = 10, start_time: str = None, 
         seen_snapshots = set()
 
         with SessionLocal() as db:
-            # 1. Search SceneCaptions
+            # 1. Search SceneCaptions (OR matching across keywords)
             query_sc = db.query(SceneCaption)
-            for word in q_words[:3]:
-                query_sc = query_sc.filter(SceneCaption.caption.ilike(f"%{word}%"))
+            sc_conds = [SceneCaption.caption.ilike(f"%{w}%") for w in q_words]
+            if sc_conds:
+                query_sc = query_sc.filter(or_(*sc_conds))
             if start_time:
                 query_sc = query_sc.filter(SceneCaption.timestamp >= start_time)
             if end_time:
@@ -204,8 +288,13 @@ def _sql_text_matches(query_text: str, limit: int = 10, start_time: str = None, 
                 if snap:
                     seen_snapshots.add(snap)
 
+                # Compute keyword overlap score
+                cap_lower = (sc.caption or "").lower()
+                matched_cnt = sum(1 for w in q_words if w in cap_lower)
+                sc_score = min(0.98, 0.70 + (0.10 * matched_cnt))
+
                 results.append({
-                    "score": 0.88,
+                    "score": sc_score,
                     "payload": {
                         "type": "scene",
                         "camera_id": sc.camera_id,
@@ -215,15 +304,44 @@ def _sql_text_matches(query_text: str, limit: int = 10, start_time: str = None, 
                     }
                 })
 
-            # 2. Search Vehicles (license plate, color, vehicle_type)
-            from sqlalchemy import or_
+            # 2. Search RawOCR for signboards, bus labels, shop text, banners
+            query_ocr = db.query(RawOCR)
+            ocr_conds = [RawOCR.raw_text.ilike(f"%{w}%") for w in q_words]
+            if ocr_conds:
+                query_ocr = query_ocr.filter(or_(*ocr_conds))
+            if start_time:
+                query_ocr = query_ocr.filter(RawOCR.timestamp >= start_time)
+            if end_time:
+                query_ocr = query_ocr.filter(RawOCR.timestamp <= end_time)
+
+            ocr_list = query_ocr.order_by(RawOCR.timestamp.desc()).limit(limit).all()
+            for o in ocr_list:
+                snap = o.snapshot_url or ""
+                if snap and snap in seen_snapshots:
+                    continue
+                if snap:
+                    seen_snapshots.add(snap)
+
+                results.append({
+                    "score": 0.92,
+                    "payload": {
+                        "type": "scene",
+                        "camera_id": o.camera_id,
+                        "caption": f"OCR Detected Text: {o.raw_text}",
+                        "snapshot_url": o.snapshot_url,
+                        "timestamp": o.timestamp.isoformat() if o.timestamp else ""
+                    }
+                })
+
+            # 3. Search Vehicles (license plate, color, vehicle_type)
             query_v = db.query(Vehicle)
             conds = []
-            for word in q_words[:3]:
-                conds.append(Vehicle.license_plate.ilike(f"%{word}%"))
-                conds.append(Vehicle.vehicle_color.ilike(f"%{word}%"))
-                conds.append(Vehicle.vehicle_type.ilike(f"%{word}%"))
-            query_v = query_v.filter(or_(*conds))
+            for w in q_words:
+                conds.append(Vehicle.license_plate.ilike(f"%{w}%"))
+                conds.append(Vehicle.vehicle_color.ilike(f"%{w}%"))
+                conds.append(Vehicle.vehicle_type.ilike(f"%{w}%"))
+            if conds:
+                query_v = query_v.filter(or_(*conds))
 
             if start_time:
                 query_v = query_v.filter(Vehicle.timestamp >= start_time)
@@ -342,21 +460,6 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
                 except Exception as e:
                     logger.debug(f"Qdrant person_crop query note: {e}")
 
-            # 3. Search Vehicle Re-ID / attribute vectors
-            try:
-                veh_res = client.query_points(
-                    collection_name="vms_embeddings",
-                    query=scene_query_vec,
-                    using="vehicle",
-                    query_filter=query_filter,
-                    limit=limit,
-                    with_payload=True
-                ).points
-                if veh_res:
-                    qd_results.extend(veh_res)
-            except Exception as e:
-                logger.debug(f"Qdrant vehicle query note: {e}")
-
         # BUG-05 FIX: detect vehicle-class keywords in the query so we can
         # penalise results whose yolo_class contradicts the requested class.
         _VEHICLE_CLASSES = {
@@ -368,23 +471,16 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
             (c for c in _VEHICLE_CLASSES if c in q_lower_norm.split()), None
         )
 
-        # BUG-05 FIX: minimum cosine similarity threshold for scene vectors.
-        # Scores below this are noise — discard before applying keyword boost.
         MIN_SCENE_SCORE = 0.55
 
         if qd_results:
             results = []
             seen_snapshots = set()
             snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
-            existing_snaps = set(os.listdir(snap_dir)) if os.path.exists(snap_dir) else set()
 
             for r in qd_results:
                 base_score = float(r.score)
-
-                # Drop scene results below the minimum similarity threshold
                 p_type = r.payload.get("type", "")
-                if p_type == "scene" and base_score < MIN_SCENE_SCORE:
-                    continue
 
                 snap_url = r.payload.get("snapshot_url") or ""
                 cam_id = r.payload.get("camera_id") or ""
@@ -395,16 +491,15 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
                         continue
                     seen_snapshots.add(snap_id)
 
-                    # Fast O(1) set lookup for file existence
+                    # Direct O(1) stat check on candidate file only
                     has_file = (
-                        f"{snap_id}.jpg" in existing_snaps or 
-                        snap_id in existing_snaps or 
-                        f"full_{snap_id}.jpg" in existing_snaps
+                        os.path.isfile(os.path.join(snap_dir, f"{snap_id}.jpg")) or 
+                        os.path.isfile(os.path.join(snap_dir, snap_id)) or 
+                        os.path.isfile(os.path.join(snap_dir, f"full_{snap_id}.jpg"))
                     )
                     if not has_file:
                         continue
 
-                score = base_score
                 text_to_compare = " ".join(filter(None, [
                     str(r.payload.get("caption") or ""),
                     str(r.payload.get("upper_color") or ""),
@@ -413,21 +508,18 @@ def perform_semantic_search(query_text: str, limit: int = 10, start_time: str = 
                     str(r.payload.get("vehicle_color") or ""),
                     str(r.payload.get("license_plate") or "")
                 ])).strip()
-                score += _keyword_boost(query_text, text_to_compare)
 
-                # BUG-05 FIX: penalise cross-class vehicle mismatches.
-                # If the query requests a specific vehicle class and the stored
-                # yolo_class contradicts it, subtract 0.3 from the score so that
-                # correct-class results always rank above wrong-class results.
-                if query_vehicle_class and p_type == "scene":
-                    stored_class = r.payload.get("yolo_class") or ""
-                    if stored_class and stored_class != query_vehicle_class:
-                        score -= 0.3
+                boost_or_penalty = _keyword_boost(query_text, text_to_compare)
+                score = base_score + boost_or_penalty
+
+                # Drop scene results below the minimum similarity threshold
+                if score < MIN_SCENE_SCORE:
+                    continue
 
                 score = min(score, 0.99)  # Cap score at 0.99 so UI doesn't exceed 99%
 
                 payload = dict(r.payload)
-                if snap_id and f"full_{snap_id}.jpg" in existing_snaps:
+                if snap_id and os.path.isfile(os.path.join(snap_dir, f"full_{snap_id}.jpg")):
                     payload["full_snapshot_url"] = f"/api/v1/playback/snapshot/full_{snap_id}"
                 elif snap_url:
                     payload["full_snapshot_url"] = snap_url
@@ -496,6 +588,58 @@ def perform_face_search(face_embedding: list, limit: int = 10, start_time: str =
                     continue
             sim = cosine_similarity(face_embedding, item["vector"])
             if sim >= MIN_FACE_SCORE:
+                matches.append({"score": sim, "payload": item["payload"]})
+
+    matches = sorted(matches, key=lambda x: x["score"], reverse=True)
+    return matches[:limit]
+
+
+def perform_vehicle_search(vehicle_embedding: list, limit: int = 10, start_time: str = None, end_time: str = None) -> list:
+    """
+    Performs vector similarity search matching query vehicle embedding (576-dim)
+    against indexed vehicles, optionally filtered by time range.
+    """
+    is_production = os.getenv("APP_ENV") == "production"
+    query_filter = _build_qdrant_time_filter(start_time, end_time)
+    MIN_VEHICLE_SCORE = 0.40
+
+    try:
+        from .qdrant_utils import qdrant_client_with_timeout
+        with qdrant_client_with_timeout(2.0) as client:
+            qd_results = client.query_points(
+                collection_name="vms_embeddings",
+                query=vehicle_embedding,
+                using="vehicle",
+                query_filter=query_filter,
+                limit=limit,
+                with_payload=True
+            ).points
+
+        if qd_results:
+            valid_results = [
+                {"score": float(r.score), "payload": r.payload}
+                for r in qd_results
+                if float(r.score) >= MIN_VEHICLE_SCORE
+            ]
+            if valid_results:
+                return sorted(valid_results, key=lambda x: x["score"], reverse=True)
+    except Exception as e:
+        if is_production:
+            raise RuntimeError(f"FATAL: Qdrant vehicle search failed in production: {e}") from e
+        logger.warning("Qdrant unavailable for vehicle search, falling back to in-memory: %s", e)
+
+    # Fallback: in-memory cosine similarity
+    matches = []
+    for item in model_manager.vector_db:
+        if item["payload"].get("type") == "vehicle":
+            item_ts = item["payload"].get("timestamp")
+            if item_ts:
+                if start_time and item_ts < start_time:
+                    continue
+                if end_time and item_ts > end_time:
+                    continue
+            sim = cosine_similarity(vehicle_embedding, item["vector"])
+            if sim >= MIN_VEHICLE_SCORE:
                 matches.append({"score": sim, "payload": item["payload"]})
 
     matches = sorted(matches, key=lambda x: x["score"], reverse=True)

@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..database.connection import get_db
-from ..database.models import Alert, AuditLog, Camera
+from ..database.models import Alert, AuditLog, Camera, EvidenceChainOfCustody
 from ..auth.helpers import verify_operator, verify_viewer
 from .event_export import compute_sha256, _parse_segment_timestamp
 from ..utils.audit import log_audit_event
@@ -48,49 +48,83 @@ def _parse_forensic_time(ts_str):
 
 @router.get("/exports")
 def get_forensic_exports_ledger(user=Depends(verify_viewer), db: Session = Depends(get_db)):
-    """Return list of compiled forensic evidence exports."""
+    """Return list of compiled forensic evidence exports from EvidenceLedger."""
     os.makedirs(EXPORT_DIR, exist_ok=True)
-    logs = db.query(AuditLog).filter(AuditLog.action == "EVIDENCE_EXPORT").order_by(AuditLog.timestamp.desc()).all()
+    from ..database.models import EvidenceLedger, Camera
+    from ..utils.timezone import format_ist_str
+
+    cams_map = {c.id: c.name for c in db.query(Camera).all()}
+    ledgers = db.query(EvidenceLedger).order_by(EvidenceLedger.created_at.desc()).all()
     
     result = []
-    for log in logs:
-        parts = log.detail.split("|") if log.detail else []
-        cam_name = parts[0] if len(parts) > 0 else "System"
-        sha = parts[1] if len(parts) > 1 else "N/A"
-        zip_file = parts[2] if len(parts) > 2 else ""
-        start_t = parts[3] if len(parts) > 3 else ""
-        end_t = parts[4] if len(parts) > 4 else ""
-        
-        ts_ist = _to_naive_ist(log.timestamp)
-        ts_str = ts_ist.strftime("%H:%M:%S IST") if ts_ist else (log.timestamp.isoformat() if log.timestamp else "N/A")
+    for entry in ledgers:
+        cam_name = cams_map.get(entry.camera_id, entry.camera_id)
+        zip_filename = os.path.basename(entry.original_file_path) if entry.original_file_path else ""
+        ts_ist = _to_naive_ist(entry.created_at)
+        ts_str = ts_ist.strftime("%H:%M:%S IST") if ts_ist else (entry.created_at.isoformat() if entry.created_at else "N/A")
 
         result.append({
-            "export_uuid": str(log.id),
+            "export_uuid": entry.evidence_uuid,
+            "camera_id": entry.camera_id,
             "camera_name": cam_name,
-            "username": log.username or "operator",
+            "username": entry.creator_username or "operator",
             "role": "operator",
             "timestamp": ts_str,
-            "start_time": start_t,
-            "end_time": end_t,
-            "sha256_hash": sha,
+            "start_time": format_ist_str(entry.start_time) if entry.start_time else "",
+            "end_time": format_ist_str(entry.end_time) if entry.end_time else "",
+            "sha256_hash": entry.sha256_hash,
+            "manifest_signature": entry.manifest_signature,
             "timestamp_authority": "VMS Server Internal (NTP-synced IST / Asia/Kolkata)",
-            "mp4_download_url": f"/api/v1/forensics/download/{zip_file}" if zip_file else None,
-            "sidecar_download_url": f"/api/v1/forensics/download/{zip_file}" if zip_file else None
+            "mp4_download_url": f"/api/v1/forensics/download/{zip_filename}" if zip_filename else None,
+            "sidecar_download_url": f"/api/v1/forensics/download/{zip_filename}" if zip_filename else None
         })
+
+    # Legacy fallback: if EvidenceLedger has no rows, check legacy AuditLog entries
+    if not result:
+        logs = db.query(AuditLog).filter(AuditLog.action == "EVIDENCE_EXPORT").order_by(AuditLog.timestamp.desc()).all()
+        for log in logs:
+            parts = log.detail.split("|") if log.detail else []
+            cam_name = parts[0] if len(parts) > 0 else "System"
+            sha = parts[1] if len(parts) > 1 else "N/A"
+            zip_file = parts[2] if len(parts) > 2 else ""
+            start_t = parts[3] if len(parts) > 3 else ""
+            end_t = parts[4] if len(parts) > 4 else ""
+            ts_ist = _to_naive_ist(log.timestamp)
+            ts_str = ts_ist.strftime("%H:%M:%S IST") if ts_ist else (log.timestamp.isoformat() if log.timestamp else "N/A")
+
+            result.append({
+                "export_uuid": str(log.id),
+                "camera_name": cam_name,
+                "username": log.username or "operator",
+                "role": "operator",
+                "timestamp": ts_str,
+                "start_time": start_t,
+                "end_time": end_t,
+                "sha256_hash": sha,
+                "timestamp_authority": "VMS Server Internal (NTP-synced IST / Asia/Kolkata)",
+                "mp4_download_url": f"/api/v1/forensics/download/{zip_file}" if zip_file else None,
+                "sidecar_download_url": f"/api/v1/forensics/download/{zip_file}" if zip_file else None
+            })
         
     return result
 
 @router.delete("/exports/clear", status_code=200)
 def clear_forensic_exports_ledger(user=Depends(verify_operator), db: Session = Depends(get_db)):
     """Purge forensic export history ledger entries."""
-    count = db.query(AuditLog).filter(AuditLog.action == "EVIDENCE_EXPORT").delete()
+    from ..database.models import EvidenceLedger
+    count_ledger = db.query(EvidenceLedger).delete()
+    count_audit = db.query(AuditLog).filter(AuditLog.action == "EVIDENCE_EXPORT").delete()
     db.commit()
-    return {"message": f"Cleared {count} forensic evidence export ledger entries."}
+    return {"message": f"Cleared {count_ledger + count_audit} forensic evidence export ledger entries."}
 
 import subprocess
 
 @router.get("/available-range")
-def get_camera_recording_range(camera_id: str = Query(...), db: Session = Depends(get_db)):
+def get_camera_recording_range(
+    camera_id: str = Query(...),
+    user=Depends(verify_viewer),
+    db: Session = Depends(get_db)
+):
     """Returns the start and end timestamp of available recording footage for a camera in IST."""
     cam_rec_dir = os.path.join(RECORDINGS_DIR, camera_id)
     if not os.path.exists(cam_rec_dir) and os.path.exists(RECORDINGS_DIR):

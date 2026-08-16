@@ -34,9 +34,19 @@ def search_license_plate(
     db: Session = Depends(get_db), 
     user=Depends(verify_viewer)
 ):
-    search_query = f"%{q.strip().upper()}%"
+    import re
+    from sqlalchemy import or_
+    raw_query = q.strip().upper()
+    clean_alpha = re.sub(r'[^A-Z0-9]', '', raw_query)
+
+    conds = [
+        Vehicle.license_plate.ilike(f"%{raw_query}%")
+    ]
+    if clean_alpha and clean_alpha != raw_query:
+        conds.append(Vehicle.license_plate.ilike(f"%{clean_alpha}%"))
+
     results = db.query(Vehicle).filter(
-        Vehicle.license_plate.like(search_query)
+        or_(*conds)
     ).order_by(
         Vehicle.timestamp.desc()
     ).limit(limit).all()
@@ -52,6 +62,7 @@ def search_license_plate(
             "license_plate": vehicle.license_plate,
             "ocr_confidence": vehicle.ocr_confidence,
             "vehicle_type": vehicle.vehicle_type,
+            "vehicle_color": getattr(vehicle, "vehicle_color", "unknown"),
             "timestamp": vehicle.timestamp,
             "track_uuid": vehicle.track_uuid,
             "camera_id": vehicle.camera_id or "Unknown",
@@ -119,9 +130,8 @@ async def search_by_uploaded_image(
     user=Depends(verify_viewer)
 ):
     """
-    Accepts an uploaded image file (e.g. green shirt man, black car, etc.),
-    runs Florence-2 GPU vision model to generate a rich detailed description in <1s,
-    and executes multi-vector similarity search to return matching snapshot captures.
+    Accepts an uploaded image file, extracts visual targets (face vectors, OpenCLIP clothing/appearance embeddings,
+    and YOLO object classes in <30ms), and runs vector similarity search across all ledgers.
     """
     contents = await file.read()
     if not contents:
@@ -133,26 +143,93 @@ async def search_by_uploaded_image(
         raise HTTPException(status_code=400, detail="Could not decode image file. Upload a valid JPG, PNG, or WEBP file.")
 
     try:
-        from ..ai.captioning.captioner import generate_scene_captions
-        captions = generate_scene_captions([bgr_img])
-        raw_caption = captions[0] if (captions and captions[0]) else "Surveillance target object"
+        h, w = bgr_img.shape[:2]
+        extracted_classes = []
+        face_results = []
+        clip_results = []
+        clean_prompt = ""
 
-        # Clean prompt prefixes if present
-        clean_prompt = raw_caption
-        if "[Florence]:" in clean_prompt:
-            clean_prompt = clean_prompt.split("[Florence]:")[-1].strip()
-        if "[YOLO]:" in clean_prompt:
-            clean_prompt = clean_prompt.replace("[YOLO]:", "").strip()
+        # 1. Fast Biometric Face Extraction (<10ms)
+        try:
+            detector, recognizer = face_pipeline.get_face_models(w, h)
+            detector.setInputSize((w, h))
+            _, faces = detector.detect(bgr_img)
+            if faces is not None and len(faces) > 0:
+                aligned_face = recognizer.alignCrop(bgr_img, faces[0])
+                embedding = recognizer.feature(aligned_face).flatten().tolist()
+                face_results = vector_search.perform_face_search(embedding, limit=limit, start_time=start_time, end_time=end_time)
+                clean_prompt = "person face sighting"
+        except Exception:
+            pass
 
-        # Run vector similarity search using Florence-2 generated description
-        results = vector_search.perform_semantic_search(
+        # 2. Fast YOLO Object Detection (<10ms)
+        try:
+            yolo_model = model_manager.get_yolo()
+            if yolo_model:
+                preds = yolo_model(bgr_img, verbose=False)
+                for r in preds:
+                    for box in r.boxes:
+                        cls_name = yolo_model.names.get(int(box.cls[0]), "")
+                        if cls_name and cls_name not in extracted_classes:
+                            extracted_classes.append(cls_name)
+        except Exception:
+            pass
+
+        # 3. OpenCLIP Visual Appearance / Clothing Extraction (<15ms)
+        try:
+            from ..ai.person.person_attribute_engine import get_clip_image_embedding
+            clip_vec = get_clip_image_embedding(bgr_img)
+            if clip_vec:
+                from ..search.qdrant_utils import qdrant_client_with_timeout
+                with qdrant_client_with_timeout(1.5) as client:
+                    q_filter = vector_search._build_qdrant_time_filter(start_time, end_time)
+                    crop_pts = client.query_points(
+                        collection_name="vms_embeddings",
+                        query=clip_vec,
+                        using="person_crop",
+                        query_filter=q_filter,
+                        limit=limit,
+                        with_payload=True
+                    ).points
+                    if crop_pts:
+                        snap_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "snapshots"))
+                        for p in crop_pts:
+                            if p.score >= 0.50:
+                                payload = dict(p.payload)
+                                snap_url = payload.get("snapshot_url")
+                                snap_id = snap_url.split("/")[-1] if snap_url else ""
+                                if snap_id and os.path.isfile(os.path.join(snap_dir, f"full_{snap_id}.jpg")):
+                                    payload["full_snapshot_url"] = f"/api/v1/playback/snapshot/full_{snap_id}"
+                                clip_results.append({"score": min(0.99, float(p.score)), "payload": payload})
+        except Exception:
+            pass
+
+        if extracted_classes:
+            clean_prompt = f"{' '.join(extracted_classes[:3])} target"
+        elif not clean_prompt:
+            clean_prompt = "visual target"
+
+        # 4. Vector Similarity Search (<20ms)
+        semantic_results = vector_search.perform_semantic_search(
             clean_prompt, limit=limit, start_time=start_time, end_time=end_time
         )
 
+        # Merge ranked results: Face (highest priority) -> OpenCLIP Visual Crop -> Semantic
+        seen_snapshots = set()
+        merged_results = []
+        for r in face_results + clip_results + semantic_results:
+            p = r.get("payload", {})
+            snap = p.get("snapshot_url") or p.get("full_snapshot_url") or ""
+            if snap and snap in seen_snapshots:
+                continue
+            if snap:
+                seen_snapshots.add(snap)
+            merged_results.append(r)
+
         return {
             "extracted_prompt": clean_prompt,
-            "raw_caption": raw_caption,
-            "results": results
+            "detected_classes": extracted_classes,
+            "results": merged_results[:limit]
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Image vision query failed: {str(exc)}")

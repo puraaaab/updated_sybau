@@ -30,7 +30,7 @@ export default function WatchlistManager({ token }) {
   const loadWatchlist = useCallback(() => {
     if (!token) return;
     setLoading(true);
-    fetch('/api/v1/watchlist', {
+    fetch('/api/v1/watchlist/', {
       headers: { 'Authorization': `Bearer ${token}` }
     })
       .then(res => res.ok ? res.json() : [])
@@ -76,7 +76,7 @@ export default function WatchlistManager({ token }) {
     formData.append('file', photoFile);
 
     try {
-      const res = await fetch('/api/v1/watchlist', {
+      const res = await fetch('/api/v1/watchlist/', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` },
         body: formData
@@ -299,7 +299,7 @@ export default function WatchlistManager({ token }) {
                         <TableRow key={poi.id} hover>
                           <TableCell>
                             <Avatar
-                              src={poi.face_crop_url}
+                              src={poi.face_crop_url ? (token ? `${poi.face_crop_url}?token=${encodeURIComponent(token)}` : poi.face_crop_url) : undefined}
                               variant="rounded"
                               sx={{ width: 44, height: 44, border: '1.5px solid', borderColor: 'primary.main', backgroundColor: '#0a0f1d' }}
                             >

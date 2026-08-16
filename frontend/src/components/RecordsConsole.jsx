@@ -65,6 +65,14 @@ export default function RecordsConsole({ token }) {
 
   const authHeaders = token ? { 'Authorization': `Bearer ${token}` } : {};
 
+  const authUrl = (url) => {
+    if (!url) return null;
+    if (token && !url.includes('token=')) {
+      return url.includes('?') ? `${url}&token=${encodeURIComponent(token)}` : `${url}?token=${encodeURIComponent(token)}`;
+    }
+    return url;
+  };
+
   const fetchStats = async () => {
     try {
       const res = await fetch('/api/v1/records/stats', { headers: authHeaders });
@@ -419,7 +427,7 @@ export default function RecordsConsole({ token }) {
                             {row.snapshot_url ? (
                               <Box
                                 component="img"
-                                src={row.snapshot_url}
+                                src={authUrl(row.snapshot_url)}
                                 alt="Face Crop"
                                 onError={(e) => { e.target.onerror = null; e.target.src = '/api/v1/playback/snapshot/default'; }}
                                 onClick={() => setPreviewImage(row.snapshot_url)}
@@ -476,7 +484,7 @@ export default function RecordsConsole({ token }) {
                             {row.snapshot_url ? (
                               <Box
                                 component="img"
-                                src={row.snapshot_url}
+                                src={authUrl(row.snapshot_url)}
                                 alt="Vehicle Snapshot"
                                 onError={(e) => { e.target.onerror = null; e.target.src = '/api/v1/playback/snapshot/default'; }}
                                 onClick={() => setPreviewImage(row.snapshot_url)}
@@ -550,7 +558,7 @@ export default function RecordsConsole({ token }) {
                             {row.snapshot_url ? (
                               <Box
                                 component="img"
-                                src={row.snapshot_url}
+                                src={authUrl(row.snapshot_url)}
                                 alt="Plate Snapshot"
                                 onError={(e) => { e.target.onerror = null; e.target.src = '/api/v1/playback/snapshot/default'; }}
                                 onClick={() => setPreviewImage(row.snapshot_url)}
@@ -614,7 +622,7 @@ export default function RecordsConsole({ token }) {
                             {row.snapshot_url ? (
                               <Box
                                 component="img"
-                                src={row.snapshot_url}
+                                src={authUrl(row.snapshot_url)}
                                 alt="OCR Snapshot"
                                 onError={(e) => { e.target.onerror = null; e.target.src = '/api/v1/playback/snapshot/default'; }}
                                 onClick={() => setPreviewImage(row.snapshot_url)}
@@ -723,7 +731,7 @@ export default function RecordsConsole({ token }) {
                                 {row.snapshot_url ? (
                                   <Box
                                     component="img"
-                                    src={row.snapshot_url}
+                                    src={authUrl(row.snapshot_url)}
                                     alt="AI Scene Frame"
                                     onClick={() => setPreviewImage({ url: row.snapshot_url, caption: cleanCaption, camera_id: row.camera_id, timestamp: row.timestamp })}
                                     sx={{
@@ -825,7 +833,7 @@ export default function RecordsConsole({ token }) {
                 {(typeof previewImage === 'string' ? previewImage : previewImage?.url) && (
                   <Box
                     component="img"
-                    src={typeof previewImage === 'string' ? previewImage : previewImage.url}
+                    src={authUrl(typeof previewImage === 'string' ? previewImage : previewImage.url)}
                     alt="Snapshot Preview"
                     sx={{ width: '100%', maxHeight: '70vh', objectFit: 'contain', borderRadius: 1, border: '1px solid #334155', mb: previewImage?.caption ? 2 : 0 }}
                   />
@@ -843,7 +851,7 @@ export default function RecordsConsole({ token }) {
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', mt: 2, pt: 1, borderTop: '1px solid', borderColor: 'divider' }}>
               <TablePagination
                 component="div"
-                count={(activeTab === 0 ? facesData : activeTab === 1 ? vehiclesData : activeTab === 2 ? platesData : captionsData).total || 0}
+                count={(activeTab === 0 ? facesData : activeTab === 1 ? vehiclesData : activeTab === 2 ? platesData : activeTab === 3 ? ocrData : captionsData).total || 0}
                 page={page - 1}
                 onPageChange={(e, newPage) => setPage(newPage + 1)}
                 rowsPerPage={rowsPerPage}

@@ -53,6 +53,28 @@ def _write_json(filename, data):
         return False
 
 def get_cameras():
+    try:
+        from ..database.connection import SessionLocal
+        from ..database.models import Camera
+        with SessionLocal() as db:
+            cams = db.query(Camera).all()
+            if cams is not None and len(cams) > 0:
+                return [
+                    {
+                        "id": c.id,
+                        "name": c.name,
+                        "stream_url": c.stream_url,
+                        "status": c.status,
+                        "width": c.width,
+                        "height": c.height,
+                        "location": c.location or "Unknown",
+                        "latitude": getattr(c, "latitude", 21.1702),
+                        "longitude": getattr(c, "longitude", 72.8311),
+                    }
+                    for c in cams
+                ]
+    except Exception:
+        pass
     return _read_json("cameras.json", default=[])
 
 def save_cameras(cameras_data):

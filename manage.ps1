@@ -105,8 +105,8 @@ function Start-VMS {
         Write-Host "  Starting Docker infrastructure containers..."
         Set-Location $ProjectRoot
         cmd.exe /c "docker compose up -d postgres qdrant mediamtx minio zookeeper kafka"
-        Write-Host "  Waiting for infrastructure services..."
-        Start-Sleep -Seconds 1
+        Write-Host "  Waiting for infrastructure services to initialize..."
+        Start-Sleep -Seconds 3
     } else {
         Write-Host "  Docker Desktop daemon not responding - system using local fallback database." -ForegroundColor Yellow
     }

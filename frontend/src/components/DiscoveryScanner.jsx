@@ -1,4 +1,4 @@
-﻿import React, { useState } from 'react';
+import React, { useState } from 'react';
 import {
   Box, Typography, Grid, Paper, TextField, Button, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Alert, CircularProgress
 } from '@mui/material';
@@ -28,7 +28,7 @@ export default function DiscoveryScanner({ token }) {
     setResolvedUrls({});
     setErrorMsg('');
 
-    fetch('/api/cameras/scan', {
+    fetch('/api/v1/cameras/scan', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${token}` }
     })
@@ -60,7 +60,7 @@ export default function DiscoveryScanner({ token }) {
     setErrorMsg('');
 
     try {
-      const res = await fetch('/api/cameras/resolve-onvif', {
+      const res = await fetch('/api/v1/cameras/resolve-onvif', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -108,7 +108,7 @@ export default function DiscoveryScanner({ token }) {
       status: "online"
     };
 
-    fetch('/api/cameras', {
+    fetch('/api/v1/cameras', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

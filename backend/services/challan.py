@@ -61,8 +61,8 @@ def generate_echallan_citation(
     cam = db.query(Camera).filter(Camera.id == alert.camera_id).first()
     cam_name = cam.name if cam else alert.camera_id
     cam_loc = cam.location if cam else "Municipal Traffic Junction"
-    lat = getattr(cam, "latitude", 21.1950) if cam else 21.1950
-    lng = getattr(cam, "longitude", 72.8200) if cam else 72.8200
+    lat = float(cam.latitude) if (cam and getattr(cam, "latitude", None) is not None) else 21.1950
+    lng = float(cam.longitude) if (cam and getattr(cam, "longitude", None) is not None) else 72.8200
 
     now = get_ist_now()
     now_str = now.strftime("%Y-%m-%d %H:%M:%S IST")

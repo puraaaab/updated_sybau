@@ -54,9 +54,16 @@ class CameraStream:
         self.running = True
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
-        self.audio_thread = threading.Thread(target=self._audio_extraction_loop, daemon=True)
-        self.audio_thread.start()
-        logger.info(f"[StreamManager] Capture and Audio threads started for Camera {self.camera_id}")
+        
+        # Start PyAV audio extraction only if acoustic engine is enabled in config
+        from ..config.service import get_models
+        audio_cfg = get_models().get("audio", {})
+        if audio_cfg.get("enabled", False):
+            self.audio_thread = threading.Thread(target=self._audio_extraction_loop, daemon=True)
+            self.audio_thread.start()
+            logger.info(f"[StreamManager] Capture and Audio threads started for Camera {self.camera_id}")
+        else:
+            logger.info(f"[StreamManager] Capture thread started for Camera {self.camera_id}")
 
     def stop(self):
         self.running = False
@@ -100,6 +107,11 @@ class CameraStream:
                     for r_frame in resampled_frames:
                         pcm_bytes = r_frame.to_ndarray().tobytes()
                         self.audio_queue.put(pcm_bytes)
+                        try:
+                            from ..ai.audio.acoustic_engine import production_audio_engine
+                            production_audio_engine.process_pcm_chunk(self.camera_id, pcm_bytes)
+                        except Exception as a_err:
+                            logger.debug(f"[StreamManager] Audio engine dispatch note: {a_err}")
         except Exception as e:
             logger.debug(f"[StreamManager] PyAV audio demux note for Camera {self.camera_id}: {e}")
 
